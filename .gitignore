@@ -1,0 +1,9 @@
+agent-tools/
+.DS_Store
+*.pyc
+__pycache__/
+/chr
+*.chr
+*.verify.json
+/models/
+

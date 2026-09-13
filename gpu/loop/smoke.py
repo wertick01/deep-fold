@@ -37,6 +37,7 @@ import torch  # noqa: E402
 
 from gpu.host import load_model  # noqa: E402
 from gpu.loop import TokenLoop, nf4_max_n  # noqa: E402
+from gpu.nf4.plan import LIVE_MAX_N  # noqa: E402
 
 MODEL_ID = os.environ.get("DEEPFOLD_MODEL", r"C:\dev\models\Qwen2.5-3B-Instruct")
 CHR_PATH = os.environ.get("DEEPFOLD_CHR", r"C:\dev\models\qwen25-3b.nf4.chr")
@@ -167,7 +168,7 @@ def main() -> int:
         loop.prefill_chunk = 1
         loop.reset()
         narrow = loop.prefill(ids_en).float()
-        loop.prefill_chunk = min(nf4_max_n(16), loop.max_seq)
+        loop.prefill_chunk = min(nf4_max_n(LIVE_MAX_N), loop.max_seq)
         delta = (wide - narrow).abs().max().item()
         same = int(wide.argmax()) == int(narrow.argmax())
         gate_prefill = same and delta < 1.0

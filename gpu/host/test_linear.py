@@ -1,6 +1,8 @@
 """GPU-free: ``nf4_linear`` does not pad tails; the kernel owns N=2..16.
 
     python -m gpu.host.test_linear
+
+N=32 is still two live launches (16+16). The BN=32 tile is plan-only.
 """
 
 from __future__ import annotations
@@ -71,6 +73,15 @@ def main() -> int:
             torch.zeros(1, 17, k, dtype=torch.bfloat16), packed, scale, m, k, k_pad
         )
         check(calls == [(k, 16), (k, 1)], f"N=17 remainder stays decode {calls}")
+
+        calls.clear()
+        linear_mod.nf4_linear(
+            torch.zeros(1, 32, k, dtype=torch.bfloat16), packed, scale, m, k, k_pad
+        )
+        check(
+            calls == [(k, 16), (k, 16)],
+            f"N=32 still chunks 16+16 (wide tile is plan-only) {calls}",
+        )
     finally:
         linear_mod.nf4_gemm = original
 

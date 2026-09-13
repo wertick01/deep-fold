@@ -72,6 +72,9 @@ def nf4_max_n(probe: int = 16) -> int:
     Wave 2 shipped a decode-only GEMM (``N != 1`` -> rc -2, docs/spec/stitch-gpu.md),
     which decides whether the prompt can be prefilled in one forward or has to be
     walked token by token. Asked, not assumed: agent 6 may have widened it.
+    ``probe`` is the TokenLoop chunk; keep it at ``LIVE_MAX_N`` (16) until the
+    n32/n64 tiles are wired and measured. This function probes N=2, then returns
+    ``probe`` -- it does not launch N=probe.
     """
     if not torch.cuda.is_available():
         return 1

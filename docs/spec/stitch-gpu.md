@@ -17,6 +17,7 @@
 | MMA | только `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32`. Не `wmma`, не `m8n8k4`, не INT4 MMA. |
 | Decode-тайл | `BM=128`, `BN=8` (pad), `BK=256` (кратно 64), `block=256`, stages=3. |
 | Prefill-тайл (волна 3) | `BM=64`, `BN=16`, `BK=128`, `block=256`, stages=3. `N∈[2,16]`; `N>16` режет хост на куски ≤16. `N=1` остаётся decode-launch. |
+| Prefill N=17..64 (план) | `BN=32` (N=17..32) и `BN=64` (N=33..64), тот же `BM=64`/`BK=128`. Описывает `gpu/nf4/plan.py`; `chr_nf4_gemm` по-прежнему -2. TokenLoop не поднимать. Следующий пол TTFT (167 vs 52 мс); ncu ~5% DRAM. |
 | `x` в ядре | BF16, row-major **`[K, N]`**. `y` — BF16 **`[M, N]`**. HF `[..., K]` транспонирует хост. |
 | Память | Python владеет тензорами. Ядро не делает `cudaMalloc` на токене. |
 | Черновик `W` | в HBM **нет**. Деквант только в регистрах / smem-кольце packed. |

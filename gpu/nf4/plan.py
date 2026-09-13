@@ -6,8 +6,17 @@ the occupancy fix: BM=64 plus split-K (128 / 64 CTAs on those shapes). This
 file duplicates the ``.cu`` arithmetic so occupancy can be asserted without a
 GPU; if they diverge, the kernel is the truth.
 
-``CLASSIC`` BM=128 ``N==1``, force only (wave-2). ``SMALL`` BM=64 ``N==1`` auto.
-``PREFILL`` BM=64, ``N`` in 2..16 (BN=8 smem when N<=8, BN=16 otherwise).
+Kernel families (sequence ``N``; some notes call this M):
+
+* ``N==1`` decode: ``SMALL`` BM=64 auto, ``CLASSIC`` BM=128 force only (wave-2).
+* ``N=2..8`` / ``N=9..16``: live prefill (BN=8 / BN=16). TokenLoop chunks here.
+* ``N=17..32`` planned BN=32; ``N=33..64`` planned BN=64 (prefill-oriented GEMM).
+
+``LIVE_MAX_N == 16`` is the WAVE freeze: do not raise TokenLoop / ``chr_nf4_gemm``
+past 16 until the wide kernels are wired and measured. Decode ~31.6 tok/s is
+the default path. N>=17 is the next TTFT floor (167 vs 52 ms); ncu already
+showed the current GEMM is not HBM-bound (~5% DRAM on 3B ``q_proj``), so the
+wide tile is more MMA per dequant, not a bandwidth play.
 """
 
 from __future__ import annotations
@@ -18,9 +27,13 @@ __all__ = [
     "CLASSIC",
     "SMALL",
     "PREFILL",
+    "PREFILL_N32",
+    "PREFILL_N64",
     "ONE_WAVE",
     "TARGET_CTAS",
     "GROUP_SIZE",
+    "LIVE_MAX_N",
+    "PLAN_MAX_N",
     "Plan",
     "k_pad",
     "plan",
@@ -29,6 +42,8 @@ __all__ = [
 CLASSIC = 0
 SMALL = 1
 PREFILL = 2
+PREFILL_N32 = 3
+PREFILL_N64 = 4
 
 GROUP_SIZE = 64
 
@@ -38,17 +53,43 @@ ONE_WAVE = 70
 #: Two CTAs per SM, which is what ``__launch_bounds__`` asks for.
 TARGET_CTAS = 140
 
+#: Live ``chr_nf4_gemm`` / TokenLoop ceiling. Raising this is the unfreeze.
+LIVE_MAX_N = 16
+#: Planner can describe N=17..64 (BN=32 / BN=64). Launch still returns -2.
+PLAN_MAX_N = 64
+
 _TILES = {
     #        bm,  bk, block, smem
     CLASSIC: (128, 256, 256, 3 * 128 * 128 + 3 * 256 * 2),
     SMALL: (64, 128, 128, 3 * 64 * 64 + 3 * 128 * 2),
     PREFILL: (64, 128, 256, 3 * 64 * 64 + 3 * 128 * 16 * 2),
+    PREFILL_N32: (64, 128, 256, 3 * 64 * 64 + 3 * 128 * 32 * 2),
+    PREFILL_N64: (64, 128, 256, 3 * 64 * 64 + 3 * 128 * 64 * 2),
+}
+
+_PATH_NAME = {
+    CLASSIC: "classic",
+    SMALL: "small",
+    PREFILL: "prefill",
+    PREFILL_N32: "prefill_n32",
+    PREFILL_N64: "prefill_n64",
 }
 
 
 def _prefill_smem(n: int) -> int:
-    """BN=8 for N<=8, BN=16 for N=9..16. Must match nf4_gemm.cu plan_impl."""
-    bn = 8 if int(n) <= 8 else 16
+    """BN for this N. Must match nf4_gemm.cu plan_impl.
+
+    N=2..8 -> 8; 9..16 -> 16 (live); 17..32 -> 32; 33..64 -> 64 (planned).
+    """
+    n = int(n)
+    if n <= 8:
+        bn = 8
+    elif n <= 16:
+        bn = 16
+    elif n <= 32:
+        bn = 32
+    else:
+        bn = 64
     return 3 * 64 * 64 + 3 * 128 * bn * 2
 
 
@@ -79,12 +120,17 @@ class Plan:
 
     @property
     def path_name(self) -> str:
-        return {CLASSIC: "classic", SMALL: "small", PREFILL: "prefill"}[self.path]
+        return _PATH_NAME[self.path]
 
     @property
     def waves(self) -> float:
         """CTAs per SM on this card. Below 1.0 some SM never gets work."""
         return self.ctas / ONE_WAVE
+
+    @property
+    def live(self) -> bool:
+        """True for the TokenLoop dispatch (decode + n8/n16). False = plan-only."""
+        return self.path in (CLASSIC, SMALL, PREFILL)
 
 
 def _pick_split(grid_x: int, n_ktiles: int, have_ws: bool, force_split: int,
@@ -108,7 +154,7 @@ def _pick_split(grid_x: int, n_ktiles: int, have_ws: bool, force_split: int,
 def plan(
     M: int,  # noqa: N803 - out_features, the kernel's name for it
     K: int,  # noqa: N803
-    N: int = 1,  # noqa: N803 - sequence columns, 1..16
+    N: int = 1,  # noqa: N803 - sequence columns, 1..64 (1..16 live)
     *,
     K_pad: int | None = None,  # noqa: N803
     have_ws: bool = True,
@@ -120,12 +166,19 @@ def plan(
 
     Auto decode (``N==1``) is BM=64 plus split-K (occupancy fix).
     ``have_ws=False`` pins ``split_k`` to 1 (plain ``chr_nf4_gemm``).
+
+    ``N=2..16`` is the live prefill tile (BN=8 or 16). ``N=17..64`` is the
+    planned wide family: same BM/BK as n16 so 3B decode split-K counts stay
+    128/64, but TokenLoop does not launch these (host still chunks at 16).
     """
     M, K, N = int(M), int(K), int(N)
     if M < 1 or K < 1:
         raise ValueError(f"M and K must be >= 1, got M={M} K={K}")
-    if not 1 <= N <= 16:
-        raise ValueError(f"N={N} not in 1..16 (the host chunks N>16)")
+    if not 1 <= N <= PLAN_MAX_N:
+        raise ValueError(
+            f"N={N} not in 1..{PLAN_MAX_N} (live launch is 1..{LIVE_MAX_N}; "
+            f"the host chunks TokenLoop above {LIVE_MAX_N})"
+        )
     kp = k_pad(K) if K_pad is None else int(K_pad)
     if kp != k_pad(K):
         raise ValueError(f"K_pad={kp} != 64*ceil(K/64) = {k_pad(K)}")
@@ -137,11 +190,17 @@ def plan(
         path = SMALL if force_path is None else (
             SMALL if force_path == SMALL else CLASSIC
         )
-    else:
+    elif N <= LIVE_MAX_N:
+        # WAVE freeze: N<=16 never selects the n32/n64 tiles, even if someone
+        # passes force_path=PREFILL_N32. TokenLoop and nf4_linear stay on n8/n16.
         path = PREFILL
+    elif N <= 32:
+        path = PREFILL_N32
+    else:
+        path = PREFILL_N64
 
     bm, bk, block, smem = _TILES[path]
-    if path == PREFILL:
+    if path in (PREFILL, PREFILL_N32, PREFILL_N64):
         smem = _prefill_smem(N)
     grid_x = _ceil_div(M, bm)
     n_ktiles = _ceil_div(kp, bk)
@@ -153,7 +212,8 @@ def plan(
             grid_x, n_ktiles, have_ws, force_split, one_wave
         )
 
-    ws_floats = split * M * (N if path == PREFILL else 1) if split > 1 else 0
+    uses_n = path not in (CLASSIC, SMALL)
+    ws_floats = split * M * (N if uses_n else 1) if split > 1 else 0
     return Plan(
         path=path,
         grid_x=grid_x,

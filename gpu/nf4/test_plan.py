@@ -18,10 +18,13 @@ needs the card.
 4. the split-K workspace stays a reduction buffer -- orders of magnitude under
    a dense ``[M, K]`` BF16 weight, because "no resident dense W" has to survive
    the occupancy fix;
-5. ``N`` outside 1..16 and a wrong ``K_pad`` are refused;
-6. when ``chr_nf4_ext`` happens to be importable, the pure-Python planner and
-   the one compiled into the ``.cu`` agree field by field. The ``.cu`` is the
-   truth; a mismatch is a bug in ``gpu/nf4/plan.py``.
+5. ``N`` outside 1..64 and a wrong ``K_pad`` are refused; N=17..64 is the
+   planned wide family (not the live TokenLoop path);
+6. when ``chr_nf4_ext`` happens to be importable **and up to date**, the
+   pure-Python planner and the one compiled into the ``.cu`` agree field by
+   field on live N=1..16. The ``.cu`` is the truth; a mismatch is a bug in
+   ``gpu/nf4/plan.py``. This check skips (does not JIT) if sources are newer
+   than the extension -- the 3B lab owns the 3080.
 """
 
 from __future__ import annotations
@@ -35,8 +38,12 @@ if str(_REPO) not in sys.path:
 
 from gpu.nf4.plan import (  # noqa: E402
     CLASSIC,
+    LIVE_MAX_N,
     ONE_WAVE,
+    PLAN_MAX_N,
     PREFILL,
+    PREFILL_N32,
+    PREFILL_N64,
     SMALL,
     Plan,
     k_pad,
@@ -144,7 +151,7 @@ def test_split_tiles_exactly() -> None:
     ok = True
     bad = []
     for _, m, k in SHAPES_3B:
-        for n in (1, 2, 4, 8, 16):
+        for n in (1, 2, 4, 8, 16, 32, 64):
             for one_wave in (1, 16, 70, 140):
                 p = plan(m, k, n, one_wave=one_wave)
                 covered = p.grid_y * p.tiles_per_split
@@ -180,7 +187,7 @@ def test_workspace_is_not_a_dense_weight() -> None:
         dense = m * k_pad(k) * 2  # BF16 [M, K]: the weight we never materialise
         for n in (1, 2, 4, 8, 16):
             p = plan(m, k, n)
-            n_eff = n if p.path == PREFILL else 1
+            n_eff = n if p.path not in (CLASSIC, SMALL) else 1
             shape_ok &= p.ws_floats == (p.grid_y * m * n_eff if p.grid_y > 1 else 0)
             ws = p.ws_floats * 4
             small_ok &= ws < dense
@@ -200,14 +207,14 @@ def test_workspace_is_not_a_dense_weight() -> None:
 
 
 def test_rejects() -> None:
-    for n in (0, 17, -1):
+    for n in (0, -1, PLAN_MAX_N + 1, 128):
         try:
             plan(2048, 2048, n)
         except ValueError:
             continue
-        check(False, f"N={n} should be refused (host chunks N>16)")
+        check(False, f"N={n} should be refused")
         return
-    check(True, "N outside 1..16 refused")
+    check(True, f"N outside 1..{PLAN_MAX_N} refused")
 
     try:
         plan(2048, 100, 1, K_pad=100)
@@ -224,13 +231,105 @@ def test_rejects() -> None:
         check(False, "M < 1 should be refused")
 
 
+def test_decode_cta_freeze() -> None:
+    """Do not change the split-K decode counts that produced 128/64."""
+    q = plan(2048, 2048, 1)
+    k = plan(256, 2048, 1)
+    check(
+        q.ctas == 128 and q.path == SMALL and q.bm == 64,
+        f"q_proj decode stays 128 CTAs (got {q.ctas} path={q.path_name})",
+    )
+    check(
+        k.ctas == 64 and k.path == SMALL and k.bm == 64,
+        f"k_proj decode stays 64 CTAs (got {k.ctas} path={k.path_name})",
+    )
+
+
+def test_wide_family_is_plan_only() -> None:
+    """N=17..64 is a planned tile; N<=16 stays n8/n16. Same BM/BK as n16."""
+    check(LIVE_MAX_N == 16, "WAVE freeze: live N is 16")
+    p16 = plan(2048, 2048, 16)
+    p17 = plan(2048, 2048, 17)
+    p32 = plan(2048, 2048, 32)
+    p33 = plan(2048, 2048, 33)
+    p64 = plan(2048, 2048, 64)
+    check(
+        p16.path == PREFILL and p16.live and p16.smem_bytes == 24576,
+        f"N=16 stays live n16 (path={p16.path_name} smem={p16.smem_bytes})",
+    )
+    check(
+        p17.path == PREFILL_N32 and not p17.live and p17.smem_bytes == 36864,
+        f"N=17 is planned n32 (path={p17.path_name} smem={p17.smem_bytes})",
+    )
+    check(
+        p32.path == PREFILL_N32 and p32.smem_bytes == 36864
+        and p32.bm == p16.bm and p32.bk == p16.bk
+        and p32.grid_x == p16.grid_x and p32.grid_y == p16.grid_y
+        and p32.ctas == p16.ctas,
+        f"N=32 shares n16 BM/BK/split-K ({p32.grid_x},{p32.grid_y}) "
+        f"ctas={p32.ctas}",
+    )
+    check(
+        p33.path == PREFILL_N64 and p64.path == PREFILL_N64
+        and p64.smem_bytes == 61440
+        and p64.smem_bytes < 99 * 1024
+        and p32.smem_bytes < 99 * 1024,
+        f"N=33..64 is planned n64 smem={p64.smem_bytes}B",
+    )
+    padded = plan(2048, 2048, 16, force_path=PREFILL_N32)
+    check(
+        padded.path == PREFILL,
+        "force_path cannot select n32 for live N<=16",
+    )
+    src = Path(__file__).resolve().parents[1] / "loop" / "generate.py"
+    text = src.read_text(encoding="utf-8")
+    check(
+        "nf4_max_n(LIVE_MAX_N)" in text,
+        "TokenLoop.prefill_chunk still probes LIVE_MAX_N (not 32/64)",
+    )
+
+    wide_ok = True
+    worst_ws = 0
+    for _, m, k in SHAPES_3B:
+        dense = m * k_pad(k) * 2
+        for n in (17, 32, 64):
+            p = plan(m, k, n)
+            wide_ok &= p.ws_floats == (p.grid_y * m * n if p.grid_y > 1 else 0)
+            wide_ok &= p.ws_floats * 4 <= dense
+            worst_ws = max(worst_ws, p.ws_floats * 4)
+            wide_ok &= _filled(p)
+    check(
+        wide_ok,
+        f"wide N workspace is still split_k x M x N and at most dense W "
+        f"(largest {worst_ws / 1024:.0f} KiB; k_proj N=64 ties BF16 W bytes)",
+    )
+
+
 def test_matches_extension() -> None:
     """Cross-check against the planner compiled into nf4_gemm.cu, if present.
 
     Without the extension this check cannot be made, so it is a skip and not a
     pass: a green tick here would claim ``plan.py`` had been compared against
     the ``.cu`` on a box that never loaded it (wave8-runtime D12).
+    Does not JIT and does not import ``gpu.nf4`` (torch) until the inplace
+    binary is up to date -- the 3B lab owns the 3080.
     """
+    nf4_dir = Path(__file__).resolve().parent
+    sources = (nf4_dir / "bindings.cpp", nf4_dir / "nf4_gemm.cu")
+    try:
+        from gpu.ext_bin import find_ext
+    except Exception as exc:  # noqa: BLE001
+        skip(f"C planner cross-check: {type(exc).__name__}: {exc}")
+    matches = find_ext(nf4_dir, "chr_nf4_ext")
+    if not matches:
+        skip("C planner cross-check: no chr_nf4_ext (not JIT-loading on the live 3B lab)")
+    pyd = matches[0]
+    src_newer = any(s.is_file() and s.stat().st_mtime > pyd.stat().st_mtime for s in sources)
+    if src_newer:
+        skip(
+            "C planner cross-check: chr_nf4_ext older than gpu/nf4 sources "
+            "(not JIT-loading on the live 3B lab)"
+        )
     try:
         from gpu.nf4 import nf4_plan, nf4_set_tuning
     except Exception as exc:  # noqa: BLE001 - no torch / no card is not a failure
@@ -244,7 +343,7 @@ def test_matches_extension() -> None:
     fields = [f for f in Plan.__dataclass_fields__ if f in probe]
     ok = True
     for _, m, k in SHAPES_3B:
-        for n in (1, 2, 3, 4, 8, 9, 16):
+        for n in (1, 2, 3, 4, 8, 9, 16, 17, 32, 64):
             for have_ws in (True, False):
                 c = nf4_plan(m, k, n, have_ws=have_ws)
                 p = plan(m, k, n, have_ws=have_ws)
@@ -276,6 +375,8 @@ def main() -> int:
         test_split_tiles_exactly,
         test_workspace_is_not_a_dense_weight,
         test_rejects,
+        test_decode_cta_freeze,
+        test_wide_family_is_plan_only,
         test_matches_extension,
     ):
         try:

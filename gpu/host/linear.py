@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 
 from ._deps import ChrMatrix, nf4_gemm
+from gpu.nf4.plan import LIVE_MAX_N
 
 __all__ = ["CompressedLinear", "nf4_linear", "k_pad"]
 
@@ -39,8 +40,9 @@ def nf4_linear(
 
     HuggingFace hands ``[..., K]``; the kernel wants ``[K, N]`` and returns
     ``[M, N]``. ``N = prod(lead)``: decode launch when ``N==1`` (a view, no
-    transpose copy); ``N<=16`` is one prefill GEMM; ``N>16`` is chunked here
-    because ``chr_nf4_gemm`` returns -2 above 16 (docs/spec/stitch-gpu.md).
+    transpose copy); ``N<=LIVE_MAX_N`` (16) is one prefill GEMM; ``N>16`` is
+    chunked here because live ``chr_nf4_gemm`` returns -2 above 16. The host
+    does not pad tails to 16. Wide N=32/64 is plan-only (``gpu.nf4.plan``).
     """
     if x.shape[-1] != K:
         raise ValueError(f"x has {x.shape[-1]} features, this linear takes K={K}")
@@ -63,13 +65,13 @@ def nf4_linear(
         return out.view(*lead, M)
 
     x2 = x.contiguous().view(n, K)
-    if n <= 16:
+    if n <= LIVE_MAX_N:
         xk = x2.transpose(0, 1).contiguous()  # [K, N]
         y = nf4_gemm(packed, scale, xk, M, K, K_pad)  # bf16 [M, N]
     else:
         cols = []
-        for start in range(0, n, 16):
-            sl = x2[start : start + 16]
+        for start in range(0, n, LIVE_MAX_N):
+            sl = x2[start : start + LIVE_MAX_N]
             xk = sl.transpose(0, 1).contiguous()
             cols.append(nf4_gemm(packed, scale, xk, M, K, K_pad))
         y = torch.cat(cols, dim=1)

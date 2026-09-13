@@ -14,7 +14,7 @@ const char *gemm_err(int rc) {
   case -1:
     return "null pointer";
   case -2:
-    return "N not in [1,16] (host must chunk N>16)";
+    return "N out of range (live 1..16, plan 1..64)";
   case -3:
     return "invalid M/K or null packed/scale";
   case -4:
@@ -129,7 +129,7 @@ void nf4_set_tuning(int64_t path, int64_t split_k, int64_t one_wave) {
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("nf4_gemm", &nf4_gemm,
-        "chr_nf4_gemm: y[M,N] = dequant_nf4(packed,scale) @ x[K,N], N in 1..16");
+        "chr_nf4_gemm: y[M,N] = dequant_nf4(packed,scale) @ x[K,N], live N in 1..16");
   m.def("nf4_plan", &nf4_plan,
         "launch plan for (M, K, K_pad, N): grid, tile, CTAs, workspace floats",
         py::arg("M"), py::arg("K"), py::arg("K_pad"), py::arg("N"),

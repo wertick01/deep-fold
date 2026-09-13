@@ -7,7 +7,10 @@
 // Prefill N=2..8:       BM=64,  BN=8 pad,  BK=128, block=256, stages=3, split_k>=1.
 // Prefill N=9..16:      BM=64,  BN=16 pad, BK=128, block=256, stages=3, split_k>=1.
 // MMA: only mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32
-// N>16 is not launched here: return -2 and let the host chunk.
+// Prefill N=17..32 / 33..64: planned BN=32 / BN=64, same BM/BK as n16.
+// Live launch is N in [1, 16]. N>16: chr_nf4_gemm_ws returns -2; host chunks.
+// Planners describe N=17..64 (path 3/4) without raising kLiveMaxN: 167 vs
+// 52 ms TTFT is the next floor; ncu showed ~5% DRAM (MMA per dequant, not HBM).
 //
 // Occupancy (docs/tz/wave9-review.md §3, RTX 3080 = 70 SMs). Wave 2 launched
 // grid = (ceil(M / BM), 1, 1) only, so a 3B decode step ran 16 CTAs on q/o_proj
@@ -66,6 +69,10 @@ static_assert(sSmemBytes <= 48 * 1024, "small tile must not need opt-in smem");
 // walk only writes zeros.
 constexpr int kDefaultOneWave = 70;
 constexpr int kTargetCtas = 140;
+// Live chr_nf4_gemm_ws / TokenLoop ceiling. The planner may describe up to
+// kPlanMaxN; raising kLiveMaxN is the unfreeze, not this WAVE.
+constexpr int kLiveMaxN = 16;
+constexpr int kPlanMaxN = 64;
 
 // Prefill tile (kernel-ampere.md §2 / §4). Scales stay in __ldg, not smem.
 // N<=8 uses BN=8 so a tail chunk does not pad a second m16n8; N=9..16 keep
@@ -107,6 +114,26 @@ static_assert(pXStageElems16 == 2048, "prefill x stage BN=16");
 static_assert(pSmemBytes8 == 18432, "prefill ring BN=8");
 static_assert(pSmemBytes16 == 24576, "prefill ring BN=16");
 static_assert(pSmemBytes16 <= 99 * 1024, "must not blow the sm_86 99 KiB cap");
+
+// Planned N=17..64: same BM/BK/stages as n16 so 3B split-K occupancy (128/64
+// CTAs on q/k_proj) is unchanged. Only the x-stage grows. Not launched while
+// kLiveMaxN == 16: dispatch tables for N<=16 stay n8/n16.
+constexpr int pBN32 = 32;
+constexpr int pBN64 = 64;
+constexpr int pXStageElems32 = pBK * pBN32; // 4096 bf16
+constexpr int pXStageElems64 = pBK * pBN64; // 8192 bf16
+constexpr int pSmemBytes32 =
+    pStages * pPackedStageBytes + pStages * pXStageElems32 * 2; // 36864
+constexpr int pSmemBytes64 =
+    pStages * pPackedStageBytes + pStages * pXStageElems64 * 2; // 61440
+static_assert(pSmemBytes32 == 36864, "prefill ring BN=32");
+static_assert(pSmemBytes64 == 61440, "prefill ring BN=64");
+static_assert(pSmemBytes64 <= 99 * 1024, "BN=64 must not blow the sm_86 99 KiB cap");
+// Cross-warp reduce: (BN/8)*4 accums + 1 so gcd(stride, 32)==1. Fits in the ring.
+static_assert(pWarpsM * 32 * (32 / 8 * 4 + 1) * 4 <= pSmemBytes32,
+              "BN=32 reduce reuses the staging ring");
+static_assert(pWarpsM * 32 * (64 / 8 * 4 + 1) * 4 <= pSmemBytes64,
+              "BN=64 reduce reuses the staging ring");
 static_assert(pBlock == kBlock, "both launches are 256 threads");
 static_assert(pWarpsM * pWarpsK == pBlock / 32, "8 warps, 4 along M x 2 along K");
 static_assert(pWarpsM * 16 == pBM, "each M warp owns one m16n8k16 A fragment");
@@ -1102,6 +1129,326 @@ __global__ void __launch_bounds__(256, 2)
                         tiles_per_split);
 }
 
+// --- planned prefill N=17..64: BN=32 / BN=64, same BM/BK as n16 -----------
+// Compiled so a later GPU-free rebuild can type-check them. chr_nf4_gemm_ws
+// still refuses N>kLiveMaxN, so TokenLoop cannot reach these. Remaining work
+// after unfreeze: oracle at N=17/32/64, ncu vs 2x n16, register pressure on
+// n64 (8 m16n8 per warp), then raise kLiveMaxN / LIVE_MAX_N together.
+
+template <int BN>
+__device__ void issue_x_prefill_wide(__nv_bfloat16 *dst, const __nv_bfloat16 *x,
+                                      int k0, int K, int N) {
+  static_assert(BN == 32 || BN == 64, "planned wide BN");
+  constexpr int kStageBytes = pBK * BN * 2;
+  const int tid = static_cast<int>(threadIdx.x);
+  const int n_k = K > k0 ? min(pBK, K - k0) : 0;
+  const int n_bytes = n_k * N * 2;
+  const int aligned = n_bytes & ~15;
+  const int rem = n_bytes - aligned;
+  const char *gbase = reinterpret_cast<const char *>(
+      x + static_cast<size_t>(k0) * static_cast<size_t>(N));
+  char *sbase = reinterpret_cast<char *>(dst);
+  const int n_chunks = kStageBytes / 16;
+  for (int i = tid; i < n_chunks; i += pBlock) {
+    const int off = i * 16;
+    int src_bytes = 0;
+    const void *src = x;
+    if (off + 16 <= n_bytes) {
+      src = gbase + off;
+      src_bytes = 16;
+    } else if (off == aligned && rem > 0) {
+      src = gbase + off;
+      src_bytes = rem >= 8 ? 8 : rem >= 4 ? 4 : 0;
+    } else if (off >= aligned + (rem > 0 ? 16 : 0)) {
+      src_bytes = 0;
+    }
+    cp_async_ca_16(sbase + off, src, src_bytes);
+  }
+}
+
+template <int BN>
+__device__ __forceinline__ void compute_tile_prefill_wide(
+    const uint8_t *pk, const __nv_bfloat16 *xs, const uint16_t *scale, int m0,
+    int M, int K, int k0, int n_groups, float acc[][4]) {
+  static_assert(BN == 32 || BN == 64, "planned wide BN");
+  constexpr int kFrags = BN / 8;
+  const int tid = static_cast<int>(threadIdx.x);
+  const int warp = tid >> 5;
+  const int lane = tid & 31;
+  const int wm = warp & (pWarpsM - 1);
+  const int wk = warp >> 2;
+  const int g = lane >> 2;
+  const int t = lane & 3;
+  const int local0 = (wm << 4) + g;
+  const int local1 = local0 + 8;
+  const int row0 = m0 + local0;
+  const int row1 = m0 + local1;
+  const bool live0 = row0 < M;
+  const bool live1 = row1 < M;
+  const uint8_t *row_pk0 = pk + local0 * (pBK / 2);
+  const uint8_t *row_pk1 = pk + local1 * (pBK / 2);
+
+  const int k_grp = k0 + wk * kGroup;
+  if (k_grp >= K) {
+    return;
+  }
+
+  const int grp = k_grp / kGroup;
+  float s0 = 0.f, s1 = 0.f;
+  if (live0) {
+    s0 = __half2float(__ushort_as_half(
+        __ldg(scale + static_cast<size_t>(row0) * n_groups + grp)));
+  }
+  if (live1) {
+    s1 = __half2float(__ushort_as_half(
+        __ldg(scale + static_cast<size_t>(row1) * n_groups + grp)));
+  }
+
+  if (k_grp + kGroup <= K) {
+#pragma unroll
+    for (int ki = 0; ki < kGroup / 16; ++ki) {
+      const int k_lo = k_grp + ki * 16 + (t << 1);
+      const int k_hi = k_lo + 8;
+      uint32_t a0 = 0, a1 = 0, a2 = 0, a3 = 0;
+      if (live0) {
+        a0 = dequant_pair_live(row_pk0, k0, k_lo, s0);
+        a2 = dequant_pair_live(row_pk0, k0, k_hi, s0);
+      }
+      if (live1) {
+        a1 = dequant_pair_live(row_pk1, k0, k_lo, s1);
+        a3 = dequant_pair_live(row_pk1, k0, k_hi, s1);
+      }
+      const int o_lo = (k_lo - k0) * BN;
+      const int o_hi = (k_hi - k0) * BN;
+#pragma unroll
+      for (int f = 0; f < kFrags; ++f) {
+        const __nv_bfloat16 *xf = xs + g + f * 8;
+        const uint32_t b0 = pack_bf16x2_bits(xf[o_lo], xf[o_lo + BN]);
+        const uint32_t b1 = pack_bf16x2_bits(xf[o_hi], xf[o_hi + BN]);
+        mma_m16n8k16(a0, a1, a2, a3, b0, b1, acc[f][0], acc[f][1], acc[f][2],
+                     acc[f][3]);
+      }
+    }
+    return;
+  }
+
+#pragma unroll 1
+  for (int ki = 0; ki < kGroup / 16; ++ki) {
+    const int k_tile = k_grp + ki * 16;
+    if (k_tile >= K) {
+      break;
+    }
+    const int k_lo = k_tile + (t << 1);
+    const int k_hi = k_lo + 8;
+    uint32_t a0 = 0, a1 = 0, a2 = 0, a3 = 0;
+    if (live0) {
+      a0 = dequant_pair(row_pk0, k0, k_lo, K, s0);
+      a2 = dequant_pair(row_pk0, k0, k_hi, K, s0);
+    }
+    if (live1) {
+      a1 = dequant_pair(row_pk1, k0, k_lo, K, s1);
+      a3 = dequant_pair(row_pk1, k0, k_hi, K, s1);
+    }
+    const __nv_bfloat16 z = __float2bfloat16(0.f);
+    const int o_lo = (k_lo - k0) * BN;
+    const int o_hi = (k_hi - k0) * BN;
+    const bool lo0 = k_lo < K, lo1 = k_lo + 1 < K;
+    const bool hi0 = k_hi < K, hi1 = k_hi + 1 < K;
+#pragma unroll
+    for (int f = 0; f < kFrags; ++f) {
+      const __nv_bfloat16 *xf = xs + g + f * 8;
+      const uint32_t b0 = pack_bf16x2_bits(lo0 ? xf[o_lo] : z,
+                                           lo1 ? xf[o_lo + BN] : z);
+      const uint32_t b1 = pack_bf16x2_bits(hi0 ? xf[o_hi] : z,
+                                           hi1 ? xf[o_hi + BN] : z);
+      mma_m16n8k16(a0, a1, a2, a3, b0, b1, acc[f][0], acc[f][1], acc[f][2],
+                   acc[f][3]);
+    }
+  }
+}
+
+template <int BN>
+__device__ void prefill_gemm_body_wide(
+    const uint8_t *__restrict__ packed, const uint16_t *__restrict__ scale,
+    const __nv_bfloat16 *__restrict__ x, __nv_bfloat16 *__restrict__ y,
+    float *__restrict__ partial, int M, int K, int K_pad, int N,
+    int n_ktiles, int tiles_per_split) {
+  static_assert(BN == 32 || BN == 64, "planned wide BN");
+  constexpr int kFrags = BN / 8;
+  constexpr int kRedStride = kFrags * 4 + 1;
+  constexpr int kXStageElems = pBK * BN;
+  const int m0 = static_cast<int>(blockIdx.x) * pBM;
+  const int split = static_cast<int>(blockIdx.y);
+  const int tile0 = split * tiles_per_split;
+  const int n_tiles_local = min(tiles_per_split, n_ktiles - tile0);
+  const int n_groups = K_pad / kGroup;
+  const int packed_stride = K_pad / 2;
+
+  extern __shared__ char smem[];
+  uint8_t *pk_base = reinterpret_cast<uint8_t *>(smem);
+  __nv_bfloat16 *x_base = reinterpret_cast<__nv_bfloat16 *>(
+      pk_base + pStages * pPackedStageBytes);
+
+#pragma unroll
+  for (int s = 0; s < pStages - 1; ++s) {
+    if (s < n_tiles_local) {
+      const int k0 = (tile0 + s) * pBK;
+      issue_packed_prefill(pk_base + s * pPackedStageBytes, packed, m0, M, k0,
+                           K_pad, packed_stride);
+      issue_x_prefill_wide<BN>(x_base + s * kXStageElems, x, k0, K, N);
+    }
+    cp_async_commit();
+  }
+
+  int smem_write = pStages - 1;
+  int smem_read = 0;
+  float acc[kFrags][4];
+#pragma unroll
+  for (int f = 0; f < kFrags; ++f) {
+    acc[f][0] = acc[f][1] = acc[f][2] = acc[f][3] = 0.f;
+  }
+
+  for (int tile = 0; tile < n_tiles_local; ++tile) {
+    if (tile + pStages - 1 < n_tiles_local) {
+      const int k0 = (tile0 + tile + pStages - 1) * pBK;
+      issue_packed_prefill(pk_base + smem_write * pPackedStageBytes, packed, m0,
+                           M, k0, K_pad, packed_stride);
+      issue_x_prefill_wide<BN>(x_base + smem_write * kXStageElems, x, k0, K, N);
+    }
+    cp_async_commit();
+    cp_async_wait<pStages - 2>();
+    __syncthreads();
+
+    const int k0 = (tile0 + tile) * pBK;
+    prepare_x_prefill<BN>(x_base + smem_read * kXStageElems, x, k0, K, N);
+
+    const uint8_t *pk = pk_base + smem_read * pPackedStageBytes;
+    const __nv_bfloat16 *xs = x_base + smem_read * kXStageElems;
+    compute_tile_prefill_wide<BN>(pk, xs, scale, m0, M, K, k0, n_groups, acc);
+
+    __syncthreads();
+    smem_write = (smem_write + 1) % pStages;
+    smem_read = (smem_read + 1) % pStages;
+  }
+  cp_async_wait<0>();
+
+  const int tid = static_cast<int>(threadIdx.x);
+  const int warp = tid >> 5;
+  const int lane = tid & 31;
+  const int wm = warp & (pWarpsM - 1);
+  const int wk = warp >> 2;
+
+  __syncthreads();
+  float *red = reinterpret_cast<float *>(smem);
+  float *slot = red + static_cast<size_t>(wm * 32 + lane) * kRedStride;
+  if (wk == 1) {
+#pragma unroll
+    for (int f = 0; f < kFrags; ++f) {
+      slot[f * 4 + 0] = acc[f][0];
+      slot[f * 4 + 1] = acc[f][1];
+      slot[f * 4 + 2] = acc[f][2];
+      slot[f * 4 + 3] = acc[f][3];
+    }
+  }
+  __syncthreads();
+  if (wk != 0) {
+    return;
+  }
+#pragma unroll
+  for (int f = 0; f < kFrags; ++f) {
+    acc[f][0] += slot[f * 4 + 0];
+    acc[f][1] += slot[f * 4 + 1];
+    acc[f][2] += slot[f * 4 + 2];
+    acc[f][3] += slot[f * 4 + 3];
+  }
+
+  const int g = lane >> 2;
+  const int t = lane & 3;
+  const int r0 = m0 + (wm << 4) + g;
+  const int r1 = r0 + 8;
+  const int n_pair = t << 1;
+  if (partial != nullptr) {
+    float *p = partial + static_cast<size_t>(split) * M * N;
+    if (r0 < M) {
+      float *p0 = p + static_cast<size_t>(r0) * N;
+#pragma unroll
+      for (int f = 0; f < kFrags; ++f) {
+        const int n0 = n_pair + f * 8;
+        if (n0 < N) {
+          p0[n0] = acc[f][0];
+        }
+        if (n0 + 1 < N) {
+          p0[n0 + 1] = acc[f][1];
+        }
+      }
+    }
+    if (r1 < M) {
+      float *p1 = p + static_cast<size_t>(r1) * N;
+#pragma unroll
+      for (int f = 0; f < kFrags; ++f) {
+        const int n0 = n_pair + f * 8;
+        if (n0 < N) {
+          p1[n0] = acc[f][2];
+        }
+        if (n0 + 1 < N) {
+          p1[n0 + 1] = acc[f][3];
+        }
+      }
+    }
+    return;
+  }
+  if (r0 < M) {
+    __nv_bfloat16 *y0 = y + static_cast<size_t>(r0) * N;
+#pragma unroll
+    for (int f = 0; f < kFrags; ++f) {
+      const int n0 = n_pair + f * 8;
+      if (n0 < N) {
+        y0[n0] = __float2bfloat16(acc[f][0]);
+      }
+      if (n0 + 1 < N) {
+        y0[n0 + 1] = __float2bfloat16(acc[f][1]);
+      }
+    }
+  }
+  if (r1 < M) {
+    __nv_bfloat16 *y1 = y + static_cast<size_t>(r1) * N;
+#pragma unroll
+    for (int f = 0; f < kFrags; ++f) {
+      const int n0 = n_pair + f * 8;
+      if (n0 < N) {
+        y1[n0] = __float2bfloat16(acc[f][2]);
+      }
+      if (n0 + 1 < N) {
+        y1[n0 + 1] = __float2bfloat16(acc[f][3]);
+      }
+    }
+  }
+}
+
+__global__ void __launch_bounds__(256, 2)
+    chr_nf4_gemm_prefill_n32(const uint8_t *__restrict__ packed,
+                              const uint16_t *__restrict__ scale,
+                              const __nv_bfloat16 *__restrict__ x,
+                              __nv_bfloat16 *__restrict__ y,
+                              float *__restrict__ partial, int M, int K,
+                              int K_pad, int N, int n_ktiles,
+                              int tiles_per_split) {
+  prefill_gemm_body_wide<32>(packed, scale, x, y, partial, M, K, K_pad, N,
+                              n_ktiles, tiles_per_split);
+}
+
+__global__ void __launch_bounds__(256, 2)
+    chr_nf4_gemm_prefill_n64(const uint8_t *__restrict__ packed,
+                              const uint16_t *__restrict__ scale,
+                              const __nv_bfloat16 *__restrict__ x,
+                              __nv_bfloat16 *__restrict__ y,
+                              float *__restrict__ partial, int M, int K,
+                              int K_pad, int N, int n_ktiles,
+                              int tiles_per_split) {
+  prefill_gemm_body_wide<64>(packed, scale, x, y, partial, M, K, K_pad, N,
+                              n_ktiles, tiles_per_split);
+}
+
 bool aligned16(const void *p) {
   return (reinterpret_cast<uintptr_t>(p) & 15u) == 0u;
 }
@@ -1219,7 +1566,7 @@ int plan_impl(const chr_nf4_dev_t &h, int32_t N, int32_t have_ws,
         p.ws_floats = static_cast<int64_t>(p.grid_y) * h.M;
       }
     }
-  } else {
+  } else if (N <= kLiveMaxN) {
     p.path = 2;
     p.bm = pBM;
     p.bk = pBK;
@@ -1231,6 +1578,20 @@ int plan_impl(const chr_nf4_dev_t &h, int32_t N, int32_t have_ws,
     if (p.grid_y > 1) {
       p.ws_floats = static_cast<int64_t>(p.grid_y) * h.M * N;
     }
+  } else {
+    // Planned BN=32 / BN=64. Same BM/BK as n16 (split-K counts stay 128/64
+    // on 3B q/k_proj). Live launch never reaches this: kLiveMaxN == 16.
+    p.path = N <= 32 ? 3 : 4;
+    p.bm = pBM;
+    p.bk = pBK;
+    p.block = pBlock;
+    p.grid_x = ceil_div(h.M, pBM);
+    p.n_ktiles = ceil_div(h.K_pad, pBK);
+    pick_split(p.grid_x, p.n_ktiles, have_ws, &p.grid_y, &p.tiles_per_split);
+    p.smem_bytes = N <= 32 ? pSmemBytes32 : pSmemBytes64;
+    if (p.grid_y > 1) {
+      p.ws_floats = static_cast<int64_t>(p.grid_y) * h.M * N;
+    }
   }
   p.ctas = p.grid_x * p.grid_y;
   *out = p;
@@ -1238,14 +1599,14 @@ int plan_impl(const chr_nf4_dev_t &h, int32_t N, int32_t have_ws,
 }
 
 int check_args(const chr_nf4_dev_t *w, int32_t N, bool need_ptrs,
-               chr_nf4_dev_t *h_out) {
+               chr_nf4_dev_t *h_out, int32_t max_n) {
   if (!w) {
     return -1;
   }
-  // N in [1, 16]. N=1 is a decode tile. N=2..8 is prefill pad-8; N=9..16
-  // pad-16. N>16: host chunks into slices of at most 16; this entry does not
-  // slice.
-  if (N < 1 || N > 16) {
+  // Launch (max_n = kLiveMaxN): N in [1, 16]. N=1 decode; N=2..8 pad-8;
+  // N=9..16 pad-16. Plan (max_n = kPlanMaxN) also describes N=17..64.
+  // TokenLoop chunks at kLiveMaxN; this entry does not slice.
+  if (N < 1 || N > max_n) {
     return -2;
   }
   const chr_nf4_dev_t h = *w;
@@ -1278,7 +1639,7 @@ extern "C" int chr_nf4_gemm_plan(const chr_nf4_dev_t *w, int32_t N,
     return -1;
   }
   chr_nf4_dev_t h{};
-  const int rc = check_args(w, N, /*need_ptrs=*/false, &h);
+  const int rc = check_args(w, N, /*need_ptrs=*/false, &h, kPlanMaxN);
   if (rc != 0) {
     return rc;
   }
@@ -1292,7 +1653,7 @@ extern "C" int chr_nf4_gemm_ws(const chr_nf4_dev_t *w, const void *x, void *y,
     return -1;
   }
   chr_nf4_dev_t h{};
-  const int rc = check_args(w, N, /*need_ptrs=*/true, &h);
+  const int rc = check_args(w, N, /*need_ptrs=*/true, &h, kLiveMaxN);
   if (rc != 0) {
     return rc;
   }
@@ -1340,7 +1701,7 @@ extern "C" int chr_nf4_gemm_ws(const chr_nf4_dev_t *w, const void *x, void *y,
     chr_nf4_gemm_prefill_n8<<<grid, block, pSmemBytes8, s>>>(
         h.packed, h.scale, x_bf, y_bf, partial, h.M, h.K, h.K_pad, N,
         p.n_ktiles, p.tiles_per_split);
-  } else {
+  } else if (N <= kLiveMaxN) {
     cudaError_t attr = cudaFuncSetAttribute(
         chr_nf4_gemm_prefill_n16, cudaFuncAttributeMaxDynamicSharedMemorySize,
         pSmemBytes16);
@@ -1348,6 +1709,28 @@ extern "C" int chr_nf4_gemm_ws(const chr_nf4_dev_t *w, const void *x, void *y,
       return -6;
     }
     chr_nf4_gemm_prefill_n16<<<grid, block, pSmemBytes16, s>>>(
+        h.packed, h.scale, x_bf, y_bf, partial, h.M, h.K, h.K_pad, N,
+        p.n_ktiles, p.tiles_per_split);
+  } else if (N <= 32) {
+    // Unreachable while kLiveMaxN == 16. Present so the n32 kernel is
+    // referenced; unfreeze later is one constant, not a second dispatch table.
+    cudaError_t attr = cudaFuncSetAttribute(
+        chr_nf4_gemm_prefill_n32, cudaFuncAttributeMaxDynamicSharedMemorySize,
+        pSmemBytes32);
+    if (attr != cudaSuccess) {
+      return -6;
+    }
+    chr_nf4_gemm_prefill_n32<<<grid, block, pSmemBytes32, s>>>(
+        h.packed, h.scale, x_bf, y_bf, partial, h.M, h.K, h.K_pad, N,
+        p.n_ktiles, p.tiles_per_split);
+  } else {
+    cudaError_t attr = cudaFuncSetAttribute(
+        chr_nf4_gemm_prefill_n64, cudaFuncAttributeMaxDynamicSharedMemorySize,
+        pSmemBytes64);
+    if (attr != cudaSuccess) {
+      return -6;
+    }
+    chr_nf4_gemm_prefill_n64<<<grid, block, pSmemBytes64, s>>>(
         h.packed, h.scale, x_bf, y_bf, partial, h.M, h.K, h.K_pad, N,
         p.n_ktiles, p.tiles_per_split);
   }

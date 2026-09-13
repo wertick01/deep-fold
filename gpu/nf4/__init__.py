@@ -3,11 +3,15 @@
 ``nf4_gemm(packed, scale, x, M, K, K_pad) -> y`` with ``y`` BF16 ``[M, N]``.
 Caller owns every tensor; the kernel does not allocate.
 
-Compile (Windows, sm_86), from a VS x64 prompt or after vcvars64.bat:
+Compile (Windows, sm_86), from a VS x64 prompt or after vcvars64.bat,
+**when the 3080 is free** (do not JIT while the 3B lab holds the card):
 
     C:\\Users\\Professional\\anaconda3\\envs\\torch-gpu\\python.exe gpu/nf4/setup.py build_ext --inplace
+    C:\\Users\\Professional\\anaconda3\\envs\\torch-gpu\\python.exe -m gpu.nf4.test_plan
+    C:\\Users\\Professional\\anaconda3\\envs\\torch-gpu\\python.exe -m gpu.nf4.verify
 
-Or just import this package / run ``gpu/nf4/verify.py`` and let JIT build.
+``test_plan`` is CPU. ``verify`` launches N<=16 only. Do not raise
+``LIVE_MAX_N`` / ``kLiveMaxN`` without an oracle at N=17/32/64.
 """
 
 from __future__ import annotations
@@ -31,6 +35,7 @@ if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
 from gpu.ext_bin import find_ext, have_host_compiler  # noqa: E402
+from .plan import LIVE_MAX_N  # noqa: E402
 
 _ext: Any = None
 
@@ -151,14 +156,15 @@ def nf4_gemm(
     K: int,
     K_pad: int,
 ) -> torch.Tensor:
-    """Fused NF4 dequant-MMA. ``x`` is BF16 ``[K, N]`` or ``[K]`` (N in 1..16).
+    """Fused NF4 dequant-MMA. ``x`` is BF16 ``[K, N]`` or ``[K]`` (live N in 1..16).
 
-    ``N>16`` is a host problem: this wrapper raises; ``nf4_linear`` chunks.
+    ``N>LIVE_MAX_N`` is a host problem: this wrapper raises without loading the
+    extension; ``nf4_linear`` chunks. Wide N is plan-only.
     """
     n = 1 if x.dim() == 1 else int(x.size(-1))
-    if n < 1 or n > 16:
+    if n < 1 or n > LIVE_MAX_N:
         raise RuntimeError(
-            f"chr_nf4_gemm: N={n} not in 1..16 (host must chunk N>16)"
+            f"chr_nf4_gemm: N={n} not in 1..{LIVE_MAX_N} (host must chunk N>{LIVE_MAX_N})"
         )
     return _load_ext().nf4_gemm(packed, scale, x, int(M), int(K), int(K_pad))
 
@@ -174,7 +180,8 @@ def nf4_plan(
     """The grid ``chr_nf4_gemm`` would launch. No device memory, no launch.
 
     Mirrored in pure Python by :mod:`gpu.nf4.plan` so the occupancy claim can be
-    asserted without a GPU; ``gpu/nf4/test_plan.py`` checks the two agree.
+    asserted without a GPU; ``gpu/nf4/test_plan.py`` checks the two agree on
+    live N=1..16. After a rebuild, the C planner also describes N=17..64.
     """
     from .plan import k_pad as _k_pad
 

@@ -33,6 +33,7 @@ import torch.nn.functional as F
 
 from .graph import Gemm, GemmGroup, GraphedGemmGroup, capture, nf4_max_n
 from .kv_cache import KVCache
+from gpu.nf4.plan import LIVE_MAX_N
 
 __all__ = [
     "TokenLoop",
@@ -325,7 +326,9 @@ class TokenLoop:
         )
         self._tok = torch.zeros(1, dtype=torch.long, device=self.device)
         self._gqa = _sdpa_has_gqa()
-        self.prefill_chunk = min(nf4_max_n(16), self.max_seq)
+        # WAVE freeze: LIVE_MAX_N is 16. Do not pass 32/64 until the wide
+        # kernels are measured; decode stays on the existing n8/n16 path.
+        self.prefill_chunk = min(nf4_max_n(LIVE_MAX_N), self.max_seq)
 
     # --- setup ------------------------------------------------------------
     def _build_groups(self) -> list[GemmGroup]:

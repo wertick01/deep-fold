@@ -17,13 +17,18 @@ typedef struct {
 } chr_nf4_dev_t;
 
 /* x: __nv_bfloat16 [K, N] row-major; y: __nv_bfloat16 [M, N].
- * N in [1, 16]: N=1 decode tile (BM=128, BN=8, BK=256); N=2..8 prefill
- * (BM=64, BN=8 pad, BK=128); N=9..16 prefill (BM=64, BN=16 pad, BK=128,
- * epilogue masks n>=N). No CUDA-core GEMV.
- * N>16 returns -2 — this call does not slice; the host chunks into N<=16.
+ * Live launch N in [1, 16]: N=1 decode tile (BM=128, BN=8, BK=256); N=2..8
+ * prefill (BM=64, BN=8 pad, BK=128); N=9..16 prefill (BM=64, BN=16 pad,
+ * BK=128, epilogue masks n>=N). No CUDA-core GEMV.
+ * chr_nf4_gemm / chr_nf4_gemm_ws: N>16 returns -2 — this call does not slice;
+ * the host chunks into N<=16 (TokenLoop.prefill_chunk). That ceiling is the
+ * WAVE freeze (decode ~31.6 tok/s stays the default path).
+ * chr_nf4_gemm_plan also describes N=17..64 (path 3 BN=32, path 4 BN=64):
+ * next TTFT floor, 167 vs 52 ms; ncu showed ~5% DRAM so this is MMA/dequant.
  * (-2 is no longer "any N!=1".)
  * stream is cudaStream_t (0 / nullptr = default stream).
- * Returns 0 on success. Negative: -1 null, -2 N not in [1,16], -3 bad dims,
+ * Returns 0 on success. Negative: -1 null, -2 N out of range (live [1,16],
+ * plan [1,64]), -3 bad dims,
  * -4 K_pad, -5 alignment (packed needs 16B), -6 CUDA launch, -7 workspace too
  * small for the plan. */
 int chr_nf4_gemm(const chr_nf4_dev_t *w, const void *x, void *y, int32_t N,
@@ -41,7 +46,8 @@ int chr_nf4_gemm(const chr_nf4_dev_t *w, const void *x, void *y, int32_t N,
  * chr_nf4_gemm_plan for ws_floats, hand that many floats to chr_nf4_gemm_ws.
  * chr_nf4_gemm above is chr_nf4_gemm_ws with no workspace, i.e. split_k == 1. */
 typedef struct {
-  int32_t path;            /* 0 classic decode, 1 small-tile decode, 2 prefill */
+  int32_t path;            /* 0 classic, 1 small decode, 2 prefill N<=16,
+                            * 3 planned BN=32, 4 planned BN=64 */
   int32_t grid_x;          /* ceil(M / bm) */
   int32_t grid_y;          /* split_k */
   int32_t block;           /* threads per CTA */
@@ -56,7 +62,7 @@ typedef struct {
 
 /* Pure launch math: only M/K/K_pad are read, packed/scale may be NULL.
  * have_ws == 0 reports the plan for a caller that cannot supply partials
- * (split_k pinned to 1). Same error codes as chr_nf4_gemm. */
+ * (split_k pinned to 1). N in [1, 64]. Same error codes as chr_nf4_gemm. */
 int chr_nf4_gemm_plan(const chr_nf4_dev_t *w, int32_t N, int32_t have_ws,
                       chr_nf4_plan_t *out);
 

@@ -127,6 +127,14 @@ def _plan_table(shapes, ns, one_wave: int) -> None:
     for s in shapes:
         for n in ns:
             if n > 16:
+                new = plan(s.M, s.K, n, have_ws=True, one_wave=one_wave)
+                print(
+                    f"{s.name:10s} {s.M:7d} {s.K:6d} {n:3d} "
+                    f"{'(chunked)':>12s} {'':>6s} | "
+                    f"{f'({new.grid_x},{new.grid_y})':>12s} {new.ctas:6d} "
+                    f"{f'{new.bm}x{new.bk}':>8s} {new.ws_floats * 4 / 1024:7.1f}  "
+                    f"planned {new.path_name}"
+                )
                 continue
             old = plan(s.M, s.K, n, have_ws=False, force_path=CLASSIC, one_wave=one_wave)
             new = plan(s.M, s.K, n, have_ws=True, one_wave=one_wave)

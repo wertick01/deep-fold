@@ -1,0 +1,204 @@
+codec,message_id,prompt,response,prompt_tokens,new_tokens,prefill_ms,decode_ms,decode_tok_s,stop_reason,quality_ok
+bf16,1,"A shop sold 35 lamps on Monday. Tuesday it sold 12 more than Monday. Wednesday it sold as many as Monday and Tuesday combined. How many lamps were sold in the three days? Show the steps, then put the final integer after ####.","To find out how many lamps were sold over the three days, we can follow these steps:
+
+1. **Lamps Sold on Monday**: The shop sold 35 lamps.
+   
+2. **Lamps Sold on Tuesday**: It sold 12 more lamps than on Monday. Therefore, the number of lamps sold on Tuesday is:
+   \[
+   35 + 12 = 47
+   \]
+
+3. **Lamps Sold on Wednesday**: The shop sold as many lamps as the total from Monday and Tuesday combined. So, the number of lamps sold on Wednesday is:
+   \[
+   35 + 47 = 82
+   \]
+
+4. **Total Lamps Sold Over Three Days**: To get the total number of lamps sold over the three days, we add the number of lamps sold each day:
+   \[
+   35 + 47 + 82 = 164
+   \]
+
+Therefore, the total number of lamps sold in the three days is:
+#### 164",82,219,2449.7,332356,0.655922,eos,true
+bf16,2,"Maya has 84 dollars. She buys 3 notebooks at 7 dollars each and 2 pens at 4 dollars each. Then she spends one fifth of what remains on lunch. How many dollars does she have left? Show the steps, then put the final integer after ####.","Let's break down the problem step by step.
+
+1. **Initial Amount**: Maya starts with $84.
+   
+2. **Cost of Notebooks**: She buys 3 notebooks at $7 each. The total cost for the notebooks is \(3 \times 7 = 21\) dollars.
+   
+3. **Cost of Pens**: She buys 2 pens at $4 each. The total cost for the pens is \(2 \times 4 = 8\) dollars.
+   
+4. **Total Spent on Notebooks and Pens**: The total amount spent on notebooks and pens is \(21 + 8 = 29\) dollars.
+   
+5. **Remaining Amount After Purchases**: Subtracting the total spent from her initial amount gives \(84 - 29 = 55\) dollars remaining.
+   
+6. **Spending on Lunch**: Maya spends one fifth of the remaining amount on lunch. One fifth of $55 is \(\frac{55}{5} = 11\) dollars.
+   
+7. **Final Remaining Amount**: Subtracting the amount spent on lunch from the remaining amount gives \(55 - 11 = 44\) dollars.
+
+Therefore, the final amount Maya has left is ",88,256,2262.92,3.29988e+06,0.0772756,max_new_tokens,true
+bf16,3,"A tank holds 240 liters. It is 3/8 full. After 30 liters are added, one quarter of the new amount is drained. How many liters remain? Show the steps, then put the final integer after ####.","To solve this problem, we'll follow these steps:
+
+1. **Determine how much water is currently in the tank:**
+   The tank is 3/8 full of its total capacity of 240 liters.
+   \[
+   \text{Current amount} = \frac{3}{8} \times 240 = 90 \text{ liters}
+   \]
+
+2. **Add 30 liters to the current amount:**
+   \[
+   \text{New amount} = 90 + 30 = 120 \text{ liters}
+   \]
+
+3. **Drain one quarter of the new amount:**
+   One quarter of 120 liters is:
+   \[
+   \frac{1}{4} \times 120 = 30 \text{ liters}
+   \]
+   So, after draining 30 liters, the remaining amount is:
+   \[
+   120 - 30 = 90 \text{ liters}
+   \]
+
+Therefore, the number of liters that remain in the tank is:
+\[
+\boxed{90}
+\]",80,243,1737.04,395577,0.611764,eos,true
+bf16,4,"A train travels 90 km at 45 km/h, then 60 km at 30 km/h. How many minutes does the whole trip take? Show the steps, then put the final integer after ####.","To calculate the total time taken for the entire trip, we need to find the time taken for each segment of the journey and then sum these times.
+
+1. **First Segment:**
+   - Distance = 90 km
+   - Speed = 45 km/h
+
+   Time is calculated using the formula:
+   \[
+   \text{Time} = \frac{\text{Distance}}{\text{Speed}}
+   \]
+   
+   For the first segment:
+   \[
+   \text{Time}_1 = \frac{90 \text{ km}}{45 \text{ km/h}} = 2 \text{ hours}
+   \]
+
+2. **Second Segment:**
+   - Distance = 60 km
+   - Speed = 30 km/h
+
+   Using the same formula:
+   \[
+   \text{Time}_2 = \frac{60 \text{ km}}{30 \text{ km/h}} = 2 \text{ hours}
+   \]
+
+3. **Total Time in Hours:**
+   \[
+   \text{Total Time} = \text{Time}_1 + \text{Time}_2 = 2 \text{ hours} + 2 \text",76,256,1756.88,263972,0.966012,max_new_tokens,false
+bf16,5,"8 machines make 96 parts in 4 hours. How many parts do 6 machines make in 6 hours at the same rate? Show the steps, then put the final integer after ####.","To solve this problem, we first need to determine the rate at which the machines produce parts.
+
+1. **Calculate the production rate per machine per hour:**
+   - We know that 8 machines make 96 parts in 4 hours.
+   - First, find out how many parts one machine makes in 4 hours:
+     \[
+     \text{Parts per machine in 4 hours} = \frac{96 \text{ parts}}{8 \text{ machines}} = 12 \text{ parts}
+     \]
+   - Now, calculate how many parts one machine makes in 1 hour:
+     \[
+     \text{Parts per machine per hour} = \frac{12 \text{ parts}}{4 \text{ hours}} = 3 \text{ parts per hour}
+     \]
+
+2. **Determine the production of 6 machines in 6 hours:**
+   - If one machine produces 3 parts per hour, then 6 machines will produce:
+     \[
+     \text{Parts per hour for 6 machines} = 6 \times 3 = 18 \text{ parts per hour}
+     \]
+   - Over 6 hours, 6 machines will produce",70,256,1813.07,334145,0.763142,max_new_tokens,false
+bf16,6,"Leah has 120 stickers. She gives 2/5 of them to her brother. Then she gives 1/3 of what she still has to her sister. How many stickers does Leah keep? Show the steps, then put the final integer after ####.","To find out how many stickers Leah keeps, we can follow these steps:
+
+1. **Calculate the number of stickers Leah gives to her brother:**
+   - Leah starts with 120 stickers.
+   - She gives \( \frac{2}{5} \) of her stickers to her brother.
+   - The number of stickers given to her brother is \( \frac{2}{5} \times 120 = \frac{240}{5} = 48 \).
+
+2. **Determine how many stickers Leah has left after giving some to her brother:**
+   - Leah originally had 120 stickers.
+   - After giving 48 stickers to her brother, she has \( 120 - 48 = 72 \) stickers left.
+
+3. **Calculate the number of stickers Leah gives to her sister:**
+   - Leah gives \( \frac{1}{3} \) of the remaining stickers to her sister.
+   - The number of stickers given to her sister is \( \frac{1}{3} \times 72 = 24 \).
+
+4. **Determine how many stickers Leah keeps:**
+   - Leah had 72 stickers left after giving some",85,256,1747.33,359689,0.708945,max_new_tokens,false
+bf16,7,"A farmer has 17 sheep. All but 9 die. How many sheep does the farmer have left? Show the steps, then put the final integer after ####.","The problem states that all but 9 of the farmer's sheep die. This means that out of the original 17 sheep, only 9 survive.
+
+To find out how many sheep the farmer has left:
+- Start with the total number of sheep: 17.
+- Subtract the number of sheep that died (which is 17 - 9 = 8).
+
+So, the calculation is:
+\[ 17 - (17 - 9) = 17 - 8 = 9 \]
+
+Therefore, the farmer has 9 sheep left.
+
+#### 9",64,121,1905.39,153125,0.783672,eos,true
+bf16,8,Every alpha is a beta. No beta is a gamma. Can an alpha be a gamma? Reply with Yes or No only.,No,55,2,1557.16,1035.92,0.96533,eos,true
+bf16,9,"What integer does this Python snippet print? Reason briefly, then put the final integer after ####.
+
+s = 0
+for i in range(1, 6):
+    s += i
+print(s)
+","The Python snippet initializes `s` to 0 and then iterates over the range from 1 to 5 (inclusive), adding each number to `s`. The numbers added are 1, 2, 3, 4, and 5. Summing these gives \(1 + 2 + 3 + 4 + 5 = 15\). Therefore, the integer printed is:
+
+#### 15",71,89,1982.37,99979.1,0.880184,eos,true
+bf16,10,"What integer does this Python snippet print? Reason briefly, then put the final integer after ####.
+
+x = 3
+for _ in range(4):
+    x = x * 2 - 1
+print(x)
+","The initial value of `x` is set to 3. The loop runs 4 times, and in each iteration, the value of `x` is updated using the formula `x = x * 2 - 1`.
+
+Let's break down the iterations:
+
+- After the first iteration: `x = 3 * 2 - 1 = 5`
+- After the second iteration: `x = 5 * 2 - 1 = 9`
+- After the third iteration: `x = 9 * 2 - 1 = 17`
+- After the fourth iteration: `x = 17 * 2 - 1 = 33`
+
+Therefore, the final value of `x` printed by the code is 33.
+
+#### 33",74,164,2988.74,240536,0.677654,eos,true
+bf16,11,"A bat and a ball cost 1.10 dollars together. The bat costs 1.00 dollar more than the ball. How many dollars does the ball cost? Show the steps, then put the final number after ####.","Let's denote the cost of the ball as \( x \) dollars.
+
+According to the problem, the bat costs $1.00 more than the ball. Therefore, the cost of the bat is \( x + 1.00 \) dollars.
+
+The total cost of the bat and the ball is given as $1.10. So we can write the equation:
+
+\[ x + (x + 1.00) = 1.10 \]
+
+Simplifying this equation:
+
+\[ 2x + 1.00 = 1.10 \]
+
+Subtract 1.00 from both sides:
+
+\[ 2x = 0.10 \]
+
+Divide both sides by 2:
+
+\[ x = 0.05 \]
+
+So, the ball costs 0.05 dollars.
+
+#### 0.05",77,182,1761.22,467398,0.387251,eos,true
+bf16,12,"You are given a logistics briefing. Read it carefully. Several numbers appear; only one of them is the warehouse access code.
+
+In March 2021 the North dock of Meridian Freight processed 1800 pallets. Supervisor Elena Voss recorded a delay of 312 minutes when a scanner failed. The canteen bill that week was 55 dollars. None of those figures is the access code.
+
+The night clerk kept a paper log. On Tuesday he wrote that bay 2 stayed closed and that 14 trucks arrived before 06:00. He also copied a sentence from a sealed envelope labelled dock procedure, revision 4. That sentence says the warehouse access code for gate C is 7429. The surrounding sentences are about pallet orientation, shrink-wrap tension, and a radio channel set to 19.
+
+Elena's later notes mention last year's inventory variance of 0.4 percent, a visitor badge numbered 4501 that expired in April, a fire-panel test every 90 days, and 88 empty cages on a whiteboard. The night shift starts at 22:00. A spare key is tagged 2024.
+
+Question: What is the warehouse access code for gate C? Put the final integer after ####.","The warehouse access code for gate C is mentioned directly in the briefing: ""the warehouse access code for gate C is 7429."" Therefore, the answer is:
+
+####7429",301,41,12420.4,82756.7,0.483345,eos,true

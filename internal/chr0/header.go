@@ -64,7 +64,7 @@ type WriteTensor struct {
 
 func isQKind(kind string) bool {
 	switch kind {
-	case "q", "k", "v", "o", "gate", "up", "down", "embed", "lm_head":
+	case "q", "k", "v", "o", "qkv", "gate", "up", "down", "embed", "lm_head":
 		return true
 	}
 	return false
@@ -95,7 +95,7 @@ func LayerIndex(name string) (int, bool) {
 
 func validKind(kind string) bool {
 	switch kind {
-	case "q", "k", "v", "o", "gate", "up", "down", "embed", "lm_head", "norm", "other":
+	case "q", "k", "v", "o", "qkv", "gate", "up", "down", "embed", "lm_head", "norm", "other":
 		return true
 	}
 	return false

@@ -1,0 +1,4 @@
+codec,message_id,prompt,response,prompt_tokens,new_tokens,prefill_ms,decode_ms,decode_tok_s,stop_reason,quality_ok
+nf4,1,Reply with one short sentence. What is the capital of France?,Paris is the capital of France.,23,8,755.698,1461.78,4.78869,eos,true
+nf4,2,And the capital of Germany?,"The capital of Germany is Berlin. It has been the capital since 1990, following the reunification of East and West Germany. Berlin is not only the political center but also a major cultural, economic, and historical hub in Europe. It is known for its rich history, vibrant arts scene, and numerous landmarks such",16,64,376.21,12888.6,4.88805,max_new_tokens,true
+nf4,3,What is 17 times 19? Reply with the number only.,17 * 19 = 323,24,8,683.799,1304,5.36809,eos,true

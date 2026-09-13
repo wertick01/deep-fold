@@ -23,7 +23,7 @@ Acceptance: ``python gpu/loop/smoke.py``.
 
 from __future__ import annotations
 
-from .generate import Generation, TokenLoop, rms_norm_exact
+from .generate import Generation, TokenLoop, rms_norm_exact, split_internlm_wqkv
 from .graph import Gemm, GemmGroup, GraphedGemmGroup, capture, nf4_max_n
 from .kv_cache import KVCache
 
@@ -37,4 +37,5 @@ __all__ = [
     "capture",
     "nf4_max_n",
     "rms_norm_exact",
+    "split_internlm_wqkv",
 ]

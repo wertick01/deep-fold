@@ -330,6 +330,29 @@ func TestVerifyJSON(t *testing.T) {
 
 func intPtr(n int) *int { return &n }
 
+func TestClassifyInternlmFused(t *testing.T) {
+	kind, class := Classify("model.layers.0.attention.wqkv")
+	if kind != "qkv" || class != ClassCompress {
+		t.Fatalf("wqkv -> %s %v", kind, class)
+	}
+	kind, class = Classify("model.layers.0.attention.wo")
+	if kind != "o" || class != ClassCompress {
+		t.Fatalf("wo -> %s %v", kind, class)
+	}
+	kind, class = Classify("model.layers.0.feed_forward.w1")
+	if kind != "gate" {
+		t.Fatalf("w1 -> %s", kind)
+	}
+	kind, class = Classify("model.output")
+	if kind != "lm_head" {
+		t.Fatalf("output -> %s", kind)
+	}
+	kind, class = Classify("model.tok_embeddings")
+	if kind != "embed" {
+		t.Fatalf("tok_embeddings -> %s", kind)
+	}
+}
+
 func TestClassifyInvFreq(t *testing.T) {
 	_, c := Classify("model.layers.0.self_attn.rotary_emb.inv_freq")
 	if c != ClassSkip {

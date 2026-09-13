@@ -1,0 +1,118 @@
+{
+  "independent": [
+    {
+      "id": "gsm8k-lamps",
+      "kind": "gsm8k",
+      "gold": "164",
+      "note": "three-day sum; Wednesday is Monday+Tuesday",
+      "prompt": "A shop sold 35 lamps on Monday. Tuesday it sold 12 more than Monday. Wednesday it sold as many as Monday and Tuesday combined. How many lamps were sold in the three days? Show the steps, then put the final integer after ####."
+    },
+    {
+      "id": "gsm8k-money",
+      "kind": "gsm8k",
+      "gold": "44",
+      "note": "subtract purchases, then one fifth of the remainder",
+      "prompt": "Maya has 84 dollars. She buys 3 notebooks at 7 dollars each and 2 pens at 4 dollars each. Then she spends one fifth of what remains on lunch. How many dollars does she have left? Show the steps, then put the final integer after ####."
+    },
+    {
+      "id": "gsm8k-tank",
+      "kind": "gsm8k",
+      "gold": "90",
+      "note": "fraction full, add, then drain a quarter of the new amount",
+      "prompt": "A tank holds 240 liters. It is 3/8 full. After 30 liters are added, one quarter of the new amount is drained. How many liters remain? Show the steps, then put the final integer after ####."
+    },
+    {
+      "id": "gsm8k-train",
+      "kind": "gsm8k",
+      "gold": "240",
+      "note": "two legs, ask minutes not hours",
+      "prompt": "A train travels 90 km at 45 km/h, then 60 km at 30 km/h. How many minutes does the whole trip take? Show the steps, then put the final integer after ####."
+    },
+    {
+      "id": "gsm8k-machines",
+      "kind": "gsm8k",
+      "gold": "108",
+      "note": "rate per machine-hour, then scale machines and time",
+      "prompt": "8 machines make 96 parts in 4 hours. How many parts do 6 machines make in 6 hours at the same rate? Show the steps, then put the final integer after ####."
+    },
+    {
+      "id": "gsm8k-stickers",
+      "kind": "gsm8k",
+      "gold": "48",
+      "note": "give 2/5 away, then 1/3 of what remains",
+      "prompt": "Leah has 120 stickers. She gives 2/5 of them to her brother. Then she gives 1/3 of what she still has to her sister. How many stickers does Leah keep? Show the steps, then put the final integer after ####."
+    },
+    {
+      "id": "trap-sheep",
+      "kind": "gsm8k",
+      "gold": "9",
+      "note": "classic 'all but 9' trap; 3B often answers 8 or 17",
+      "prompt": "A farmer has 17 sheep. All but 9 die. How many sheep does the farmer have left? Show the steps, then put the final integer after ####."
+    },
+    {
+      "id": "logic-yesno",
+      "kind": "yesno",
+      "gold": "no",
+      "note": "syllogism trap: all A are B, no B is C",
+      "prompt": "Every alpha is a beta. No beta is a gamma. Can an alpha be a gamma? Reply with Yes or No only."
+    },
+    {
+      "id": "code-sum",
+      "kind": "gsm8k",
+      "gold": "15",
+      "note": "mental execution of range(1, 6) sum",
+      "prompt": "What integer does this Python snippet print? Reason briefly, then put the final integer after ####.\n\ns = 0\nfor i in range(1, 6):\n    s += i\nprint(s)\n"
+    },
+    {
+      "id": "code-loop",
+      "kind": "gsm8k",
+      "gold": "33",
+      "note": "four iterations of x = 2x - 1 starting at 3",
+      "prompt": "What integer does this Python snippet print? Reason briefly, then put the final integer after ####.\n\nx = 3\nfor _ in range(4):\n    x = x * 2 - 1\nprint(x)\n"
+    },
+    {
+      "id": "trap-batball",
+      "kind": "gsm8k",
+      "gold": "0.05",
+      "note": "CRT bat-and-ball; many small models answer 0.10",
+      "prompt": "A bat and a ball cost 1.10 dollars together. The bat costs 1.00 dollar more than the ball. How many dollars does the ball cost? Show the steps, then put the final number after ####."
+    },
+    {
+      "id": "prefill-warehouse",
+      "kind": "gsm8k",
+      "gold": "7429",
+      "note": "long prompt with distractor numbers; gold is buried once",
+      "prompt": "You are given a logistics briefing. Read it carefully. Several numbers appear; only one of them is the warehouse access code.\n\nIn March 2021 the North dock of Meridian Freight processed 1800 pallets. Supervisor Elena Voss recorded a delay of 312 minutes when a scanner failed. The canteen bill that week was 55 dollars. None of those figures is the access code.\n\nThe night clerk kept a paper log. On Tuesday he wrote that bay 2 stayed closed and that 14 trucks arrived before 06:00. He also copied a sentence from a sealed envelope labelled dock procedure, revision 4. That sentence says the warehouse access code for gate C is 7429. The surrounding sentences are about pallet orientation, shrink-wrap tension, and a radio channel set to 19.\n\nElena's later notes mention last year's inventory variance of 0.4 percent, a visitor badge numbered 4501 that expired in April, a fire-panel test every 90 days, and 88 empty cages on a whiteboard. The night shift starts at 22:00. A spare key is tagged 2024.\n\nQuestion: What is the warehouse access code for gate C? Put the final integer after ####."
+    }
+  ],
+  "history": [
+    {
+      "id": "hist-1-discard",
+      "kind": "gsm8k",
+      "gold": "33",
+      "note": "turn 1 of a 4-turn crate; later turns depend on this",
+      "prompt": "You are tracking one crate of screws. There are 40 screws. 7 are discarded as defective. How many screws remain? Put the final integer after ####."
+    },
+    {
+      "id": "hist-2-use",
+      "kind": "gsm8k",
+      "gold": "28",
+      "note": "uses 'those remaining' from turn 1",
+      "prompt": "You use 5 of those remaining screws. How many screws are in the crate now? Put the final integer after ####."
+    },
+    {
+      "id": "hist-3-add",
+      "kind": "gsm8k",
+      "gold": "48",
+      "note": "adds 20 to the previous remainder",
+      "prompt": "A new box of 20 good screws is poured into that same crate. How many screws are in the crate now? Put the final integer after ####."
+    },
+    {
+      "id": "hist-4-split",
+      "kind": "gsm8k",
+      "gold": "16",
+      "note": "split the running total into 3 equal boxes",
+      "prompt": "Those screws are split equally into 3 boxes. How many screws go in each box? Put the final integer after ####."
+    }
+  ]
+}

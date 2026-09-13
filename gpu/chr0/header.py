@@ -50,12 +50,12 @@ _ROOT_KEYS = (
 )
 
 _KINDS = frozenset(
-    ("q", "k", "v", "o", "gate", "up", "down", "embed", "lm_head", "norm", "other")
+    ("q", "k", "v", "o", "qkv", "gate", "up", "down", "embed", "lm_head", "norm", "other")
 )
 
 # kinds that take the file-wide codec ("one codec per file", chr0.md §2.3)
 _QUANTIZABLE_KINDS = frozenset(
-    ("q", "k", "v", "o", "gate", "up", "down", "embed", "lm_head")
+    ("q", "k", "v", "o", "qkv", "gate", "up", "down", "embed", "lm_head")
 )
 
 _BLOB_KEYS = frozenset(("data", "scale", "zero", "codebook", "index"))

@@ -1,0 +1,2 @@
+codec,load_s,vram_before_mib,vram_after_load_smi_mib,vram_after_load_torch_mib,vram_peak_smi_mib,weight_mib,kv_mib,mean_ttft_ms,mean_decode_tok_s,n_messages,quality_all_ok,notes
+bf16,42.5491,1360,11976,28269.6,12019,28171.6,,2865.19,0.663375,12,false,"HuggingFace from_pretrained + generate, dense bf16 GEMM; independent turns: KV reset between messages, each prompt is a clean prefill; ttft = time to first generated token; kv_mib empty: the HF cache is transient, not a preallocated block"

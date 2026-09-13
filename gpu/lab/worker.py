@@ -39,6 +39,17 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-graphs", dest="graphs", action="store_false")
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument(
+        "--items-json",
+        default="",
+        help="hard-eval (or custom) JSON script; default is the smoke MESSAGES",
+    )
+    parser.add_argument(
+        "--conversation",
+        choices=("independent", "history"),
+        default="independent",
+        help="independent (KV reset, smoke) or history (growing prefill)",
+    )
     return parser
 
 
@@ -48,6 +59,14 @@ def main(argv: list[str] | None = None) -> int:
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
+    extra: dict = {}
+    if args.items_json:
+        from gpu.lab.hard import load_script
+
+        script = load_script(args.items_json, history=(args.conversation == "history"))
+        extra["messages"] = script.prompts
+        extra["quality"] = script.quality_fn
+        extra["conversation"] = script.conversation
     common = dict(
         out_dir=out_dir,
         model_dir=args.model_dir,
@@ -56,6 +75,7 @@ def main(argv: list[str] | None = None) -> int:
         verbose=not args.quiet,
         trust_remote_code=args.trust_remote_code,
         isolated=False,
+        **extra,
     )
     if args.codec == "bf16":
         run_bf16(**common)

@@ -1,0 +1,7 @@
+Live hard-eval artifacts copied from
+C:\dev\models\runs\hard-matrix-20260913-1430
+on the author's RTX 3080 12 GB. Independent turns, greedy,
+max_new_tokens=256. Order: BF16 3B, BF16 14B, NF4 3B, NF4 14B.
+
+Not a synthetic fixture. Appendix with full questions, replies,
+failures, and per-message times: docs/eval-hard-qwen25.md

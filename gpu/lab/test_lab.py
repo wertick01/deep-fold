@@ -521,6 +521,89 @@ def gate_needles() -> None:
           not any(quality_ok(index, text) for index, text in enumerate(bad, start=1)), "1..3 fail")
     check("unknown message_id is not a silent pass", not quality_ok(9, "anything"), "id=9")
 
+    from gpu.lab.sessions import _is_cuda_oom, _recorded_miss_notes
+
+    oom = RuntimeError("CUDA out of memory. Tried to allocate 20480.00 MiB")
+    check("HF-wrapped OOM text is a recorded miss", _is_cuda_oom(oom), "out of memory")
+    dep = _recorded_miss_notes(
+        ModuleNotFoundError("No module named 'sentencepiece'"),
+        "internlm2_5-20b-chat",
+    )
+    check(
+        "missing tokenizer dep is a recorded miss, not a crash",
+        "ModuleNotFoundError" in dep and "sentencepiece" in dep,
+        dep[:80],
+    )
+
+    stale = _recorded_miss_notes(
+        TypeError('can only concatenate tuple (not "int") to tuple'),
+        "internlm2_5-20b-chat",
+    )
+    check(
+        "transformers-5 vs remote-code mismatch is named, not a bare TypeError",
+        "transformers 5" in stale and "fake baseline" in stale,
+        stale[:80],
+    )
+    other = _recorded_miss_notes(TypeError("unrelated"), "internlm2_5-20b-chat")
+    check(
+        "an unrelated TypeError keeps the plain wording",
+        "transformers 5" not in other and "TypeError" in other,
+        other[:80],
+    )
+
+    gate_stop_tokens()
+
+
+class _FakeTokenizer:
+    """Just enough of a tokenizer for :func:`stop_token_ids`."""
+
+    unk_token_id = 0
+
+    def __init__(self, vocab: dict[str, int], eos_token_id: int | None) -> None:
+        self._vocab = dict(vocab)
+        self._ids = {i: t for t, i in vocab.items()}
+        self.eos_token_id = eos_token_id
+
+    def convert_tokens_to_ids(self, token: str) -> int:
+        return self._vocab.get(token, self.unk_token_id)
+
+    def convert_ids_to_tokens(self, token_id: int) -> str | None:
+        return self._ids.get(token_id)
+
+
+def gate_stop_tokens() -> None:
+    """The greedy stop set is the tokenizer's, not a hardcoded Qwen pair.
+
+    Qwen2.5 ties ``eos_token`` to ``<|im_end|>`` so it must keep answering the
+    same two ids the 3B and 14B labs were measured with. InternLM2 does not tie
+    them: without ``<|im_end|>`` (92542) a 20B reply runs past the end of its
+    turn to ``max_new_tokens``.
+    """
+    from gpu.lab.script import QWEN_ENDOFTEXT, QWEN_IM_END, stop_token_ids
+
+    qwen = _FakeTokenizer(
+        {"<|endoftext|>": QWEN_ENDOFTEXT, "<|im_end|>": QWEN_IM_END}, QWEN_IM_END
+    )
+    internlm = _FakeTokenizer(
+        {"</s>": 2, "<|im_end|>": 92542, "<|im_start|>": 92543}, 2
+    )
+    plain = _FakeTokenizer({"</s>": 2}, 2)
+
+    check("Qwen stop set is unchanged (3B/14B labs stay comparable)",
+          stop_token_ids(qwen) == (QWEN_ENDOFTEXT, QWEN_IM_END),
+          str(stop_token_ids(qwen)))
+    check("InternLM2 stop set adds <|im_end|> to eos",
+          stop_token_ids(internlm) == (2, 92542),
+          f"{stop_token_ids(internlm)} == generation_config eos_token_id")
+    check("no Qwen id leaks into a non-Qwen stop set",
+          not ({QWEN_ENDOFTEXT, QWEN_IM_END} & set(stop_token_ids(internlm))),
+          "92542 not 151645")
+    check("a tokenizer with only eos still stops",
+          stop_token_ids(plain) == (2,), str(stop_token_ids(plain)))
+    check("no tokenizer falls back to the Qwen fallback template's pair",
+          stop_token_ids(None) == (QWEN_ENDOFTEXT, QWEN_IM_END),
+          str(stop_token_ids(None)))
+
 
 def gate_fixture_is_labelled(bundle: LabBundle) -> None:
     check("fixture is flagged synthetic", bundle.synthetic,

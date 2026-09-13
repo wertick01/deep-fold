@@ -54,8 +54,10 @@ func Classify(canon string) (kind string, class Class) {
 		return "k", ClassCompress
 	case "v_proj":
 		return "v", ClassCompress
-	case "o_proj":
+	case "o_proj", "wo":
 		return "o", ClassCompress
+	case "wqkv":
+		return "qkv", ClassCompress
 	case "gate_proj", "w1":
 		return "gate", ClassCompress
 	case "up_proj", "w3":

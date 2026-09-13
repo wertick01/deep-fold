@@ -39,14 +39,15 @@ def _code(text: str) -> nbf.NotebookNode:
     return nbf.v4.new_code_cell(text.strip() + "\n")
 
 
+SUPPORTED_NF4 = frozenset({"qwen2", "internlm2"})
+
+
 def _phase_b_markdown(lab: LabModel) -> str:
-    if lab.nf4_driver != "qwen2":
+    if lab.nf4_driver not in SUPPORTED_NF4:
         return f"""
 ## Phase B — compressed NF4
 
-**Skipped on this model.** `TokenLoop` / `CompressedLinear` speak Qwen
-`q_proj` / `k_proj` / `v_proj` / `o_proj`. InternLM2 fuses those into `wqkv`.
-A `.chr` would still be a valid CHR0 file; the GPU loop cannot consume it yet.
+**Skipped on this model.** No TokenLoop driver for `nf4_driver={lab.nf4_driver!r}`.
 Do not call `run_nf4` here.
 """
     if lab.nf4_fits:
@@ -83,9 +84,9 @@ print(COMPRESS_CMD)
         compress_cell = "print('CHR already on disk for this model.')\n"
 
     nf4_skip_reason = (
-        "TokenLoop is Qwen-shaped (q/k/v/o). This architecture uses fused wqkv."
-        if lab.nf4_driver != "qwen2"
-        else ""
+        ""
+        if lab.nf4_driver in SUPPORTED_NF4
+        else f"no TokenLoop driver for nf4_driver={lab.nf4_driver!r}"
     )
 
     cells = [

@@ -14,7 +14,7 @@ class LabModel:
     chr_path: str
     bf16_fits: bool
     nf4_fits: bool
-    nf4_driver: str  # "qwen2" | "unsupported"
+    nf4_driver: str  # "qwen2" | "internlm2" | "unsupported"
     trust_remote_code: bool
     note: str
     compress_cmd: str
@@ -23,6 +23,8 @@ class LabModel:
     def plate_title(self) -> str:
         return f"{self.title} on one RTX 3080 12 GB — NF4 driver against dense BF16"
 
+
+SUPPORTED_NF4 = frozenset({"qwen2", "internlm2"})
 
 LABS: tuple[LabModel, ...] = (
     LabModel(
@@ -67,11 +69,13 @@ LABS: tuple[LabModel, ...] = (
         chr_path=r"C:\dev\models\internlm2_5-20b.nf4.chr",
         bf16_fits=False,
         nf4_fits=False,
-        nf4_driver="unsupported",
+        nf4_driver="internlm2",
         trust_remote_code=True,
         note=(
-            "Negative control. BF16 ~37 GiB OOM. NF4 weights alone ~11 GiB plus CUDA "
-            "exceed 12 GB. TokenLoop speaks Qwen q/k/v/o; InternLM2 uses fused wqkv."
+            "Negative control on 12 GB. BF16 ~37 GiB. NF4 weights ~11 GiB; "
+            "try the standard NF4 .chr first. TokenLoop splits fused wqkv "
+            "(gs = 2 + n_q/n_kv). HuggingFace remote code needs einops and "
+            "sentencepiece==0.1.99."
         ),
         compress_cmd=(
             r"C:\dev\deep-fold\chr.exe compress --in C:\dev\models\internlm2_5-20b-chat "
@@ -79,3 +83,12 @@ LABS: tuple[LabModel, ...] = (
         ),
     ),
 )
+
+
+def lab_by_slug(slug: str) -> LabModel:
+    """Catalog row for notebooks 03/04/05/06. Unknown slug fails closed."""
+    for lab in LABS:
+        if lab.slug == slug:
+            return lab
+    known = ", ".join(lab.slug for lab in LABS)
+    raise KeyError(f"unknown lab slug {slug!r}; known: {known}")

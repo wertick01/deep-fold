@@ -6,7 +6,12 @@ plate (`comparison_figure`). Notebooks:
 
 - [`notebooks/03_codec_lab.ipynb`](../notebooks/03_codec_lab.ipynb) — Qwen2.5-3B
 - [`notebooks/04_qwen25_14b_lab.ipynb`](../notebooks/04_qwen25_14b_lab.ipynb) — Qwen2.5-14B
-- [`notebooks/05_internlm20b_lab.ipynb`](../notebooks/05_internlm20b_lab.ipynb) — internlm2.5-20B (not run)
+- [`notebooks/05_internlm20b_lab.ipynb`](../notebooks/05_internlm20b_lab.ipynb) — internlm2.5-20B
+
+Those three are **smoke**: Paris / Berlin / 323. They do not measure reasoning
+quality. Hard eval (GSM8K-style / multi-step, quality **and** speed) is
+[`eval.md`](eval.md) and
+[`notebooks/06_hard_eval.ipynb`](../notebooks/06_hard_eval.ipynb).
 
 Harness: `python -m gpu.lab.run` (3B paths by default). Public contract of the
 package: `from gpu.lab import run_both, run_bf16, run_nf4, comparison_figure`.
@@ -58,7 +63,8 @@ What is 17 times 19? Reply with the number only.
 ```
 
 Quality needles (case-insensitive): `paris` / `париж`, `berlin` / `берлин`,
-`323`. Record the raw text anyway. This is smoke, not a benchmark.
+`323`. Record the raw text anyway. This is smoke, not a benchmark. Hard
+reasoning belongs on [`eval.md`](eval.md), not here.
 
 ## How to read the figure
 
@@ -87,6 +93,7 @@ CSVs. **`lab-test` is a synthetic fixture** and is not here.
 |---|---|---|
 | Qwen2.5-3B-Instruct | [`img/lab-qwen25-3b.png`](img/lab-qwen25-3b.png) | [`runs/qwen25-3b/`](runs/qwen25-3b/) |
 | Qwen2.5-14B-Instruct | [`img/lab-qwen25-14b.png`](img/lab-qwen25-14b.png) | [`runs/qwen25-14b/`](runs/qwen25-14b/) |
+| internlm2.5-20B-chat | [`img/lab-internlm20b.png`](img/lab-internlm20b.png) | [`runs/internlm20b/`](runs/internlm20b/) |
 
 ### Qwen2.5-3B-Instruct
 
@@ -114,6 +121,48 @@ load is ~28,270 MiB (shared GPU memory on WDDM). NF4 stays on the card.
 | Mean decode tok/s | 0.92 | 6.56 |
 | Smoke (Paris / Berlin / 323) | pass | pass |
 
+### internlm2.5-20B-chat
+
+On 20B, **both** `nvidia-smi` traces sit near 12288 MiB. Do not quote 11,976 vs
+11,828 as the product win. BF16’s CUDA working set after load is ~37,882 MiB
+(~26 GiB in Windows shared GPU memory). NF4 stays on the card at 10,273 MiB.
+HuggingFace BF16 generate did not run (InternLM transformers-4.41 remote code
+vs transformers 5: `TypeError: can only concatenate tuple (not "int") to
+tuple`). Those TTFT / tok/s cells stay blank. Recorded miss, not a
+patched-generate baseline. NF4 answered all three prompts at 5.01 tok/s.
+
+| | BF16 (HF `generate`) | NF4 (`CompressedLinear` + `TokenLoop`) |
+|---|---:|---:|
+| Weight MiB | 37,882 | 10,062 |
+| nvidia-smi after load (MiB) | 11,892 | 11,578 |
+| Peak nvidia-smi (MiB) | 11,976 | 11,828 |
+| torch after load (MiB) | 37,882 | 10,273 |
+| Mean TTFT (ms) | — | 605 |
+| Mean decode tok/s | — | 5.01 |
+| Smoke (Paris / Berlin / 323) | not run | pass |
+
+Source: [`runs/internlm20b/`](runs/internlm20b/). Live plate:
+[`img/lab-internlm20b.png`](img/lab-internlm20b.png).
+
+## Size vs efficiency (3B / 14B / 20B)
+
+Compressed vs uncompressed **changes with model size**. Cross-model table
+and the CUDA-working-set caveat: [`size-efficiency.md`](size-efficiency.md).
+
+| Model | Weight MiB (BF16 / NF4) | nvidia-smi after load (BF16 / NF4) | CUDA working set (BF16 / NF4) | Mean TTFT ms (BF16 / NF4) | Mean decode tok/s (BF16 / NF4) | Smoke |
+|---|---:|---:|---:|---:|---:|---|
+| Qwen2.5-3B-Instruct | 5,886 / 1,563 | 7,477 / 3,142 | 5,886 / 1,618 | 52 / 212 | 23.1 / 17.0 | pass / pass |
+| Qwen2.5-14B-Instruct | 28,172 / 7,483 | 11,955† / 8,913 | 28,270 / 7,539 | 1,028 / 759 | 0.92 / 6.56 | pass / pass |
+| internlm2.5-20B-chat | 37,882 / 10,062 | 11,892‡ / 11,578‡ | 37,882 / 10,273 | — / 605 | — / 5.01 | not run / pass |
+
+† 14B `nvidia-smi` is capped at 12288 MiB. The win is CUDA working set **~28 GiB
+vs ~7.8 GiB** (28,270 vs 7,539 MiB), not 11,955 vs 8,913. On 3B dense BF16 is
+faster; on 14B packed NF4 wins on working set, TTFT, and decode.
+
+‡ 20B both `nvidia-smi` sit near 12288 MiB. Do not quote 11,976 vs 11,828. The
+win is CUDA working set **~37.9 GiB vs ~10.3 GiB** (37,882 vs 10,273 MiB) and
+NF4 decode 5.01 tok/s with smoke pass. BF16 generate failed.
+
 ## CSV artifacts
 
 English headers, comma, UTF-8. One directory per lab:
@@ -133,12 +182,15 @@ English headers, comma, UTF-8. One directory per lab:
 
 - VRAM is the product metric. NF4 must sit well below BF16 after load. If it
   does not, the driver materialized a layer — that is a bug, not a win.
-  `nvidia-smi` is dedicated VRAM and stops at 12288 MiB. A 14B BF16 working
-  set that spills into shared GPU memory (system RAM) is shown as a second
-  pair of graphs under VRAM, same Y, not as “the model fit in 12 GB.”
+  `nvidia-smi` is dedicated VRAM and stops at 12288 MiB. A 14B or 20B BF16
+  working set that spills into shared GPU memory (system RAM) is shown as a
+  second pair of graphs under VRAM, same Y, not as “the model fit in 12 GB.”
+  On 20B both codecs’ `nvidia-smi` sit near the cap; the claim is 37,882 vs
+  10,273 MiB working set, not 11,976 vs 11,828.
 - Decode tok/s is **not** the same code path: HF `generate` + dense GEMM vs our
   fused NF4 loop. Report both. Do not claim “we are faster” unless the numbers
-  say so. Current floor is occupancy on small `M` (16 blocks / 70 SMs).
+  say so. Current floor is occupancy on small `M` (16 blocks / 70 SMs). On 20B
+  BF16 generate failed; those tok/s cells stay blank.
 - TTFT is prefill. BF16 uses the HF prefill; NF4 uses `N≤16` chunks.
 - Display VRAM is inside `nvidia-smi`. It is real. Do not subtract it away.
 
@@ -174,12 +226,21 @@ Do not load both codecs at once. Close other fat processes on the 3080 before a
 live run. Do not commit model weights or `.chr` files.
 
 Tests (fixture only, never loads the 3B): `python -m gpu.lab.test_lab`.
+Hard-eval scoring (no GPU): `python -m gpu.lab.test_hard`. See [`eval.md`](eval.md).
+
+Notebook 05 (internlm2.5-20B) needs `einops` and **`sentencepiece==0.1.99`** in
+`torch-gpu` (`0.2.2` rejects InternLM's `<0x00>` pieces). Transformers 5 always
+picks InternLM's fast tokenizer; the harness loads the slow SentencePiece class
+instead. Then `from_pretrained(..., trust_remote_code=True)` can import.
 
 ## Related
 
 | | |
 |---|---|
 | Origin README | [../README.md](../README.md) |
+| Hard eval (not smoke) | [eval.md](eval.md) |
+| Hard eval appendix (full Q&A and times) | [eval-hard-qwen25.md](eval-hard-qwen25.md) |
+| Size vs efficiency (3B / 14B / 20B) | [size-efficiency.md](size-efficiency.md) |
 | Codec specs | [spec/](spec/) |
 | 3080 VRAM budget | [vram-3080.md](vram-3080.md) |
 | CPU roundtrip | [cpu-roundtrip.md](cpu-roundtrip.md) |

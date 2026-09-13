@@ -34,7 +34,7 @@ import torch.nn.functional as F
 from .graph import Gemm, GemmGroup, GraphedGemmGroup, capture, nf4_max_n
 from .kv_cache import KVCache
 
-__all__ = ["TokenLoop", "Generation", "rms_norm_exact"]
+__all__ = ["TokenLoop", "Generation", "rms_norm_exact", "split_internlm_wqkv"]
 
 MIB = 1024 * 1024
 
@@ -54,6 +54,24 @@ def rms_norm_exact(x: torch.Tensor, w: torch.Tensor, eps: float) -> torch.Tensor
 def _rms_norm_fast(x: torch.Tensor, w: torch.Tensor, eps: float) -> torch.Tensor:
     """One fused ATen call. Same formula, one rounding step fewer."""
     return F.rms_norm(x, w.shape, w, eps)
+
+
+def split_internlm_wqkv(
+    y: torch.Tensor, n_q: int, n_kv: int, head_dim: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Undo InternLM2's fused ``wqkv`` packing.
+
+    The GEMM writes ``[N, (n_q + 2*n_kv)*head_dim]``. InternLM2 stores, for
+    each KV head: ``n_q/n_kv`` query heads, then K, then V. See
+    ``modeling_internlm2.py`` (``rearrange(..., gs=2+num_key_value_groups)``).
+    """
+    n = int(y.shape[0])
+    n_rep = n_q // n_kv
+    packed = y.view(n, n_kv, 2 + n_rep, head_dim)
+    q = packed[:, :, :n_rep, :].reshape(n, n_q, head_dim)
+    k = packed[:, :, -2, :].contiguous()
+    v = packed[:, :, -1, :].contiguous()
+    return q, k, v
 
 
 def _rope(t: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
@@ -77,8 +95,16 @@ def _rope_tables(
     "``inv_freq`` was built on CPU and only decode disagrees" bug
     (token-loop.md §6.3): the buffer is whatever ``load_chr_nf4`` rebuilt on the
     device, used here and nowhere else.
+
+    Qwen keeps one ``model.rotary_emb``. InternLM2 keeps one per layer; they
+    share the same dim/base, so layer 0's module is the table.
     """
-    rot = model.model.rotary_emb
+    base = model.model
+    rot = getattr(base, "rotary_emb", None)
+    if rot is None:
+        layer0 = base.layers[0]
+        attn = getattr(layer0, "self_attn", None) or layer0.attention
+        rot = attn.rotary_emb
     pos = torch.arange(max_seq, device=device, dtype=torch.long).unsqueeze(0)
     ref = torch.zeros((1, 1, 1), dtype=dtype, device=device)
     cos, sin = rot(ref, pos)
@@ -158,15 +184,29 @@ class TokenLoop:
         self.eps = float(cfg.rms_norm_eps)
         self.vocab = int(cfg.vocab_size)
 
-        attn0 = base.layers[0].self_attn
+        layer0 = base.layers[0]
+        self._fused_qkv = hasattr(layer0, "attention") and hasattr(layer0.attention, "wqkv")
+        if self._fused_qkv:
+            attn0 = layer0.attention
+            self.embed = base.tok_embeddings
+            self._lm = model.output
+            self._norm1 = [layer.attention_norm.weight for layer in base.layers]
+            self._norm2 = [layer.ffn_norm.weight for layer in base.layers]
+        else:
+            attn0 = layer0.self_attn
+            self.embed = base.embed_tokens
+            self._lm = model.lm_head
+            self._norm1 = [layer.input_layernorm.weight for layer in base.layers]
+            self._norm2 = [layer.post_attention_layernorm.weight for layer in base.layers]
+
         self.head_dim = int(getattr(attn0, "head_dim", self.hidden // self.n_q))
         self.scaling = float(getattr(attn0, "scaling", self.head_dim**-0.5))
         self.q_dim = self.n_q * self.head_dim
         self.n_rep = self.n_q // self.n_kv
         if self.n_q % self.n_kv:
             raise ValueError(f"{self.n_q} q heads do not group into {self.n_kv} kv heads")
+        self.qkv_dim = (self.n_q + 2 * self.n_kv) * self.head_dim
 
-        self.embed = base.embed_tokens
         self.final_norm = base.norm.weight
         if self.final_norm.is_meta:
             raise RuntimeError("model.norm.weight is still on meta: load the .chr first")
@@ -183,8 +223,6 @@ class TokenLoop:
         # own (see GemmGroup). Set overlap=False for the strictly serial loop.
         self.overlap = bool(overlap) and torch.cuda.is_available()
         self._streams = tuple(torch.cuda.Stream() for _ in range(2)) if self.overlap else ()
-        self._norm1 = [l.input_layernorm.weight for l in base.layers]
-        self._norm2 = [l.post_attention_layernorm.weight for l in base.layers]
         self._groups = self._build_groups()
         self._apply(self._groups)
         self.graph_mode = "off"
@@ -210,31 +248,47 @@ class TokenLoop:
         groups: list[GemmGroup] = []
         st = self._streams
         for li, layer in enumerate(self.model.model.layers):
-            sa, mlp = layer.self_attn, layer.mlp
-            groups.append(
-                GemmGroup(
-                    f"L{li}.qkv",
-                    [
-                        Gemm.of(sa.q_proj, f"L{li}.q"),
-                        Gemm.of(sa.k_proj, f"L{li}.k"),
-                        Gemm.of(sa.v_proj, f"L{li}.v"),
-                    ],
-                    st,
+            if self._fused_qkv:
+                sa, mlp = layer.attention, layer.feed_forward
+                groups.append(GemmGroup(f"L{li}.qkv", [Gemm.of(sa.wqkv, f"L{li}.wqkv")]))
+                groups.append(GemmGroup(f"L{li}.o", [Gemm.of(sa.wo, f"L{li}.o")]))
+                groups.append(
+                    GemmGroup(
+                        f"L{li}.gateup",
+                        [
+                            Gemm.of(mlp.w1, f"L{li}.gate"),
+                            Gemm.of(mlp.w3, f"L{li}.up"),
+                        ],
+                        st[:1],
+                    )
                 )
-            )
-            groups.append(GemmGroup(f"L{li}.o", [Gemm.of(sa.o_proj, f"L{li}.o")]))
-            groups.append(
-                GemmGroup(
-                    f"L{li}.gateup",
-                    [
-                        Gemm.of(mlp.gate_proj, f"L{li}.gate"),
-                        Gemm.of(mlp.up_proj, f"L{li}.up"),
-                    ],
-                    st[:1],
+                groups.append(GemmGroup(f"L{li}.down", [Gemm.of(mlp.w2, f"L{li}.down")]))
+            else:
+                sa, mlp = layer.self_attn, layer.mlp
+                groups.append(
+                    GemmGroup(
+                        f"L{li}.qkv",
+                        [
+                            Gemm.of(sa.q_proj, f"L{li}.q"),
+                            Gemm.of(sa.k_proj, f"L{li}.k"),
+                            Gemm.of(sa.v_proj, f"L{li}.v"),
+                        ],
+                        st,
+                    )
                 )
-            )
-            groups.append(GemmGroup(f"L{li}.down", [Gemm.of(mlp.down_proj, f"L{li}.down")]))
-        groups.append(GemmGroup("lm_head", [Gemm.of(self.model.lm_head, "lm_head")]))
+                groups.append(GemmGroup(f"L{li}.o", [Gemm.of(sa.o_proj, f"L{li}.o")]))
+                groups.append(
+                    GemmGroup(
+                        f"L{li}.gateup",
+                        [
+                            Gemm.of(mlp.gate_proj, f"L{li}.gate"),
+                            Gemm.of(mlp.up_proj, f"L{li}.up"),
+                        ],
+                        st[:1],
+                    )
+                )
+                groups.append(GemmGroup(f"L{li}.down", [Gemm.of(mlp.down_proj, f"L{li}.down")]))
+        groups.append(GemmGroup("lm_head", [Gemm.of(self._lm, "lm_head")]))
         return groups
 
     def _apply(self, runners: Sequence[GemmGroup | GraphedGemmGroup]) -> None:
@@ -310,10 +364,18 @@ class TokenLoop:
             g_qkv, g_o, g_gu, g_down = self._layer[li]
 
             h = rms(x, self._norm1[li], eps)
-            q, k, v = g_qkv.run(h)
-            q = _rope(q.reshape(n, self.n_q, hd), cos, sin)
-            k = _rope(k.reshape(n, n_kv, hd), cos, sin)
-            kv.write(li, start_pos, k, v.reshape(n, n_kv, hd))
+            if self._fused_qkv:
+                q, k, v = split_internlm_wqkv(
+                    g_qkv.run(h)[0], self.n_q, n_kv, hd
+                )
+            else:
+                q, k, v = g_qkv.run(h)
+                q = q.reshape(n, self.n_q, hd)
+                k = k.reshape(n, n_kv, hd)
+                v = v.reshape(n, n_kv, hd)
+            q = _rope(q, cos, sin)
+            k = _rope(k, cos, sin)
+            kv.write(li, start_pos, k, v)
             k_all, v_all = kv.view(li, seq)
             x = x.add_(g_o.run(self._attend(q, k_all, v_all, n, mask))[0])
 

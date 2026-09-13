@@ -1,0 +1,11 @@
+﻿Live lab artifacts copied from
+C:\dev\models\runs\lab-internlm20b-20260913-133926
+on the author's RTX 3080 12 GB. Not a synthetic fixture.
+
+bf16 is a recorded miss: internlm2_5-20b-chat ships transformers-4.41
+remote code, so HuggingFace generate cannot run on transformers 5.17.
+Load-time VRAM (37,882 MiB for a 12,288 MiB card) is the measurement;
+there are deliberately no BF16 decode numbers. See summary.notes.
+
+nf4 is live: gpu.host.load_model + gpu.loop.TokenLoop answered all
+three prompts from C:\dev\models\internlm2_5-20b.nf4.chr.

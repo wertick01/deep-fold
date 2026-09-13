@@ -38,7 +38,7 @@ __all__ = [
 # CHR0 `kind`s that are a Linear in the module tree. `embed` is a lookup, not a
 # GEMM (wave2-gpu.md non-goals), so it never reaches the kernel even though
 # `iter_linears` yields it.
-LINEAR_KINDS = frozenset({"q", "k", "v", "o", "gate", "up", "down", "lm_head"})
+LINEAR_KINDS = frozenset({"q", "k", "v", "o", "qkv", "gate", "up", "down", "lm_head"})
 
 MIB = 1024 * 1024
 
@@ -84,7 +84,8 @@ def build_skeleton(
     model_id: str,
     *,
     dtype: torch.dtype = torch.bfloat16,
-    attn_implementation: str = "sdpa",
+    attn_implementation: str | None = "sdpa",
+    trust_remote_code: bool = False,
 ):
     """``AutoConfig`` + ``from_config`` on ``meta``. Reads ``config.json`` only.
 
@@ -94,13 +95,27 @@ def build_skeleton(
     """
     from transformers import AutoConfig, AutoModelForCausalLM
 
-    cfg = AutoConfig.from_pretrained(model_id)
-    kwargs = {"attn_implementation": attn_implementation}
+    cfg = AutoConfig.from_pretrained(
+        model_id, local_files_only=True, trust_remote_code=trust_remote_code
+    )
+    attn = attn_implementation
+    if trust_remote_code:
+        attn = getattr(cfg, "attn_implementation", None) or attn_implementation
+    kwargs = {}
+    if attn:
+        kwargs["attn_implementation"] = attn
     with torch.device("meta"):
         try:
-            model = AutoModelForCausalLM.from_config(cfg, dtype=dtype, **kwargs)
+            model = AutoModelForCausalLM.from_config(
+                cfg, dtype=dtype, trust_remote_code=trust_remote_code, **kwargs
+            )
         except TypeError:  # transformers < 5 spelled it torch_dtype
-            model = AutoModelForCausalLM.from_config(cfg, torch_dtype=dtype, **kwargs)
+            try:
+                model = AutoModelForCausalLM.from_config(
+                    cfg, torch_dtype=dtype, trust_remote_code=trust_remote_code, **kwargs
+                )
+            except TypeError:
+                model = AutoModelForCausalLM.from_config(cfg, torch_dtype=dtype, **kwargs)
     model.eval()
     return model
 
@@ -192,10 +207,26 @@ def _rebuild_rotary(model: nn.Module, device: torch.device) -> list[str]:
             continue
         parent_name, _, child = name.rpartition(".")
         parent = model.get_submodule(parent_name) if parent_name else model
+        fresh = None
         try:
             fresh = type(mod)(model.config).to(device)
         except TypeError:
-            fresh = type(mod)(config=model.config).to(device)
+            try:
+                fresh = type(mod)(config=model.config).to(device)
+            except TypeError:
+                dim = int(getattr(mod, "dim", 0))
+                if dim <= 0:
+                    cfg = getattr(model, "config", None)
+                    heads = int(getattr(cfg, "num_attention_heads", 0) or 1)
+                    dim = int(getattr(cfg, "hidden_size", 0)) // heads
+                kwargs = {}
+                if hasattr(mod, "max_position_embeddings"):
+                    kwargs["max_position_embeddings"] = int(mod.max_position_embeddings)
+                if hasattr(mod, "base"):
+                    kwargs["base"] = float(mod.base)
+                if hasattr(mod, "scaling_factor"):
+                    kwargs["scaling_factor"] = float(mod.scaling_factor)
+                fresh = type(mod)(dim, **kwargs).to(device)
         setattr(parent, child, fresh)
         rebuilt.append(name)
     return rebuilt
@@ -261,7 +292,11 @@ def load_chr_nf4(
     embed_name = _embedding_name(model)
     embed_info = hdr.tensors.get(embed_name) if embed_name else None
     embed_matrix = None
-    lm_head_names = [n for n in linear_modules(model) if n.rsplit(".", 1)[-1] == "lm_head"]
+    lm_head_names = [
+        n
+        for n in linear_modules(model)
+        if n.rsplit(".", 1)[-1] in ("lm_head", "output")
+    ]
     need_embed_bytes = embed_info is not None and embed_info.codec == "nf4" and (
         embed != "skip" or (tied and any(n not in hdr.tensors for n in lm_head_names))
     )
@@ -389,9 +424,10 @@ def load_model(
     layers: Sequence[int] | None = None,
     skip: Iterable[str] = (),
     verbose: bool = False,
+    trust_remote_code: bool = False,
 ):
     """``build_skeleton`` + ``replace_linears`` + ``load_chr_nf4``, in that order."""
-    model = build_skeleton(model_id)
+    model = build_skeleton(model_id, trust_remote_code=trust_remote_code)
     replace_linears(model, skip=skip)
     report = load_chr_nf4(
         model, chr_path, device=device, embed=embed, layers=layers, verbose=verbose

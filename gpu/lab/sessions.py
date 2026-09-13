@@ -24,6 +24,7 @@ is never averaged into tok/s.
 from __future__ import annotations
 
 import gc
+import json
 import os
 import subprocess
 import sys
@@ -94,6 +95,40 @@ def session_from_bundle(bundle: LabBundle, codec: str) -> LabSession:
     return session
 
 
+def _turns_note(conversation: str) -> str:
+    if conversation == "history":
+        return (
+            "history turns: each user prompt is packed with prior replies "
+            "(full chat re-encoded); TokenLoop.generate still resets KV, so this "
+            "is growing prefill, not incremental KV reuse"
+        )
+    return TURNS_NOTE
+
+
+def _write_worker_script(
+    dest: Path,
+    *,
+    messages: Sequence[str],
+    conversation: str,
+    items_json: str | Path | None,
+) -> Path | None:
+    """Point the child at a JSON script when this is not the smoke MESSAGES."""
+    if items_json is not None:
+        return Path(items_json)
+    if conversation != "independent" or list(messages) != list(MESSAGES):
+        path = dest / "worker_script.json"
+        payload = {
+            "conversation": conversation,
+            "items": [
+                {"id": f"msg-{index}", "kind": "smoke", "prompt": prompt}
+                for index, prompt in enumerate(messages, start=1)
+            ],
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return path
+    return None
+
+
 def _spawn_session(
     codec: str,
     *,
@@ -106,6 +141,9 @@ def _spawn_session(
     graphs: bool = True,
     verbose: bool = True,
     trust_remote_code: bool = False,
+    messages: Sequence[str] = MESSAGES,
+    items_json: str | Path | None = None,
+    conversation: str = "independent",
 ) -> LabSession:
     """Child process loads the model, records, exits; this process never holds it."""
     parent = Path(out_dir) if out_dir is not None else Path(tempfile.mkdtemp(prefix="lab-iso-"))
@@ -130,6 +168,12 @@ def _spawn_session(
         "--interval",
         str(interval_s),
     ]
+    script_path = _write_worker_script(
+        dest, messages=messages, conversation=conversation, items_json=items_json
+    )
+    if script_path is not None:
+        cmd.extend(["--items-json", str(script_path)])
+        cmd.extend(["--conversation", conversation])
     if trust_remote_code:
         cmd.append("--trust-remote-code")
     if not graphs:
@@ -139,12 +183,39 @@ def _spawn_session(
     env = os.environ.copy()
     env["PYTHONPATH"] = str(_REPO) + os.pathsep + env.get("PYTHONPATH", "")
     print(f"[isolated {codec}] {' '.join(cmd)}", flush=True)
-    completed = subprocess.run(cmd, cwd=str(_REPO), env=env)
+    env["PYTHONUNBUFFERED"] = "1"
+    completed = subprocess.run(
+        cmd,
+        cwd=str(_REPO),
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    # Jupyter does not show a child's inherited stderr. Echo it so a missing
+    # dep or a CUDA OOM is in the cell, not only in the Jupyter server log,
+    # and keep it next to the CSVs so the run directory explains itself later.
+    if completed.stdout:
+        print(completed.stdout, end="" if completed.stdout.endswith("\n") else "\n", flush=True)
+    if completed.stderr:
+        print(completed.stderr, end="" if completed.stderr.endswith("\n") else "\n", flush=True)
+    try:
+        (dest / "worker.log").write_text(
+            f"$ {' '.join(cmd)}\nreturncode={completed.returncode}\n\n"
+            f"--- stdout ---\n{completed.stdout or ''}\n--- stderr ---\n{completed.stderr or ''}",
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
     # Windows keeps nvidia-smi high until the process is fully gone.
     time.sleep(1.5)
     if not (dest / "summary.csv").is_file():
+        tail = (completed.stderr or completed.stdout or "").strip()
+        extra = f"\n{tail[-4000:]}" if tail else ""
         raise RuntimeError(
-            f"isolated {codec} exited {completed.returncode} and wrote no summary.csv in {dest}"
+            f"isolated {codec} exited {completed.returncode} and wrote no "
+            f"summary.csv in {dest}{extra}"
         )
     session = session_from_bundle(LabBundle.read(dest), codec)
     if completed.returncode != 0:
@@ -241,9 +312,91 @@ def _is_cuda_oom(exc: BaseException) -> bool:
     """HuggingFace sometimes wraps the allocator error in a plain RuntimeError."""
     import torch
 
-    if isinstance(exc, torch.cuda.OutOfMemoryError):
-        return True
-    return isinstance(exc, RuntimeError) and "out of memory" in str(exc).lower()
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, torch.cuda.OutOfMemoryError):
+            return True
+        if isinstance(current, RuntimeError) and "out of memory" in str(current).lower():
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _recorded_miss_notes(exc: BaseException, name: str) -> str:
+    """One summary.notes line: OOM or any other load failure, never a crashed cell."""
+    if _is_cuda_oom(exc):
+        return f"CUDA OOM on {name}: {exc}. Recorded miss, not a crashed cell."
+    stale = _stale_remote_code_note(exc, name)
+    if stale is not None:
+        return f"{stale} Recorded miss, not a crashed cell."
+    return (
+        f"{type(exc).__name__} on {name}: {exc}. Recorded miss, not a crashed cell."
+    )
+
+
+def _stale_remote_code_note(exc: BaseException, model_dir: str) -> str | None:
+    """Name the transformers-5 / remote-code mismatch instead of leaving a bare TypeError.
+
+    InternLM2's ``trust_remote_code`` module was written against transformers
+    4.41. On 5.17 ``Cache.get_max_cache_shape()`` answers a shape tuple where
+    its ``prepare_inputs_for_generation`` expects an ``int``, so the BF16
+    baseline dies with ``can only concatenate tuple (not "int") to tuple``
+    before the first token.
+
+    Swapping in the stock ``GenerationMixin`` method makes ``generate`` *run*,
+    and that is the trap: 5.17 no longer passes ``cache_position``, the remote
+    forward then places RoPE at the wrong positions, and the model emits fluent
+    repetition ("and wine, and wine") instead of an answer. Measured here on
+    20B: our NF4 loop answered all three prompts from the same weights while
+    the patched HF path failed two needles. A baseline that quietly decodes
+    garbage is worse than one that does not run, so it is not patched -- the
+    load-time VRAM is still recorded, and that is what the lab claims.
+    """
+    if not isinstance(exc, TypeError):
+        return None
+    text = str(exc)
+    if "concatenate tuple" not in text and "get_max_cache_shape" not in text:
+        return None
+    return (
+        f"{Path(model_dir).name} ships transformers-4.41 remote code and its "
+        "prepare_inputs_for_generation cannot run on transformers 5: "
+        f"{type(exc).__name__}: {text}. No BF16 decode numbers from this env; "
+        "load-time VRAM above is the measurement. Not patched on purpose -- "
+        "forcing the stock method drops cache_position and the model decodes "
+        "fluent repetition instead of an answer, which would be a fake baseline."
+    )
+
+
+def _load_tokenizer(model_dir: str, trust_remote_code: bool):
+    """Load the tokenizer the model shipped, not the one transformers 5 prefers.
+
+    5.17 always picks ``auto_map['AutoTokenizer'][1]`` (the fast class) and
+    ignores ``use_fast=False``. InternLM2's fast converter then wants protobuf
+    and tiktoken. The slow SentencePiece class at index 0 loads with
+    ``sentencepiece==0.1.99``.
+    """
+    from transformers import AutoTokenizer
+    from transformers.dynamic_module_utils import get_class_from_dynamic_module
+
+    kwargs = dict(local_files_only=True, trust_remote_code=trust_remote_code)
+    config_path = Path(model_dir) / "tokenizer_config.json"
+    auto_map = None
+    if trust_remote_code and config_path.is_file():
+        try:
+            auto_map = json.loads(config_path.read_text(encoding="utf-8")).get(
+                "auto_map", {}
+            ).get("AutoTokenizer")
+        except (OSError, ValueError):
+            auto_map = None
+    slow_ref = None
+    if isinstance(auto_map, (list, tuple)) and auto_map and auto_map[0]:
+        slow_ref = auto_map[0]
+    if slow_ref:
+        cls = get_class_from_dynamic_module(slow_ref, model_dir, **kwargs)
+        return cls.from_pretrained(model_dir, **kwargs)
+    return AutoTokenizer.from_pretrained(model_dir, **kwargs)
 
 
 def _message_row(
@@ -258,7 +411,9 @@ def _message_row(
     decode_ms: float,
     decode_tok_s: float,
     stop_reason: str,
+    quality: Callable[[int, str], bool] | None = None,
 ) -> dict[str, Any]:
+    checker = quality or quality_ok
     return {
         "codec": codec,
         "message_id": message_id,
@@ -270,7 +425,7 @@ def _message_row(
         "decode_ms": decode_ms,
         "decode_tok_s": decode_tok_s,
         "stop_reason": stop_reason,
-        "quality_ok": quality_ok(message_id, response),
+        "quality_ok": checker(message_id, response),
     }
 
 
@@ -355,14 +510,18 @@ def run_bf16(
     verbose: bool = True,
     trust_remote_code: bool = False,
     isolated: bool = False,
+    quality: Callable[[int, str], bool] | None = None,
+    conversation: str = "independent",
+    items_json: str | Path | None = None,
 ) -> LabSession:
     """Uncompressed baseline: ``from_pretrained`` + greedy ``generate``.
 
     ``out_dir`` is accepted for symmetry and, when given, receives this single
     session's CSVs. ``run_both`` writes the merged ones.
 
-    A CUDA OOM is a recorded session (empty messages, the exception in
-    ``notes``), not a crashed cell. That is the 14B/20B measurement on 12 GB.
+    A load failure (CUDA OOM, missing ``sentencepiece`` / ``einops``, a
+    missing ``.chr``) is a recorded session (empty messages, the exception
+    in ``notes``), not a crashed cell. That is the 14B/20B measurement on 12 GB.
 
     ``isolated=True`` runs the session in a child process so this process never
     holds the weights. Use that from the notebook: otherwise Windows keeps the
@@ -377,9 +536,12 @@ def run_bf16(
             interval_s=interval_s,
             verbose=verbose,
             trust_remote_code=trust_remote_code,
+            messages=messages,
+            items_json=items_json,
+            conversation=conversation,
         )
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
+    from transformers import AutoModelForCausalLM, GenerationConfig
 
     _require_cuda()
     model_dir = str(model_dir)
@@ -398,9 +560,7 @@ def run_bf16(
     try:
         sampler.mark("load_start", detail=f"from_pretrained {Path(model_dir).name}, bf16")
         t_load = time.perf_counter()
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_dir, local_files_only=True, trust_remote_code=trust_remote_code
-        )
+        tokenizer = _load_tokenizer(model_dir, trust_remote_code)
         load_kw = dict(
             device_map={"": 0}, local_files_only=True, trust_remote_code=trust_remote_code
         )
@@ -439,8 +599,8 @@ def run_bf16(
             pad_token_id=int(pad_id),
         )
 
-        def encode(text: str):
-            packed = chat_text(tokenizer, text)
+        def encode(text: str, history: Sequence[tuple[str, str]] | None = None):
+            packed = chat_text(tokenizer, text, history=history)
             return tokenizer(packed, return_tensors="pt", add_special_tokens=False).input_ids.to(
                 "cuda"
             )
@@ -462,8 +622,11 @@ def run_bf16(
         torch.cuda.synchronize()
         sampler.mark("warmup_end", detail=f"warmup_ms={(time.perf_counter() - t_warm) * 1000:.0f}")
 
+        checker = quality or quality_ok
+        history_pairs: list[tuple[str, str]] = []
         for index, prompt in enumerate(messages, start=1):
-            ids = encode(prompt)
+            hist = history_pairs if conversation == "history" else None
+            ids = encode(prompt, history=hist)
             prompt_tokens = int(ids.shape[-1])
             stamps: list[float] = []
 
@@ -508,11 +671,14 @@ def run_bf16(
                 decode_ms=decode_ms,
                 decode_tok_s=decode_steps / (decode_ms / 1000.0) if decode_ms > 0 else 0.0,
                 stop_reason="eos" if new_ids and new_ids[-1] in stop else "max_new_tokens",
+                quality=checker,
             )
             session.messages.append(row)
+            if conversation == "history":
+                history_pairs.append((prompt, response))
             sampler.mark("msg_done", index, detail=_done_detail(row))
             # Fresh `generate` call per turn: HF builds a new cache, so the next
-            # prompt is a clean prefill. Nothing is carried across messages.
+            # prompt is a clean prefill unless conversation=history packed prior replies.
 
         try:
             model.to("cpu")
@@ -531,7 +697,7 @@ def run_bf16(
             kv_mib=None,
             notes=(
                 "HuggingFace from_pretrained + generate, dense bf16 GEMM; "
-                f"{TURNS_NOTE}; ttft = time to first generated token; "
+                f"{_turns_note(conversation)}; ttft = time to first generated token; "
                 "kv_mib empty: the HF cache is transient, not a preallocated block"
             ),
         )
@@ -542,9 +708,6 @@ def run_bf16(
         tokenizer = None
         gc.collect()
         unload(sampler, detail=f"{type(exc).__name__}")
-        if not _is_cuda_oom(exc):
-            sampler.stop(detail=f"failed: {type(exc).__name__}")
-            raise
         finished = _finish(
             session,
             sampler,
@@ -554,10 +717,7 @@ def run_bf16(
             vram_after_load_torch=vram_after_torch,
             weight_mib=weight_mib,
             kv_mib=None,
-            notes=(
-                f"CUDA OOM on {Path(model_dir).name}: {exc}. "
-                "Recorded miss, not a crashed cell."
-            ),
+            notes=_recorded_miss_notes(exc, Path(model_dir).name),
         )
         return finished if out_dir is None else _write_single(finished, out_dir)
 
@@ -580,6 +740,9 @@ def run_nf4(
     verbose: bool = True,
     trust_remote_code: bool = False,
     isolated: bool = False,
+    quality: Callable[[int, str], bool] | None = None,
+    conversation: str = "independent",
+    items_json: str | Path | None = None,
 ) -> LabSession:
     """Our driver: ``load_model`` + ``TokenLoop``, greedy, one forward per token.
 
@@ -602,6 +765,9 @@ def run_nf4(
             graphs=graphs,
             verbose=verbose,
             trust_remote_code=trust_remote_code,
+            messages=messages,
+            items_json=items_json,
+            conversation=conversation,
         )
     import torch
 
@@ -610,10 +776,6 @@ def run_nf4(
 
     _require_cuda()
     model_dir, chr_path = str(model_dir), str(chr_path)
-    if not Path(chr_path).is_file():
-        raise FileNotFoundError(f"no NF4 file at {chr_path}")
-
-    from transformers import AutoTokenizer
 
     session = LabSession("nf4")
     sampler = Sampler("nf4", interval_s=interval_s, verbose=verbose)
@@ -632,12 +794,14 @@ def run_nf4(
     graph_mode = "off"
     prefill_chunk = None
     try:
+        if not Path(chr_path).is_file():
+            raise FileNotFoundError(f"no NF4 file at {chr_path}")
         sampler.mark("load_start", detail=f"load_model {Path(chr_path).name}")
         t_load = time.perf_counter()
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_dir, local_files_only=True, trust_remote_code=trust_remote_code
+        tokenizer = _load_tokenizer(model_dir, trust_remote_code)
+        model, report = load_model(
+            model_dir, chr_path, trust_remote_code=trust_remote_code
         )
-        model, report = load_model(model_dir, chr_path)
         torch.cuda.synchronize()
         load_s = time.perf_counter() - t_load
         vram_after_smi = smi_used_mib()
@@ -659,8 +823,11 @@ def run_nf4(
         sampler.mark("warmup_end", detail=f"warmup_ms={warm_ms:.0f}, graph={graph_mode}")
 
         stop = stop_token_ids(tokenizer)
+        checker = quality or quality_ok
+        history_pairs: list[tuple[str, str]] = []
         for index, prompt in enumerate(messages, start=1):
-            packed = chat_text(tokenizer, prompt)
+            hist = history_pairs if conversation == "history" else None
+            packed = chat_text(tokenizer, prompt, history=hist)
             ids = tokenizer(packed, return_tensors="pt", add_special_tokens=False).input_ids[0]
             seen: list[int] = []
 
@@ -670,7 +837,9 @@ def run_nf4(
                 seen.append(token_id)
 
             sampler.mark("msg_send", index, detail=prompt)
-            # `generate` resets the KV cache itself, so the turn is independent.
+            # `generate` resets the KV cache itself. Independent turns are a
+            # clean prefill; history mode still resets KV but the packed prompt
+            # contains prior replies, so this is growing prefill.
             run = loop.generate(ids, max_new_tokens, stop=stop, on_token=on_token)
             response = tokenizer.decode(run.tokens, skip_special_tokens=True)
             row = _message_row(
@@ -684,8 +853,11 @@ def run_nf4(
                 decode_ms=run.decode_ms,
                 decode_tok_s=run.decode_tok_s,
                 stop_reason="eos" if run.stop_token is not None else "max_new_tokens",
+                quality=checker,
             )
             session.messages.append(row)
+            if conversation == "history":
+                history_pairs.append((prompt, response))
             sampler.mark("msg_done", index, detail=_done_detail(row))
 
         weight_mib = loop.weight_bytes / MIB
@@ -712,7 +884,7 @@ def run_nf4(
             kv_mib=kv_mib,
             notes=(
                 f"gpu.host.load_model + gpu.loop.TokenLoop, graph={graph_mode}, "
-                f"max_seq={max_seq}, prefill_chunk={prefill_chunk}; {TURNS_NOTE}; "
+                f"max_seq={max_seq}, prefill_chunk={prefill_chunk}; {_turns_note(conversation)}; "
                 "ttft = prefill of the whole prompt; no from_pretrained, no transformers.generate"
             ),
         )
@@ -724,9 +896,6 @@ def run_nf4(
         tokenizer = None
         gc.collect()
         unload(sampler, detail=f"{type(exc).__name__}")
-        if not _is_cuda_oom(exc):
-            sampler.stop(detail=f"failed: {type(exc).__name__}")
-            raise
         finished = _finish(
             session,
             sampler,
@@ -736,10 +905,7 @@ def run_nf4(
             vram_after_load_torch=vram_after_torch,
             weight_mib=weight_mib,
             kv_mib=kv_mib,
-            notes=(
-                f"CUDA OOM on {Path(chr_path).name}: {exc}. "
-                "Recorded miss, not a crashed cell."
-            ),
+            notes=_recorded_miss_notes(exc, Path(chr_path).name),
         )
         return finished if out_dir is None else _write_single(finished, out_dir)
 
@@ -781,6 +947,9 @@ def run_both(
     verbose: bool = True,
     trust_remote_code: bool = False,
     isolated: bool = True,
+    quality: Callable[[int, str], bool] | None = None,
+    conversation: str = "independent",
+    items_json: str | Path | None = None,
 ) -> LabBundle:
     """BF16 session, process exit, NF4 session -- sequential, on one GPU.
 
@@ -797,6 +966,11 @@ def run_both(
     idle = smi_used_mib()
     sessions: list[LabSession] = []
     child_out = out_dir if isolated else None
+    extra = dict(
+        quality=quality,
+        conversation=conversation,
+        items_json=items_json,
+    )
     if codec in ("both", "bf16"):
         sessions.append(
             run_bf16(
@@ -808,6 +982,7 @@ def run_both(
                 verbose=verbose,
                 trust_remote_code=trust_remote_code,
                 isolated=isolated,
+                **extra,
             )
         )
 
@@ -845,6 +1020,7 @@ def run_both(
                 verbose=verbose,
                 trust_remote_code=trust_remote_code,
                 isolated=isolated,
+                **extra,
             )
             if nf4_note:
                 nf4_session.add_note(nf4_note)

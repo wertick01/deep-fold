@@ -1,0 +1,26 @@
+t_s,codec,event,message_id,detail
+0.0470,bf16,start,,"codec=bf16, interval=0.12s"
+0.5772,bf16,load_start,,"from_pretrained internlm2_5-20b-chat, bf16"
+54.5889,bf16,load_end,,load_s=54.0
+54.5912,bf16,warmup_start,,"8 greedy tokens, not in any reported number"
+119.2616,bf16,unload_start,,TypeError
+130.3556,bf16,unload_end,,"smi_after_unload=828 MiB, torch_alloc=0 MiB"
+130.4154,bf16,stop,,peak_smi=11976 MiB
+0.0365,nf4,start,,"codec=nf4, interval=0.12s"
+0.5632,nf4,load_start,,load_model internlm2_5-20b.nf4.chr
+19.9375,nf4,load_end,,"load_s=19.3, 241 nf4 linears (9774.1 MiB), 97 bf16 tensors (1.14 MiB), embed=nf4-rows (288.1 MiB), tied_lm_head=False, total=10063.3 MiB, 11.3s"
+20.3168,nf4,warmup_start,,"TokenLoop(layers=48, hidden=6144, q/kv=48/8x128, max_seq=512, groups=193, prefill_chunk=16, norm=exact, overlap=True, graph=off)"
+25.0711,nf4,graph_capture,,graph=linears
+25.0712,nf4,warmup_end,,"warmup_ms=3971, graph=linears"
+25.0763,nf4,msg_send,1,Reply with one short sentence. What is the capital of France?
+25.8323,nf4,first_token,1,prefill done
+27.4031,nf4,msg_done,1,"8 new tokens, ttft=756 ms, 4.8 tok/s, stop=eos, quality_ok=true"
+27.4039,nf4,msg_send,2,And the capital of Germany?
+27.7804,nf4,first_token,2,prefill done
+40.6695,nf4,msg_done,2,"64 new tokens, ttft=376 ms, 4.9 tok/s, stop=max_new_tokens, quality_ok=true"
+40.6702,nf4,msg_send,3,What is 17 times 19? Reply with the number only.
+41.3544,nf4,first_token,3,prefill done
+42.6587,nf4,msg_done,3,"8 new tokens, ttft=684 ms, 5.4 tok/s, stop=eos, quality_ok=true"
+47.0118,nf4,unload_start,,"del loop/model/tokenizer, gc, empty_cache"
+47.8443,nf4,unload_end,,"smi_after_unload=1489 MiB, torch_alloc=8 MiB"
+47.8923,nf4,stop,,peak_smi=11828 MiB

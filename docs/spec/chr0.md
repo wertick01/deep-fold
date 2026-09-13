@@ -163,7 +163,7 @@ Align64(x) = x,                 если x % 64 == 0
 
 | Ключ | Тип | Правило |
 |---|---|---|
-| `kind` | string | Ровно одно из: `q`, `k`, `v`, `o`, `gate`, `up`, `down`, `embed`, `lm_head`, `norm`, `other` |
+| `kind` | string | Ровно одно из: `q`, `k`, `v`, `o`, `qkv`, `gate`, `up`, `down`, `embed`, `lm_head`, `norm`, `other` |
 | `codec` | string | `bf16` \| `nf4` \| `int4` \| `vq` |
 | `shape` | array of integer | Длина 1 или 2; каждый элемент `≥ 1`; rank 3+ запрещён |
 | `layer` | integer | См. ниже |
@@ -207,7 +207,7 @@ Align64(x) = x,                 если x % 64 == 0
 
 #### Инвариант «один кодек на файл»
 
-Пусть `Q` — множество `codec` у тензоров с `kind ∈ {q,k,v,o,gate,up,down,embed,lm_head}` и имя **не** оканчивается на `.bias`.
+Пусть `Q` — множество `codec` у тензоров с `kind ∈ {q,k,v,o,qkv,gate,up,down,embed,lm_head}` и имя **не** оканчивается на `.bias`.
 
 - Если `Q` непусто, то `Q` — синглтон `{nf4}` или `{vq}` или `{int4}`. Смесь или `bf16` в `Q` — ошибка ридера.
 - Нормы, bias, `other` в `Q` не входят и всегда `bf16`.
@@ -635,6 +635,8 @@ Row-major C-contiguous, как safetensors. Ampere fragment-major **не** эт�
 | `k_proj` | `k` | `…k_proj.weight` |
 | `v_proj` | `v` | `…v_proj.weight` |
 | `o_proj` | `o` | `…o_proj.weight` |
+| `wo` | `o` | InternLM2 `attention.wo.weight` |
+| `wqkv` | `qkv` | InternLM2 fused QKV `attention.wqkv.weight` |
 | `gate_proj` | `gate` | `…mlp.gate_proj.weight` |
 | `up_proj` | `up` | `…mlp.up_proj.weight` |
 | `down_proj` | `down` | `…mlp.down_proj.weight` |
@@ -659,7 +661,7 @@ Row-major C-contiguous, как safetensors. Ampere fragment-major **не** эт�
 ```
 если chrName оканчивается на ".bias":     codec = bf16
 иначе если kind ∈ {norm, other}:         codec = bf16
-иначе если kind ∈ {q,k,v,o,gate,up,down,embed,lm_head}:
+иначе если kind ∈ {q,k,v,o,qkv,gate,up,down,embed,lm_head}:
                                          codec = file_codec
 иначе:                                   невозможно
 ```

@@ -24,8 +24,10 @@ either: bitsandbytes' `Linear4bit` and the W4A16 kernels do that as well.
 
 What this repository offers is not a first but a complete **stack**, organised
 around **where the weights live for the entire run** and measured end to end on
-one consumer card. The weights are packed once, on the CPU, into a single `.chr`
-file. On the GPU the only stored form of a linear layer is that packed table:
+one consumer card. Packed residency itself is prior art (`Linear4bit`, Marlin,
+AWQ W4A16); the claim is the stack, not that idea. The weights are packed once,
+on the CPU, into a single `.chr` file. On the GPU the only stored form of a
+linear layer is that packed table:
 the module has no dense weight matrix, so nothing can silently recreate a
 full-precision layer.
 During each multiply the processor reads a small tile of packed values,
@@ -105,9 +107,9 @@ materialized, the memory a model occupies on the card is set by the size of its
 14B model with 28,172 MiB of 16-bit weights and a 20B model with 37,882 MiB both
 load onto a 12 GiB card and generate text there, at 7,483 MiB and 10,062 MiB of
 packed weights respectively. Compression is not a free speedup: on a 3B model
-both forms fit on this card. Decode on the packed path is now ahead (about 31.6
-against the committed BF16 23.1 tokens per second); time to the first token is
-still slower (167 against 52 ms). The result is about which models can run
+both forms fit on this card. Decode on the packed path is now ahead (28.4
+against 24.3 tokens per second on a same-session pair); time to the first token is
+still slower (139 against 45 ms). The result is about which models can run
 at all on a given card, and at what rate once they do.
 
 ### The mental model to discard
@@ -199,30 +201,45 @@ Weights and `.chr` files are not in git. The lab's CSVs and figures are, under
 
 ![Qwen2.5-3B-Instruct: two video-memory graphs side by side, BF16 versus NF4, on the same 0–12288 MiB scale](docs/img/lab-qwen25-3b.png)
 
+*Figure. VRAM traces from the committed plate in `docs/runs/qwen25-3b/` (that
+CSV still has the pre-split-K NF4 row, 17.0 tok/s / 212 ms). Do not read decode
+speed off this picture. The markdown table below is a live same-session BF16+NF4
+pair from `C:\dev\models\runs\qwen25-3b-paired-20260913`, not that committed folder.*
+
 | | BF16 (HF `generate`) | NF4 (`CompressedLinear` + `TokenLoop`) |
 |---|---:|---:|
 | Weight MiB | 5,886 | 1,563 |
-| nvidia-smi after load (MiB) | 7,477 | 3,142 |
-| Peak nvidia-smi (MiB) | 7,535 | 3,286 |
-| Mean TTFT (ms) | 52 | 167 |
-| Mean decode tok/s | 23.1 | 31.6 |
+| nvidia-smi after load (MiB) | 8,237 | 3,897 |
+| Peak nvidia-smi (MiB) | 8,910 | 4,036 |
+| Mean TTFT (ms) | 45 | 139 |
+| Mean decode tok/s | 24.3 | 28.4 |
 | Smoke (Paris / Berlin / 323) | pass | pass |
 
-Source: committed BF16 in [`docs/runs/qwen25-3b/`](docs/runs/qwen25-3b/) —
-`summary.csv`, `messages.csv`, `timeline.csv`, and the interactive
-[`lab.html`](docs/runs/qwen25-3b/lab.html); that BF16 row was not re-measured
-today. NF4 mean decode and TTFT from a live WAVE 2 re-measure (`gpu.lab.worker`,
-same harness as that folder); packed weights still 1,563 MiB.
+Source: live paired wave in `C:\dev\models\runs\qwen25-3b-paired-20260913`
+(`summary.csv`, `messages.csv`; `gpu.lab.run --codec both`, isolated worker
+processes). That directory is outside git. The committed folder
+[`docs/runs/qwen25-3b/`](docs/runs/qwen25-3b/) is the older plate and was not
+overwritten. Packed weights still 1,563 MiB (4.25 bits/weight).
 
 A 3B model fits either way on this card. Occupancy was the bottleneck: decode
 used to launch one block per 128 output rows, **16 CTAs** for the query and
 output projections and **2** for grouped key/value, against **70 streaming
 multiprocessors**. After a 64-row tile and split-K those counts are **128**
-and **64**. NF4 decode is about **31.6 tok/s** against the committed BF16
-**23.1** (that BF16 row is from the plate above, not a same-session pair).
-Time to first token is still worse: **167 against 52 ms**, so prefill is the
-next floor. Compression still pays when the uncompressed model does not fit.
-The 14B figures further down are fit-versus-spill, not a kernel win, and they
+and **64**. NF4 decode is **28.4 tok/s** against a same-session BF16 **24.3**.
+A prior NF4-only WAVE 2 figure was 31.6 tok/s; this paired re-measure is lower,
+still ahead of the BF16 row taken in the same session. This is **not** a
+claim that the kernel is faster than Marlin, AWQ, bitsandbytes, or llama.cpp:
+those stacks were not measured (skip rows, including an empty linear microbench
+grid: [`docs/runs/competitor-qwen25-3b/`](docs/runs/competitor-qwen25-3b/)).
+Time to first token is still worse: **139 against 45 ms**, so prefill is the
+next floor. GEMM counters (Nsight, L2-rotated weights, not live tok/s): on
+3B `q_proj` decode, DRAM ~5%, tensor pipe ~1.4%, warp occupancy ~16%; prefill
+N=16 occupancy ~29% — [`docs/runs/ncu/`](docs/runs/ncu/). The next prefill
+floor is sequence **N≥17** (one wider GEMM instead of 16-column chunks):
+planned as BN=32 and BN=64 in `gpu/nf4/plan.py`, same BM/BK as the live n16
+tile. TokenLoop still chunks at 16 and is not raised in this wave. Compression still
+pays when the uncompressed model does not fit. The 14B figures further down
+are fit-versus-spill, not a kernel win, and they
 are not a comparison against Marlin.
 
 ### Qwen2.5-14B-Instruct — BF16 spills off the card, NF4 stays on it
@@ -338,7 +355,9 @@ and is not the 14B result. Accuracy is 7/12, 9/12, 8/12, 10/12. Full
 questions, gold answers, raw replies, what missed and why, and load / prefill
 / decode time per model and per message:
 [`docs/eval-hard-qwen25.md`](docs/eval-hard-qwen25.md). CSVs:
-[`docs/runs/hard-qwen25/`](docs/runs/hard-qwen25/).*
+[`docs/runs/hard-qwen25/`](docs/runs/hard-qwen25/). Twelve items are a
+regression, not WikiText / GSM8K / MMLU. NF4 matching or beating BF16 on
+this set does not mean quantization is lossless.*
 
 ### The chat script
 
@@ -376,11 +395,21 @@ quality benchmark, and no accuracy claim is made from it. Method:
 - **Decode tokens per second compare two different stacks:** HuggingFace
   `generate` with dense BF16 matrix multiplies on one side, our NF4 loop with
   reconstruction inside the multiply on the other. Both are reported, in both
-  directions. On 3B, NF4 decode is now ahead on this card (about 31.6 tok/s
-  against the committed BF16 23.1; that BF16 row was not re-measured with this
-  kernel). TTFT is still BF16: 52 against 167 ms. On 14B, NF4 is far ahead, and
+  directions. On 3B, NF4 decode is now ahead on this card (28.4 tok/s against
+  24.3) on a same-session pair in `C:\dev\models\runs\qwen25-3b-paired-20260913`
+  (a prior NF4-only WAVE 2 figure was 31.6; that mixed 31.6-vs-23.1 claim is
+  retired). TTFT is still BF16: 45 against 139 ms. On 14B, NF4 is far ahead, and
   there the reason is that BF16 has already spilled into system RAM. On 20B NF4
   is 5.01 tok/s; there is no BF16 generate, so there is no speed comparison.
+  **Do not write that deep-fold is faster than existing 4-bit engines.** Marlin,
+  AWQ, GPTQ/Marlin, ExLlamaV2, llama.cpp CUDA Q4, and vLLM were not timed here
+  ([`docs/runs/competitor-qwen25-3b/`](docs/runs/competitor-qwen25-3b/) is all
+  SKIP, e2e and the named `[M,K]×[K,N]` microbench). Isolated venvs, later:
+  [`docs/competitor-venvs.md`](docs/competitor-venvs.md). Nsight counters in
+  [`docs/runs/ncu/`](docs/runs/ncu/) are *our* kernel occupancy and pipes, not
+  tok/s. Kernel-vs-CPU NF4 arithmetic lives in
+  [`gpu/nf4/verify.py`](gpu/nf4/verify.py); split quantization vs kernel error is
+  [`gpu/nf4/numerics.py`](gpu/nf4/numerics.py). Neither is a quality benchmark.
 - **Time-to-first-token is prompt processing,** and the two sides do it
   differently: BF16 uses the HuggingFace path, NF4 uses chunks of at most 16
   positions.
@@ -483,6 +512,10 @@ the lab writeup are in English.
 | Lab method and how to read the figure | [docs/lab.md](docs/lab.md) |
 | CLI (`doctor` / `run`) | [docs/ux.md](docs/ux.md) |
 | Hard eval (3B/14B questions, replies, times) | [docs/eval-hard-qwen25.md](docs/eval-hard-qwen25.md) |
+| Nsight GEMM counters (not tok/s) | [docs/runs/ncu/](docs/runs/ncu/) |
+| 4-bit competitor matrix (all SKIP) | [docs/runs/competitor-qwen25-3b/](docs/runs/competitor-qwen25-3b/) |
+| Isolated competitor venvs (later) | [docs/competitor-venvs.md](docs/competitor-venvs.md) |
+| Kernel vs CPU NF4 oracle | [gpu/nf4/verify.py](gpu/nf4/verify.py), [gpu/nf4/numerics.py](gpu/nf4/numerics.py) |
 | Memory budget on a 3080 12 GB | [docs/vram-3080.md](docs/vram-3080.md) |
 | CPU compress and verify | [docs/cpu-roundtrip.md](docs/cpu-roundtrip.md) |
 | Which models to download | [docs/models.md](docs/models.md) |

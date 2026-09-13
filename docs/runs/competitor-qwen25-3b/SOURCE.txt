@@ -1,4 +1,5 @@
-WAVE 10 K3 isolated competitor matrix (run_stack, not --detect).
-Each slot was attempted. Numeric cells are empty on purpose when skipped.
-A SKIP row is the result. Do not invent Marlin / AWQ / bitsandbytes / llama.cpp tok/s.
-This harness pip-installs nothing and does not convert GGUF to .chr.
+WAVE 10 K3 detect-only matrix.
+ChatGPT GPU matrix: bitsandbytes NF4, GPTQ+Marlin, AWQ, llama.cpp CUDA Q4, ExLlamaV2/EXL2, vLLM. End-to-end tok/s in summary.csv; linear microbench [M,K]x[K,N] for M=1,2,4,8,16,32,64,128,256 on Q/K/V/O/gate/up/down in microbench.csv (us, GB/s, TFLOP/s, occupancy, tensor, DRAM, regs, smem).
+Numeric metric cells are empty on purpose when skipped. A SKIP row is the result. Do not invent tok/s or kernel µs.
+CPU llama.cpp tok/s is not a GPU competitor and is not a fill-in.
+This harness installs nothing, does not convert GGUF to .chr, and never writes into the live torch-gpu env. Isolated venvs: docs/competitor-venvs.md.

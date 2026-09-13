@@ -1,9 +1,18 @@
 """K3: the 4-bit competitor harness. One isolated slot per stack, skip or measure.
 
-There is **no** bitsandbytes / GPTQ-Marlin / AWQ / llama.cpp number anywhere in
-this repo (``gpu/nf4/bench.py`` says so on purpose, and ``docs/runs/`` has no
-competitor CSV). This module is the frame that can produce one honestly. It does
-two things and refuses the third:
+The ChatGPT comparison on this 3080 is named here: end-to-end tok/s **and** a
+linear microbench ``[M,K] x [K,N]`` for ``M = 1,2,4,8,16,32,64,128,256`` on
+Q/K/V/O/gate/up/down, with us / GB/s / TFLOP/s / occupancy / tensor / DRAM /
+regs / smem. Until a stack lives in its **own** venv and a child actually
+runs on a free GPU, every numeric cell is empty and ``skip_reason`` starts
+with ``SKIP:``. Grep the CSV for ``SKIP`` -- a skip row is the result.
+
+There is **no** bitsandbytes / GPTQ-Marlin / AWQ / ExLlamaV2 / llama.cpp /
+vLLM number invented here. ``gpu/nf4/bench.py`` times *our* kernel only;
+``docs/runs/ncu/`` is *our* occupancy, not a competitor. CPU llama.cpp tok/s
+is not a GPU row and is not a slot.
+
+This module does two things and refuses the third:
 
 1. **Detect.** :func:`detect` asks whether a stack's Python modules are
    importable and whether its **native** 4-bit artifact is on disk. Nothing is
@@ -11,20 +20,23 @@ two things and refuses the third:
 2. **Run, isolated.** :func:`run_stack` spawns one child process per stack, then
    exits it. WDDM does not hand VRAM back if two 4-bit runtimes share an
    interpreter, and a broken ``bitsandbytes`` must not be able to break
-   ``chr_nf4_ext``. ``--python`` points a slot at its own venv.
+   ``chr_nf4_ext``. ``--python`` points a slot at its own venv under
+   ``C:\\dev\\models\\venvs\\<stack>`` (see ``docs/competitor-venvs.md``).
+   Never the live ``torch-gpu`` env.
 3. **It never invents a number.** A stack that is not installed, has no
    artifact, links only a CPU backend, or whose slot body is still a skeleton
-   writes a row whose ``skip_reason`` starts with ``SKIP:`` and whose numeric
-   cells are **empty**. Grep the CSV for ``SKIP`` -- a skip row is the result.
+   writes empty numeric cells. The named microbench grid is the same: the
+   ``[M,K,N]`` address is filled (Qwen2.5-3B shapes), the metric cells are not.
 
 Same card, same model family, same prompts as our own row: Qwen2.5-3B-Instruct
 first, because both a dense and a packed copy fit in 12 GB. Each stack uses its
 own native 4-bit artifact (bnb ``Linear4bit`` over the HF BF16 tree, a GPTQ
-checkpoint, an AWQ dump, a GGUF Q4). GGUF is never dequantised into a fake BF16
-tree and re-compressed.
+checkpoint, an AWQ dump, an EXL2 dump, a GGUF Q4 with a CUDA-linked llama.cpp,
+a vLLM engine). GGUF is never dequantised into a fake BF16 tree and re-compressed.
 
     python -m gpu.lab.competitor --detect
-    python -m gpu.lab.competitor --lab qwen25-3b            # attempt all four
+    python -m gpu.lab.competitor --recipe
+    python -m gpu.lab.competitor --lab qwen25-3b            # attempt every GPU stack
     python -m gpu.lab.competitor --stacks deepfold-nf4      # our row, real worker
     python -m gpu.lab.test_competitor
 """
@@ -49,21 +61,34 @@ from .script import MESSAGES, RUNS_DIR
 __all__ = [
     "COMPETITOR_COLUMNS",
     "COMPETITOR_STACKS",
+    "MICROBENCH_COLUMNS",
+    "MICROBENCH_KN",
+    "MICROBENCH_LINEARS",
+    "MICROBENCH_M",
     "OUR_STACKS",
     "PROMPT_SETS",
+    "RECIPE_DOC",
     "SKIP",
     "STACKS",
+    "VENV_ROOT",
     "CompetitorRow",
     "Detection",
+    "MicrobenchRow",
     "Stack",
     "detect",
     "detect_all",
+    "microbench_grid_for",
     "prompts_for",
     "read_competitor_csv",
+    "read_microbench_csv",
+    "recipe_path",
     "run_matrix",
     "run_stack",
     "stack_by_name",
+    "venv_dir",
     "write_competitor_csv",
+    "write_matrix_csvs",
+    "write_microbench_csv",
 ]
 
 _REPO = Path(__file__).resolve().parents[2]
@@ -72,6 +97,8 @@ _REPO = Path(__file__).resolve().parents[2]
 SKIP = "SKIP:"
 
 #: TZ wave10-perf §6.4. Empty numeric cells for skips; no extra columns.
+#: End-to-end tok/s lives here. Kernel µs / occupancy live in microbench.csv
+#: so a tok/s cell cannot hide an ncu guess.
 COMPETITOR_COLUMNS = (
     "stack",
     "install",
@@ -81,6 +108,64 @@ COMPETITOR_COLUMNS = (
     "smi_after_mib",
     "smoke_ok",
     "notes",
+)
+
+#: Isolated venvs, one stack each. Never the live ``torch-gpu`` interpreter.
+#: The recipe in ``docs/competitor-venvs.md`` creates these later; this harness
+#: does not.
+VENV_ROOT = Path(os.environ.get("DEEPFOLD_VENVS", r"C:\dev\models\venvs"))
+RECIPE_DOC = "docs/competitor-venvs.md"
+
+#: ChatGPT linear microbench: C[M, N] = A[M, K] @ B[K, N]. ``M`` is tokens
+#: (decode 1, prefill 2..256). This is **not** ``gpu.nf4.bench.Shape.M``, which
+#: is out_features (this table's ``n``). Mixing the two M's would invent a shape.
+MICROBENCH_M: tuple[int, ...] = (1, 2, 4, 8, 16, 32, 64, 128, 256)
+MICROBENCH_LINEARS: tuple[str, ...] = (
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj",
+)
+#: Qwen2.5-3B (K, N) = (in_features, out_features). Mirrors gpu/nf4/bench.py
+#: QWEN25_3B except lm_head, which ChatGPT did not ask to time here.
+MICROBENCH_KN: dict[str, tuple[int, int]] = {
+    "q_proj": (2048, 2048),
+    "k_proj": (2048, 256),
+    "v_proj": (2048, 256),
+    "o_proj": (2048, 2048),
+    "gate_proj": (2048, 11008),
+    "up_proj": (2048, 11008),
+    "down_proj": (11008, 2048),
+}
+MICROBENCH_COLUMNS = (
+    "stack",
+    "linear",
+    "m",
+    "k",
+    "n",
+    "us",
+    "gb_s",
+    "tflop_s",
+    "occupancy",
+    "tensor",
+    "dram",
+    "regs",
+    "smem",
+    "skip_reason",
+    "notes",
+)
+MICROBENCH_NUMERIC = (
+    "us",
+    "gb_s",
+    "tflop_s",
+    "occupancy",
+    "tensor",
+    "dram",
+    "regs",
+    "smem",
 )
 
 #: Which prompt list a run used. The two are never averaged into one mean, so
@@ -112,8 +197,25 @@ class Stack:
     def needs_artifact(self) -> bool:
         return bool(self.artifact_kind)
 
+    @property
+    def venv_dir(self) -> Path:
+        """Where this slot's isolated interpreter will live, when Pavel creates it."""
+        return VENV_ROOT / self.name
 
-#: The four the TZ asks for, in the order to attempt them.
+
+def venv_dir(stack: Stack | str) -> Path:
+    """``C:\\dev\\models\\venvs\\<stack>``. Created later; not by this harness."""
+    if isinstance(stack, str):
+        stack = stack_by_name(stack)
+    return stack.venv_dir
+
+
+def recipe_path() -> Path:
+    """Isolated-venv recipe. Commands to run later; this file is not executed."""
+    return _REPO / RECIPE_DOC
+
+
+#: GPU stacks ChatGPT asked to name, in attempt order. No CPU llama.cpp slot.
 COMPETITOR_STACKS: tuple[Stack, ...] = (
     Stack(
         name="bitsandbytes-nf4",
@@ -122,9 +224,10 @@ COMPETITOR_STACKS: tuple[Stack, ...] = (
         artifact_env="DEEPFOLD_MODEL",
         artifact_kind="hf-dir",
         note=(
-            "Linear4bit over the HF BF16 tree, quant_type='nf4'. Windows wheels exist "
-            "for some versions; a cu124 mismatch is a skip. Its CUDA nibble order is "
-            "not assumed to match ours (docs/spec/nf4.md §0)."
+            "Linear4bit over the HF BF16 tree, quant_type='nf4'. Isolated venv "
+            r"C:\dev\models\venvs\bitsandbytes-nf4 -- never torch-gpu. Windows "
+            "wheels exist for some versions; a cu124 mismatch is a skip. Its CUDA "
+            "nibble order is not assumed to match ours (docs/spec/nf4.md §0)."
         ),
     ),
     Stack(
@@ -136,8 +239,9 @@ COMPETITOR_STACKS: tuple[Stack, ...] = (
         artifact_kind="quant-dir",
         note=(
             "Needs a GPTQ 4-bit checkpoint of the same model AND a Marlin (or "
-            "GPTQ-Marlin) GPU gemm that actually launches. Marlin is typically Linux "
-            "CUDA; Windows + cu124 often has no wheel. That is a skip, never a "
+            "GPTQ-Marlin) GPU gemm that actually launches. Isolated venv "
+            r"C:\dev\models\venvs\gptq-marlin. Marlin is typically Linux CUDA; "
+            "Windows + cu124 often has no wheel. That is a skip, never a "
             "borrowed tok/s."
         ),
     ),
@@ -148,17 +252,50 @@ COMPETITOR_STACKS: tuple[Stack, ...] = (
         any_of=("awq", "autoawq"),
         artifact_env="DEEPFOLD_AWQ",
         artifact_kind="quant-dir",
-        note="AutoAWQ or equivalent W4A16 GPU kernel over an AWQ dump of the same model.",
+        note=(
+            "AutoAWQ or equivalent W4A16 GPU kernel over an AWQ dump of the same "
+            r"model. Isolated venv C:\dev\models\venvs\awq -- never torch-gpu."
+        ),
     ),
     Stack(
         name="llamacpp-q4",
-        label="llama.cpp Q4 (GGUF)",
+        label="llama.cpp CUDA Q4 (GGUF)",
         any_of=("llama_cpp",),
         artifact_env="DEEPFOLD_GGUF",
         artifact_kind="gguf-file",
         note=(
-            "Needs a CUDA-linked build. If llama_supports_gpu_offload() is False the "
-            "row is a skip: CPU tok/s is not a GPU competitor. Record Q4_K_M vs Q4_0."
+            "Needs a CUDA-linked build in C:\\dev\\models\\venvs\\llamacpp-q4. "
+            "If llama_supports_gpu_offload() is False the row is a skip: CPU tok/s "
+            "is not a GPU competitor. Record Q4_K_M vs Q4_0. A CPU llama.cpp "
+            "binary is not a fill-in for this row."
+        ),
+    ),
+    Stack(
+        name="exllamav2-exl2",
+        label="ExLlamaV2 (EXL2)",
+        modules=("torch",),
+        any_of=("exllamav2",),
+        artifact_env="DEEPFOLD_EXL2",
+        artifact_kind="quant-dir",
+        note=(
+            "Needs an EXL2 dump of the same model AND a CUDA-capable exllamav2 in "
+            r"C:\dev\models\venvs\exllamav2-exl2. Never torch-gpu. A CPU fallback "
+            "is not a GPU competitor. Missing kernel or missing dump is a skip, "
+            "never a borrowed tok/s."
+        ),
+    ),
+    Stack(
+        name="vllm",
+        label="vLLM",
+        modules=("vllm", "torch"),
+        artifact_env="DEEPFOLD_VLLM",
+        artifact_kind="hf-dir",
+        note=(
+            "Serving engine that may load AWQ/GPTQ/Marlin of the same model. "
+            r"Isolated venv C:\dev\models\venvs\vllm. Typical wheels are Linux "
+            "CUDA; Windows + cu124 often has no wheel -- that is a skip. A "
+            "CPU-only engine is not a GPU competitor. Point DEEPFOLD_VLLM at the "
+            "HF tree or a dump vLLM can load."
         ),
     ),
 )
@@ -380,6 +517,102 @@ class CompetitorRow:
         )
 
 
+@dataclass(frozen=True)
+class MicrobenchRow:
+    """One named ``[M,K] x [K,N]`` cell. Metric cells stay ``None`` unless measured."""
+
+    stack: str
+    linear: str
+    m: int
+    k: int
+    n: int
+    us: float | None = None
+    gb_s: float | None = None
+    tflop_s: float | None = None
+    occupancy: float | None = None
+    tensor: float | None = None
+    dram: float | None = None
+    regs: float | None = None
+    smem: float | None = None
+    skip_reason: str = ""
+    notes: str = ""
+
+    @property
+    def skipped(self) -> bool:
+        return bool(self.skip_reason)
+
+    @property
+    def measured(self) -> bool:
+        return self.us is not None
+
+    def as_row(self) -> dict[str, Any]:
+        return {name: getattr(self, name) for name in MICROBENCH_COLUMNS}
+
+    @classmethod
+    def skip(
+        cls,
+        stack: Stack | str,
+        linear: str,
+        m: int,
+        *,
+        skip_reason: str,
+        notes: str = "",
+    ) -> "MicrobenchRow":
+        name = stack.name if isinstance(stack, Stack) else stack
+        try:
+            k, n = MICROBENCH_KN[linear]
+        except KeyError as error:
+            known = ", ".join(MICROBENCH_LINEARS)
+            raise KeyError(f"unknown linear {linear!r}; known: {known}") from error
+        return cls(
+            stack=name,
+            linear=linear,
+            m=m,
+            k=k,
+            n=n,
+            skip_reason=skip_reason,
+            notes=notes,
+        )
+
+
+def _microbench_skip_reason(stack: Stack, row: CompetitorRow) -> str:
+    """E2e skip wins; otherwise the kernel body is still empty. Never copy tok/s."""
+    if row.skip_reason:
+        return row.skip_reason
+    return (
+        f"{SKIP} {stack.label}: linear microbench body is not wired. Named "
+        "[M,K]x[K,N] cell; empty us/GB/s/TFLOP/s/occupancy/tensor/DRAM/regs/smem. "
+        "e2e tok/s is not a kernel µs. CPU llama.cpp is not a fill-in."
+    )
+
+
+def microbench_grid_for(rows: Sequence[CompetitorRow]) -> list[MicrobenchRow]:
+    """Every ChatGPT kernel cell for the attempted stacks. Metrics empty on skip."""
+    grid: list[MicrobenchRow] = []
+    for row in rows:
+        try:
+            stack = stack_by_name(row.stack)
+        except KeyError:
+            continue
+        reason = _microbench_skip_reason(stack, row)
+        note = (
+            "Qwen2.5-3B GEMM C[M,N]=A[M,K]@B[K,N]. occupancy/tensor/DRAM/regs/smem "
+            "need ncu on a free 3080. Not gpu.nf4.bench. CPU llama.cpp is not a fill-in."
+        )
+        for linear in MICROBENCH_LINEARS:
+            for m in MICROBENCH_M:
+                grid.append(
+                    MicrobenchRow.skip(
+                        stack,
+                        linear,
+                        m,
+                        skip_reason=reason,
+                        notes=note,
+                    )
+                )
+    return grid
+
+
 def _cell(value: Any) -> str:
     if value is None:
         return ""
@@ -417,6 +650,59 @@ def read_competitor_csv(path: str | Path) -> list[dict[str, Any]]:
             row["smoke_ok"] = None if smoke == "" else smoke == "true"
             rows.append(row)
         return rows
+
+
+def write_microbench_csv(path: str | Path, rows: Sequence[MicrobenchRow]) -> Path:
+    """Named ChatGPT kernel grid. Metric cells empty on skip; m/k/n are addresses."""
+    dest = Path(path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with dest.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(MICROBENCH_COLUMNS)
+        for row in rows:
+            values = row.as_row()
+            writer.writerow([_cell(values[name]) for name in MICROBENCH_COLUMNS])
+    return dest
+
+
+def read_microbench_csv(path: str | Path) -> list[dict[str, Any]]:
+    """``microbench.csv`` back as dicts. Shape indices stay ints; metrics may be None."""
+    with Path(path).open("r", encoding="utf-8", newline="") as handle:
+        rows: list[dict[str, Any]] = []
+        for raw in csv.DictReader(handle):
+            row: dict[str, Any] = dict(raw)
+            for name in ("m", "k", "n"):
+                text = str(row.get(name) or "").strip()
+                row[name] = int(text) if text else None
+            for name in MICROBENCH_NUMERIC:
+                text = str(row.get(name) or "").strip()
+                row[name] = float(text) if text else None
+            rows.append(row)
+        return rows
+
+
+def write_matrix_csvs(root: str | Path, rows: Sequence[CompetitorRow]) -> tuple[Path, Path]:
+    """``summary.csv`` (e2e) plus ``microbench.csv`` (named kernel cells)."""
+    dest = Path(root)
+    dest.mkdir(parents=True, exist_ok=True)
+    summary = write_competitor_csv(dest / "summary.csv", rows)
+    micro = write_microbench_csv(dest / "microbench.csv", microbench_grid_for(rows))
+    return summary, micro
+
+
+def _matrix_source(kind: str) -> str:
+    return (
+        f"{kind}\n"
+        "ChatGPT GPU matrix: bitsandbytes NF4, GPTQ+Marlin, AWQ, llama.cpp CUDA Q4, "
+        "ExLlamaV2/EXL2, vLLM. End-to-end tok/s in summary.csv; linear microbench "
+        "[M,K]x[K,N] for M=1,2,4,8,16,32,64,128,256 on Q/K/V/O/gate/up/down in "
+        "microbench.csv (us, GB/s, TFLOP/s, occupancy, tensor, DRAM, regs, smem).\n"
+        "Numeric metric cells are empty on purpose when skipped. A SKIP row is the "
+        "result. Do not invent tok/s or kernel µs.\n"
+        "CPU llama.cpp tok/s is not a GPU competitor and is not a fill-in.\n"
+        "This harness installs nothing, does not convert GGUF to .chr, and never "
+        "writes into the live torch-gpu env. Isolated venvs: docs/competitor-venvs.md.\n"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -667,13 +953,12 @@ def run_matrix(
                 verbose=verbose,
             )
         )
-        write_competitor_csv(root / "summary.csv", rows)
+        write_matrix_csvs(root, rows)
     (root / "SOURCE.txt").write_text(
-        "WAVE 10 K3 isolated competitor matrix (run_stack, not --detect).\n"
-        "Each slot was attempted. Numeric cells are empty on purpose when skipped.\n"
-        "A SKIP row is the result. Do not invent Marlin / AWQ / bitsandbytes / "
-        "llama.cpp tok/s.\n"
-        "This harness pip-installs nothing and does not convert GGUF to .chr.\n",
+        _matrix_source(
+            "WAVE 10 K3 isolated competitor matrix (run_stack, not --detect). "
+            "Each slot was attempted."
+        ),
         encoding="utf-8",
     )
     return rows
@@ -781,17 +1066,56 @@ def _probe_llamacpp(probe: _Probe, artifact: str) -> None:
     offload = getattr(llama_cpp, "llama_supports_gpu_offload", None)
     if not callable(offload):
         probe.skip_reason = (
-            f"{SKIP} llama.cpp Q4: this build does not expose "
-            "llama_supports_gpu_offload(); cannot prove a CUDA backend."
+            f"{SKIP} llama.cpp CUDA Q4: this build does not expose "
+            "llama_supports_gpu_offload(); cannot prove a CUDA backend. "
+            "CPU tok/s is not a GPU competitor row."
         )
         return
     if not bool(offload()):
         probe.skip_reason = (
-            f"{SKIP} llama.cpp Q4: llama_supports_gpu_offload() is False -- only the CPU "
+            f"{SKIP} llama.cpp CUDA Q4: llama_supports_gpu_offload() is False -- only the CPU "
             "backend is linked. CPU tok/s is not a GPU competitor row."
         )
         return
     probe.note("CUDA offload is linked; record Q4_K_M vs Q4_0 in notes when measured")
+
+
+def _probe_exllamav2(probe: _Probe, artifact: str) -> None:
+    import torch
+
+    try:
+        import exllamav2
+    except Exception as exc:  # noqa: BLE001
+        probe.skip_reason = (
+            f"{SKIP} ExLlamaV2: import exllamav2 raised {type(exc).__name__}: {exc}"
+        )
+        return
+    probe.note(f"exllamav2=={_version(exllamav2)}, torch=={torch.__version__}")
+    if not torch.cuda.is_available():
+        probe.skip_reason = (
+            f"{SKIP} ExLlamaV2: torch reports no CUDA device in this venv. "
+            "A CPU fallback is not a GPU competitor row."
+        )
+        return
+    probe.note(f"artifact={artifact} (EXL2 dump)")
+
+
+def _probe_vllm(probe: _Probe, artifact: str) -> None:
+    import torch
+
+    try:
+        import vllm
+    except Exception as exc:  # noqa: BLE001
+        probe.skip_reason = f"{SKIP} vLLM: import vllm raised {type(exc).__name__}: {exc}"
+        return
+    probe.note(f"vllm=={_version(vllm)}, torch=={torch.__version__}")
+    if not torch.cuda.is_available():
+        probe.skip_reason = (
+            f"{SKIP} vLLM: torch reports no CUDA device in this venv. "
+            "A CPU engine is not a GPU competitor row."
+        )
+        return
+    probe.note(f"artifact={artifact}")
 
 
 _PROBES = {
@@ -799,6 +1123,8 @@ _PROBES = {
     "gptq-marlin": _probe_gptq_marlin,
     "awq": _probe_awq,
     "llamacpp-q4": _probe_llamacpp,
+    "exllamav2-exl2": _probe_exllamav2,
+    "vllm": _probe_vllm,
 }
 
 
@@ -841,12 +1167,16 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m gpu.lab.competitor",
         description=(
-            "4-bit competitor harness: bitsandbytes NF4, GPTQ+Marlin, AWQ, llama.cpp Q4 "
-            "on this 3080. A missing stack is a skip row, never a tok/s."
+            "4-bit competitor harness on this 3080: bitsandbytes NF4, GPTQ+Marlin, "
+            "AWQ, llama.cpp CUDA Q4, ExLlamaV2/EXL2, vLLM. End-to-end tok/s plus a "
+            "named linear microbench [M,K]x[K,N]. A missing stack is a skip row, "
+            "never a tok/s and never a CPU llama.cpp fill-in."
         ),
         epilog=(
-            "This harness installs nothing and downloads nothing. Point DEEPFOLD_GPTQ / "
-            "DEEPFOLD_AWQ / DEEPFOLD_GGUF at artifacts you already have."
+            "This harness installs nothing and downloads nothing. Isolated venvs: "
+            "docs/competitor-venvs.md (never the live torch-gpu env). Point "
+            "DEEPFOLD_GPTQ / DEEPFOLD_AWQ / DEEPFOLD_GGUF / DEEPFOLD_EXL2 / "
+            "DEEPFOLD_VLLM at artifacts you already have."
         ),
     )
     parser.add_argument("--lab", default="qwen25-3b", help="catalog slug; 3B first (both copies fit)")
@@ -854,8 +1184,8 @@ def _parser() -> argparse.ArgumentParser:
         "--stacks",
         default="",
         help=(
-            "comma-separated slot names, or 'all' / 'ours'. Default: the four "
-            "competitors"
+            "comma-separated slot names, or 'all' / 'ours'. Default: the ChatGPT "
+            "GPU stacks (not CPU llama.cpp)"
         ),
     )
     parser.add_argument("--out", default="", help="output dir; default $DEEPFOLD_RUNS/competitor-...")
@@ -871,10 +1201,15 @@ def _parser() -> argparse.ArgumentParser:
         "--python",
         dest="python_exe",
         default="",
-        help="interpreter for the slot (its own venv is preferred to torch-gpu)",
+        help="interpreter for the slot (its own venv under C:\\dev\\models\\venvs; never torch-gpu)",
     )
     parser.add_argument(
         "--detect", action="store_true", help="print the skip matrix and exit (no GPU, no imports)"
+    )
+    parser.add_argument(
+        "--recipe",
+        action="store_true",
+        help="print the isolated-venv recipe path and exit (does not install)",
     )
     parser.add_argument("--list", action="store_true", help="print the slots and exit")
     parser.add_argument("--quiet", action="store_true")
@@ -908,9 +1243,13 @@ def _report(rows: Sequence[CompetitorRow]) -> None:
         if row.skip_reason:
             print(f"  {row.skip_reason}")
     measured = sum(1 for row in rows if row.measured)
+    kernel = microbench_grid_for(rows)
+    kernel_measured = sum(1 for cell_row in kernel if cell_row.measured)
     print(
-        f"\n{measured}/{len(rows)} slots produced a number. A skip row is the result; "
-        "an invented one is not. Do not rank a blank cell."
+        f"\n{measured}/{len(rows)} e2e slots produced a number. "
+        f"{kernel_measured}/{len(kernel)} kernel cells produced a µs. "
+        "A skip row is the result; an invented one is not. Do not rank a blank cell. "
+        "CPU llama.cpp tok/s is not a GPU competitor."
     )
 
 
@@ -927,6 +1266,19 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         return _worker_main(args)
 
+    if args.recipe:
+        path = recipe_path()
+        print(path)
+        print(f"venv root: {VENV_ROOT}")
+        print("Do not install into the live torch-gpu env. This flag only prints.")
+        if not path.is_file():
+            print(f"recipe file missing: {path}", file=sys.stderr)
+            return 1
+        text = path.read_text(encoding="utf-8")
+        print()
+        print(text, end="" if text.endswith("\n") else "\n")
+        return 0
+
     stacks = _chosen(args.stacks)
 
     if args.list:
@@ -934,7 +1286,12 @@ def main(argv: list[str] | None = None) -> int:
             kind = "ours" if stack.ours else "competitor"
             body = "wired" if stack.wired else "skeleton"
             print(f"{stack.name:<19} {kind:<11} {body:<9} {stack.artifact_env or '-'}")
+            print(f"  venv {stack.venv_dir}")
             print(f"  {stack.note}")
+        print(
+            f"\nkernel grid: {len(MICROBENCH_LINEARS)} linears x {len(MICROBENCH_M)} M "
+            f"x {len(COMPETITOR_STACKS)} GPU stacks; metric cells empty until measured."
+        )
         return 0
 
     lab = lab_by_slug(args.lab)
@@ -968,17 +1325,30 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 rows.append(CompetitorRow.skip(stack, detection))
         print("\nNo GPU touched, nothing installed, nothing downloaded.")
+        kernel = microbench_grid_for(rows)
+        print(
+            f"microbench: {len(rows)} stacks x {len(MICROBENCH_LINEARS)} linears x "
+            f"{len(MICROBENCH_M)} M = {len(kernel)} named cells; "
+            "us/GB/s/TFLOP/s/occupancy/tensor/DRAM/regs/smem empty (SKIP). "
+            "CPU llama.cpp tok/s is not a fill-in."
+        )
         if args.out:
             dest = Path(args.out)
-            csv_path = dest / "summary.csv" if dest.suffix.lower() != ".csv" else dest
-            write_competitor_csv(csv_path, rows)
-            (csv_path.parent / "SOURCE.txt").write_text(
-                "WAVE 10 K3 detect-only matrix.\n"
-                "Numeric cells are empty on purpose. A SKIP row is the result.\n"
-                "Do not invent Marlin / AWQ / bitsandbytes / llama.cpp tok/s.\n",
+            if dest.suffix.lower() == ".csv":
+                write_competitor_csv(dest, rows)
+                micro_path = dest.with_name("microbench.csv")
+                write_microbench_csv(micro_path, kernel)
+                csv_path = dest
+                source_dir = dest.parent
+            else:
+                csv_path, micro_path = write_matrix_csvs(dest, rows)
+                source_dir = dest
+            (source_dir / "SOURCE.txt").write_text(
+                _matrix_source("WAVE 10 K3 detect-only matrix."),
                 encoding="utf-8",
             )
             print(f"\nwrote {csv_path}")
+            print(f"wrote {micro_path}")
         return 0
 
     out_dir = Path(args.out) if args.out else Path(RUNS_DIR) / time.strftime(

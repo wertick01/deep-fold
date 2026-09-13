@@ -1,6 +1,11 @@
 """Oracle checks for chr_nf4_gemm. Run with torch-gpu python from repo root:
 
     C:\\Users\\Professional\\anaconda3\\envs\\torch-gpu\\python.exe gpu/nf4/verify.py
+
+CPU-only quantization vs kernel table (does not JIT, does not load the 3B):
+
+    python -m gpu.nf4.numerics --tiny
+    python -m gpu.nf4.numerics --cuda --n 1,16   # after the lab, GPU must be free
 """
 
 from __future__ import annotations

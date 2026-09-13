@@ -1,8 +1,10 @@
 """GPU-free tests for the competitor harness. Installs nothing, launches nothing.
 
 The property under test is negative: on a box without bitsandbytes / GPTQ / AWQ /
-llama.cpp, every slot must produce a ``SKIP:`` row whose numeric cells are
-**empty**. A fabricated tok/s has to be impossible to reach by accident.
+ExLlamaV2 / llama.cpp CUDA / vLLM, every slot must produce a ``SKIP:`` row whose
+numeric cells are **empty**, including the named linear microbench grid. A
+fabricated tok/s or kernel µs has to be impossible to reach by accident. CPU
+llama.cpp is not a slot.
 
     python -m gpu.lab.test_competitor
     python gpu/lab/test_competitor.py
@@ -27,20 +29,32 @@ from gpu.lab.catalog import lab_by_slug  # noqa: E402
 from gpu.lab.competitor import (  # noqa: E402
     COMPETITOR_COLUMNS,
     COMPETITOR_STACKS,
+    MICROBENCH_COLUMNS,
+    MICROBENCH_KN,
+    MICROBENCH_LINEARS,
+    MICROBENCH_M,
     OUR_STACKS,
     PROMPT_SETS,
+    RECIPE_DOC,
     SKIP,
     STACKS,
+    VENV_ROOT,
     CompetitorRow,
     Detection,
+    MicrobenchRow,
     detect,
     detect_all,
+    microbench_grid_for,
     prompts_for,
     read_competitor_csv,
+    read_microbench_csv,
+    recipe_path,
     run_matrix,
     run_stack,
     stack_by_name,
+    venv_dir,
     write_competitor_csv,
+    write_microbench_csv,
 )
 from gpu.lab.script import MESSAGES  # noqa: E402
 
@@ -72,8 +86,16 @@ def _env(name: str, value: str | None) -> Iterator[None]:
 def gate_slots() -> None:
     names = [stack.name for stack in COMPETITOR_STACKS]
     check(
-        "the four slots the TZ asks for exist, in attempt order",
-        names == ["bitsandbytes-nf4", "gptq-marlin", "awq", "llamacpp-q4"],
+        "ChatGPT GPU stacks exist in attempt order",
+        names
+        == [
+            "bitsandbytes-nf4",
+            "gptq-marlin",
+            "awq",
+            "llamacpp-q4",
+            "exllamav2-exl2",
+            "vllm",
+        ],
         str(names),
     )
     check(
@@ -104,15 +126,54 @@ def gate_slots() -> None:
         "no CPU number",
     )
     check(
+        "llama.cpp is labelled CUDA Q4, not a CPU slot",
+        "CUDA Q4" in stack_by_name("llamacpp-q4").label,
+        stack_by_name("llamacpp-q4").label,
+    )
+    check(
+        "there is no CPU llama.cpp slot to fill in",
+        all("cpu" not in stack.name.lower() for stack in STACKS),
+        str([s.name for s in STACKS]),
+    )
+    check(
         "the Marlin note says Windows may simply have no wheel",
         "no wheel" in stack_by_name("gptq-marlin").note,
         "skip, not invention",
     )
+    check(
+        "ExLlamaV2 and vLLM are named stacks, still skeletons",
+        stack_by_name("exllamav2-exl2").label.startswith("ExLlamaV2")
+        and stack_by_name("vllm").label == "vLLM"
+        and not stack_by_name("exllamav2-exl2").wired
+        and not stack_by_name("vllm").wired,
+        "named, empty",
+    )
+    from gpu.lab.competitor import _PROBES
+
+    check(
+        "every GPU stack has a child probe and none extra",
+        set(_PROBES) == {stack.name for stack in COMPETITOR_STACKS},
+        str(sorted(_PROBES)),
+    )
+    check(
+        "isolated venv root is C:\\dev\\models\\venvs unless overridden",
+        str(VENV_ROOT) == r"C:\dev\models\venvs",
+        str(VENV_ROOT),
+    )
+    check(
+        "each GPU stack names its own venv directory",
+        all(venv_dir(stack).parent == VENV_ROOT and venv_dir(stack).name == stack.name for stack in COMPETITOR_STACKS),
+        str(venv_dir("vllm")),
+    )
     try:
-        stack_by_name("exllama")
+        stack_by_name("llamacpp-cpu")
         check("an unknown stack raises", False, "no raise")
     except KeyError as error:
-        check("an unknown stack raises KeyError", "bitsandbytes-nf4" in str(error), str(error)[:70])
+        check(
+            "CPU llama.cpp is an unknown stack (KeyError), not a row",
+            "llamacpp-q4" in str(error) and "llamacpp-cpu" in str(error),
+            str(error)[:90],
+        )
 
 
 def gate_prompt_sets() -> None:
@@ -134,10 +195,10 @@ def gate_prompt_sets() -> None:
 
 
 def gate_detect_missing() -> None:
-    """On this box none of the four stacks is installed, so all four are skips."""
+    """On this box none of the GPU competitor stacks is installed, so all are skips."""
     lab = lab_by_slug("qwen25-3b")
     detections = detect_all(COMPETITOR_STACKS, model_dir=lab.model_dir, chr_path=lab.chr_path)
-    check("one detection per slot", len(detections) == 4, str(len(detections)))
+    check("one detection per ChatGPT GPU slot", len(detections) == 6, str(len(detections)))
     for detection in detections:
         if detection.runnable:
             check(
@@ -245,7 +306,7 @@ def gate_csv() -> None:
             lines[0],
         )
         check(
-            "the schema has no extra columns to hide a guess in",
+            "the e2e schema is still tok/s only (kernel metrics are a sibling CSV)",
             COMPETITOR_COLUMNS
             == (
                 "stack",
@@ -259,8 +320,13 @@ def gate_csv() -> None:
             ),
             str(COMPETITOR_COLUMNS),
         )
+        check(
+            "the e2e schema has no us/occupancy columns to hide an ncu guess in",
+            "us" not in COMPETITOR_COLUMNS and "occupancy" not in COMPETITOR_COLUMNS,
+            str(COMPETITOR_COLUMNS),
+        )
         back = read_competitor_csv(path)
-        check("one row per attempted stack", len(back) == 5, str(len(back)))
+        check("one row per attempted stack plus the schema example", len(back) == 7, str(len(back)))
         skipped = [row for row in back if row["skip_reason"]]
         check(
             "every skip row has empty ttft, tok/s and smi cells",
@@ -295,12 +361,164 @@ def gate_csv() -> None:
         )
 
 
+def gate_microbench_schema() -> None:
+    """Named ChatGPT kernel grid: shapes filled, metric cells empty until measured."""
+    check(
+        "M is the ChatGPT token list 1..256",
+        MICROBENCH_M == (1, 2, 4, 8, 16, 32, 64, 128, 256),
+        str(MICROBENCH_M),
+    )
+    check(
+        "linears are Q/K/V/O/gate/up/down",
+        MICROBENCH_LINEARS
+        == ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"),
+        str(MICROBENCH_LINEARS),
+    )
+    check(
+        "every linear has a (K, N) = (in, out) for Qwen2.5-3B",
+        set(MICROBENCH_KN) == set(MICROBENCH_LINEARS),
+        str(sorted(MICROBENCH_KN)),
+    )
+    bench = (_REPO / "gpu" / "nf4" / "bench.py").read_text(encoding="utf-8")
+    for name, (k, n) in MICROBENCH_KN.items():
+        needle = f'Shape("{name}", {n}, {k}'
+        check(
+            f"bench.py {name} is out={n} in={k} (ChatGPT [M,K]x[K,N])",
+            needle in bench,
+            needle,
+        )
+    check(
+        "lm_head is not a ChatGPT competitor microbench cell",
+        "lm_head" not in MICROBENCH_KN,
+        "Q/K/V/O/gate/up/down only",
+    )
+    check(
+        "kernel columns name us, bandwidth, TFLOP/s, occupancy, tensor, DRAM, regs, smem",
+        MICROBENCH_COLUMNS
+        == (
+            "stack",
+            "linear",
+            "m",
+            "k",
+            "n",
+            "us",
+            "gb_s",
+            "tflop_s",
+            "occupancy",
+            "tensor",
+            "dram",
+            "regs",
+            "smem",
+            "skip_reason",
+            "notes",
+        ),
+        str(MICROBENCH_COLUMNS),
+    )
+    check(
+        "the kernel schema has no tok/s column to paste e2e into",
+        all("tok" not in name for name in MICROBENCH_COLUMNS),
+        str(MICROBENCH_COLUMNS),
+    )
+    lab = lab_by_slug("qwen25-3b")
+    e2e = [
+        CompetitorRow.skip(stack, detect(stack, model_dir=lab.model_dir, chr_path=lab.chr_path))
+        for stack in COMPETITOR_STACKS
+    ]
+    grid = microbench_grid_for(e2e)
+    want = len(COMPETITOR_STACKS) * len(MICROBENCH_LINEARS) * len(MICROBENCH_M)
+    check(
+        "the named grid is stacks x 7 linears x 9 M",
+        len(grid) == want == 6 * 7 * 9,
+        f"{len(grid)} vs {want}",
+    )
+    check(
+        "every kernel cell is a SKIP with empty metrics",
+        all(
+            cell.skipped
+            and cell.skip_reason.startswith(SKIP)
+            and not cell.measured
+            and cell.us is None
+            and cell.gb_s is None
+            and cell.tflop_s is None
+            and cell.occupancy is None
+            and cell.tensor is None
+            and cell.dram is None
+            and cell.regs is None
+            and cell.smem is None
+            for cell in grid
+        ),
+        "empty metrics",
+    )
+    q1 = next(cell for cell in grid if cell.stack == "bitsandbytes-nf4" and cell.linear == "q_proj" and cell.m == 1)
+    check(
+        "q_proj M=1 is addressed [1,2048]x[2048,2048], not a guessed µs",
+        (q1.k, q1.n) == (2048, 2048) and q1.us is None,
+        f"k={q1.k} n={q1.n} us={q1.us}",
+    )
+    down = next(cell for cell in grid if cell.linear == "down_proj" and cell.m == 256)
+    check(
+        "down_proj is [M,11008]x[11008,2048]",
+        (down.k, down.n) == (11008, 2048),
+        f"k={down.k} n={down.n}",
+    )
+    measured = MicrobenchRow(
+        stack="deepfold-nf4",
+        linear="q_proj",
+        m=1,
+        k=2048,
+        n=2048,
+        us=12.5,
+        gb_s=100.0,
+        tflop_s=1.2,
+        occupancy=15.7,
+        tensor=1.4,
+        dram=5.1,
+        regs=55,
+        smem=13056,
+        notes="illustrative schema row, not a competitor measurement",
+    )
+    with tempfile.TemporaryDirectory(prefix="competitor-micro-") as tmp:
+        path = write_microbench_csv(Path(tmp) / "microbench.csv", [*grid, measured])
+        lines = path.read_text(encoding="utf-8").splitlines()
+        check(
+            "microbench header is exactly the named schema",
+            lines[0] == ",".join(MICROBENCH_COLUMNS),
+            lines[0],
+        )
+        back = read_microbench_csv(path)
+        skipped = [row for row in back if row["skip_reason"]]
+        check(
+            "skip kernel rows round-trip empty metrics",
+            skipped
+            and all(row[name] is None for row in skipped for name in (
+                "us", "gb_s", "tflop_s", "occupancy", "tensor", "dram", "regs", "smem"
+            )),
+            f"{len(skipped)} empty",
+        )
+        numbers = [row for row in back if row["us"] is not None]
+        check(
+            "only the row that carried µs has them back",
+            len(numbers) == 1 and numbers[0]["stack"] == "deepfold-nf4",
+            str([row["stack"] for row in numbers]),
+        )
+        check(
+            "shape indices stay integers, not floats",
+            numbers[0]["m"] == 1 and numbers[0]["k"] == 2048,
+            str(numbers[0]["m"]),
+        )
+        try:
+            MicrobenchRow.skip("bitsandbytes-nf4", "lm_head", 1, skip_reason=f"{SKIP} nope")
+            check("unknown linear raises", False, "no raise")
+        except KeyError as error:
+            check("unknown linear raises KeyError", "lm_head" in str(error), str(error)[:70])
+
+
 def gate_run_matrix_is_all_skips() -> None:
-    """The whole matrix on a box with no competitor stack: four skips, no launches."""
+    """The whole matrix on a box with no competitor stack: six skips, no launches."""
     with tempfile.TemporaryDirectory(prefix="competitor-matrix-") as tmp:
         root = Path(tmp)
         rows = run_matrix(root, lab="qwen25-3b", verbose=False)
-        check("a row per slot, none dropped", len(rows) == 4, str(len(rows)))
+        check("a row per slot, none dropped", len(rows) == 6, str(len(rows)))
         check(
             "not one slot produced a number on this box",
             not any(row.measured for row in rows),
@@ -309,14 +527,19 @@ def gate_run_matrix_is_all_skips() -> None:
         check(
             "every row is a skip with a reason",
             all(row.skipped and row.skip_reason.startswith(SKIP) for row in rows),
-            "all four explained",
+            "all six explained",
         )
         summary = root / "summary.csv"
         check("the matrix wrote summary.csv", summary.is_file(), "summary.csv")
+        micro = root / "microbench.csv"
+        check("the matrix wrote microbench.csv", micro.is_file(), "microbench.csv")
         source = root / "SOURCE.txt"
+        source_text = source.read_text(encoding="utf-8") if source.is_file() else ""
         check(
-            "the matrix wrote SOURCE.txt that forbids invented tok/s",
-            source.is_file() and "Do not invent" in source.read_text(encoding="utf-8"),
+            "the matrix wrote SOURCE.txt that forbids invented tok/s and CPU fill-ins",
+            source.is_file()
+            and "Do not invent" in source_text
+            and "CPU llama.cpp" in source_text,
             "SOURCE.txt",
         )
         text = summary.read_text(encoding="utf-8")
@@ -329,9 +552,20 @@ def gate_run_matrix_is_all_skips() -> None:
             "empty cells",
         )
         check(
-            "the CSV names all four stacks so the matrix is complete",
+            "the CSV names all GPU stacks so the matrix is complete",
             all(stack.name in text for stack in COMPETITOR_STACKS),
-            "four attempted rows",
+            "six attempted rows",
+        )
+        kernel = read_microbench_csv(micro)
+        check(
+            "microbench.csv is the full named grid",
+            len(kernel) == 6 * 7 * 9,
+            str(len(kernel)),
+        )
+        check(
+            "no kernel metric was invented",
+            all(row["us"] is None and row["occupancy"] is None for row in kernel),
+            "empty kernel cells",
         )
         check(
             "no child process was spawned for an uninstalled stack",
@@ -359,9 +593,19 @@ def gate_worker_slot_isolation() -> None:
         "isolated venv preferred",
     )
     check(
-        "the harness does not pip install anything",
+        "the harness source does not contain a pip install command",
         "pip install" not in source.replace("Point DEEPFOLD_GPTQ", ""),
         "detect and skip only",
+    )
+    check(
+        "the harness points at isolated venvs, not torch-gpu",
+        "torch-gpu" in source and r"C:\dev\models\venvs" in source,
+        "isolated",
+    )
+    check(
+        "the llama.cpp child probe refuses a CPU backend as a GPU row",
+        "CPU tok/s is not a GPU competitor row" in source,
+        "no CPU fill-in",
     )
     # A worker asked for a stack that is not installed must still write a JSON
     # skip rather than dying with a traceback the parent has to guess about.
@@ -436,12 +680,14 @@ def gate_cli() -> None:
 
     check("--list exits 0 with no GPU", competitor_main(["--list"]) == 0, "list")
     check("--detect exits 0 with no GPU", competitor_main(["--detect"]) == 0, "detect")
+    check("--recipe exits 0 and does not install", competitor_main(["--recipe"]) == 0, "recipe")
     with tempfile.TemporaryDirectory(prefix="competitor-detect-out-") as tmp:
         dest = Path(tmp) / "summary.csv"
         rc = competitor_main(["--detect", "--out", str(dest)])
         check("--detect --out exits 0", rc == 0, "detect-out")
         check("--detect --out wrote the skip CSV", dest.is_file(), str(dest))
         back = read_competitor_csv(dest)
+        check("detect-only names six GPU stacks", len(back) == 6, str(len(back)))
         check(
             "detect-only numeric cells stay empty",
             back
@@ -455,6 +701,21 @@ def gate_cli() -> None:
             all(str(row["skip_reason"]).startswith(SKIP) for row in back),
             "SKIP:",
         )
+        micro = dest.with_name("microbench.csv")
+        check("--detect --out wrote microbench.csv", micro.is_file(), str(micro))
+        kernel = read_microbench_csv(micro)
+        check(
+            "detect-only kernel cells stay empty",
+            kernel
+            and len(kernel) == 6 * 7 * 9
+            and all(row["us"] is None and row["occupancy"] is None for row in kernel),
+            str(len(kernel)),
+        )
+        check(
+            "detect-only kernel rows are greppable SKIP",
+            all(str(row["skip_reason"]).startswith(SKIP) for row in kernel),
+            "SKIP:",
+        )
     check(
         "--detect on our own rows also works",
         competitor_main(["--detect", "--stacks", "ours"]) == 0,
@@ -462,7 +723,7 @@ def gate_cli() -> None:
     )
     from gpu.lab.competitor import _chosen
 
-    check("no --stacks means the four competitors", _chosen("") == COMPETITOR_STACKS, "default")
+    check("no --stacks means the ChatGPT GPU stacks", _chosen("") == COMPETITOR_STACKS, "default")
     check("--stacks all is every slot", _chosen("all") == STACKS, str(len(STACKS)))
     check("--stacks ours is our two rows", _chosen("ours") == OUR_STACKS, "ours")
     check(
@@ -476,6 +737,38 @@ def gate_cli() -> None:
     check("the default lab is the 3B", args.lab == "qwen25-3b", args.lab)
     check("the default prompt set is smoke", args.prompts == "smoke", args.prompts)
     check("--worker is hidden from the help", args.worker is False, "internal flag")
+
+
+def gate_recipe_doc() -> None:
+    path = recipe_path()
+    check("the recipe lives under docs/", RECIPE_DOC == "docs/competitor-venvs.md", RECIPE_DOC)
+    check("the recipe file exists", path.is_file(), str(path))
+    text = path.read_text(encoding="utf-8")
+    check(
+        "the recipe forbids installing into torch-gpu",
+        "torch-gpu" in text and "Do not" in text,
+        "forbidden env",
+    )
+    check(
+        "the recipe names C:\\dev\\models\\venvs",
+        r"C:\dev\models\venvs" in text,
+        "venv root",
+    )
+    check(
+        "every GPU stack has a venv name in the recipe",
+        all(stack.name in text for stack in COMPETITOR_STACKS),
+        "six dirs",
+    )
+    check(
+        "the recipe refuses a CPU llama.cpp fill-in",
+        "CPU llama.cpp" in text,
+        "no CPU tok/s",
+    )
+    check(
+        "the recipe says wait until the GPU is free",
+        "GPU is **free**" in text or "GPU is free" in text,
+        "later",
+    )
 
 
 def gate_run_stack_never_raises() -> None:
@@ -529,10 +822,12 @@ def main(argv: list[str] | None = None) -> int:
         ("gate_detect_missing", gate_detect_missing),
         ("gate_detect_artifact", gate_detect_artifact),
         ("gate_csv", gate_csv),
+        ("gate_microbench_schema", gate_microbench_schema),
         ("gate_run_matrix_is_all_skips", gate_run_matrix_is_all_skips),
         ("gate_worker_slot_isolation", gate_worker_slot_isolation),
         ("gate_dead_child_is_a_skip", gate_dead_child_is_a_skip),
         ("gate_cli", gate_cli),
+        ("gate_recipe_doc", gate_recipe_doc),
         ("gate_run_stack_never_raises", gate_run_stack_never_raises),
         ("gate_detection_dataclass", gate_detection_dataclass),
     ):

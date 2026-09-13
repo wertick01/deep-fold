@@ -29,8 +29,11 @@ Do not load both copies on a 12 GB card.
   [`eval-hard-qwen25.md`](eval-hard-qwen25.md). InternLM 20B is not on that
   plate.
 
-Not in this wave: WikiText, KL vs a BF16 dump, extra codecs, NF4 kernel
-changes.
+Not in this wave: WikiText **numbers**, KL vs a BF16 dump, extra codecs, NF4
+kernel changes. The prefix NLL adapter is `gpu/lab/nll.py` (CPU tests:
+`python -m gpu.lab.test_nll`); a WikiText cell stays empty until a local
+`kind=ppl` JSON is scored. Local GSM8K parquet → JSON:
+[`eval-local.md`](eval-local.md).
 
 ## Tasks
 

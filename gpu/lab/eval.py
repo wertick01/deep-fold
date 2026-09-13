@@ -20,8 +20,11 @@ The whole point is that CI can run it. Therefore:
 
 Scoring shares the hard plate's number path (:func:`gpu.lab.hard.extract_number`)
 and adds two kinds the hard set does not have: ``mcq`` (letter extract, fail
-closed) and ``ppl`` (no accuracy at all -- a loglikelihood cell, empty until a
-codec adapter fills it). ``truthful`` items fail closed and are allowed to come
+closed) and ``ppl`` (no accuracy at all -- a loglikelihood cell). The codec
+adapter is :mod:`gpu.lab.nll`: teacher-forced NLL on BF16 ``forward`` and NF4
+``TokenLoop.loglikelihood``, persisted as ``loglikelihood.csv`` because
+``messages.csv`` cannot grow a column. An empty cell is still not a 0.0 and
+not a WikiText number. ``truthful`` items fail closed and are allowed to come
 back ``pending_human`` when the reply commits to neither the accepted phrasing
 nor the myth.
 
@@ -459,7 +462,7 @@ def score_eval_item(
                 ""
                 if finite
                 else "no finite loglikelihood: the codec adapter did not report one "
-                "(Q3 owns the ppl script); empty cell, not a zero"
+                "(empty cell, not a zero)"
             ),
         )
 
@@ -536,16 +539,66 @@ def quality_fn_for(items: Sequence[EvalItem]) -> Callable[[int, str], bool]:
     return fn
 
 
+def _sidecar_nll(
+    loglikelihood: Iterable[Mapping[str, Any]] | None,
+) -> dict[int, Mapping[str, Any]]:
+    """``message_id`` -> sidecar row. Isolated workers cannot put NLL on messages.csv."""
+    by_id: dict[int, Mapping[str, Any]] = {}
+    if not loglikelihood:
+        return by_id
+    for row in loglikelihood:
+        try:
+            message_id = int(row["message_id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        by_id[message_id] = row
+    return by_id
+
+
+def _as_nll(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _as_n_tokens(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def score_messages(
     messages: Iterable[Mapping[str, Any]],
     items: Sequence[EvalItem],
+    *,
+    loglikelihood: Iterable[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """One row per reply, keyed to the fixture by 1-based ``message_id``."""
+    """One row per reply, keyed to the fixture by 1-based ``message_id``.
+
+    ``nll`` / ``n_tokens`` come from the message dict (tests) or from the
+    ``loglikelihood.csv`` sidecar the worker writes (live isolated runs).
+    """
     rows: list[dict[str, Any]] = []
     items_list = list(items)
+    sidecar = _sidecar_nll(loglikelihood)
     for row in messages:
         message_id = int(row["message_id"])
         index = message_id - 1
+        extra = sidecar.get(message_id, {})
+        nll = _as_nll(extra.get("nll"))
+        if nll is None:
+            nll = _as_nll(row.get("nll"))
+        n_tokens = _as_n_tokens(extra.get("n_tokens"))
+        if n_tokens is None:
+            n_tokens = _as_n_tokens(row.get("n_tokens"))
+        nll_notes = str(row.get("nll_notes") or extra.get("notes") or "")
         if index < 0 or index >= len(items_list):
             scored = EvalScore(
                 item_id=f"msg-{message_id}",
@@ -557,7 +610,25 @@ def score_messages(
                 notes="message_id has no fixture item",
             )
         else:
-            scored = score_eval_item(items_list[index], str(row.get("response") or ""))
+            scored = score_eval_item(
+                items_list[index],
+                str(row.get("response") or ""),
+                nll=nll,
+                n_tokens=n_tokens,
+            )
+            if scored.kind.lower() == "ppl" and scored.nll is None and nll_notes:
+                scored = EvalScore(
+                    item_id=scored.item_id,
+                    task=scored.task,
+                    kind=scored.kind,
+                    gold=scored.gold,
+                    extracted=scored.extracted,
+                    correct=scored.correct,
+                    pending_human=scored.pending_human,
+                    nll=scored.nll,
+                    n_tokens=scored.n_tokens,
+                    notes=nll_notes,
+                )
         rows.append(
             {
                 "codec": str(row.get("codec") or ""),
@@ -764,6 +835,7 @@ def run_eval_one(
         model_dir=lab.model_dir,
         messages=script.prompts,
         max_new_tokens=script.max_new_tokens,
+        max_seq=hard_max_seq(lab),
         trust_remote_code=lab.trust_remote_code,
         isolated=isolated,
         items_json=script_path,
@@ -775,12 +847,7 @@ def run_eval_one(
         if codec == "bf16":
             session = run_bf16(**common)
         else:
-            session = run_nf4(
-                chr_path=lab.chr_path,
-                max_seq=hard_max_seq(lab),
-                graphs=graphs,
-                **common,
-            )
+            session = run_nf4(chr_path=lab.chr_path, graphs=graphs, **common)
     except Exception as exc:  # noqa: BLE001 -- a dead worker is data, not a traceback
         return _recorded_miss(
             lab,
@@ -793,7 +860,12 @@ def run_eval_one(
 
     bundle = session.as_bundle()
     bundle.write(dest)
-    scores = score_messages(bundle.messages, script.items)
+    sidecar = list(getattr(session, "loglikelihood", ()) or ())
+    if sidecar:
+        from .nll import write_loglikelihood
+
+        write_loglikelihood(dest / "loglikelihood.csv", sidecar)
+    scores = score_messages(session.messages, script.items, loglikelihood=sidecar)
     write_eval_scores(dest / "eval_scores.csv", scores)
     summary = bundle.summary_for(codec) or {}
     return EvalRun(

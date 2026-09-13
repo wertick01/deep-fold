@@ -70,6 +70,8 @@ class LabSession:
     events: list[dict[str, Any]] = field(default_factory=list)
     messages: list[dict[str, Any]] = field(default_factory=list)
     summary: dict[str, Any] = field(default_factory=dict)
+    # Sidecar: frozen messages.csv cannot grow nll columns (bundle.py).
+    loglikelihood: list[dict[str, Any]] = field(default_factory=list)
 
     def as_bundle(self) -> LabBundle:
         return LabBundle.of(
@@ -84,7 +86,9 @@ class LabSession:
         self.summary["notes"] = f"{existing}; {note}" if existing else note
 
 
-def session_from_bundle(bundle: LabBundle, codec: str) -> LabSession:
+def session_from_bundle(
+    bundle: LabBundle, codec: str, *, source: str | Path | None = None
+) -> LabSession:
     """Rebuild a session from CSVs a worker wrote."""
     session = LabSession(codec)
     session.timeline = bundle.rows_for("timeline", codec)
@@ -92,6 +96,10 @@ def session_from_bundle(bundle: LabBundle, codec: str) -> LabSession:
     session.messages = bundle.rows_for("messages", codec)
     summary = bundle.summary_for(codec)
     session.summary = dict(summary) if summary else {"codec": codec}
+    if source is not None:
+        from .nll import read_loglikelihood
+
+        session.loglikelihood = read_loglikelihood(Path(source) / "loglikelihood.csv")
     return session
 
 
@@ -188,6 +196,7 @@ def _spawn_session(
     env["PYTHONPATH"] = str(_REPO) + os.pathsep + env.get("PYTHONPATH", "")
     print(f"[isolated {codec}] {' '.join(cmd)}", flush=True)
     env["PYTHONUNBUFFERED"] = "1"
+    env.setdefault("PYTHONIOENCODING", "utf-8")
     completed = subprocess.run(
         cmd,
         cwd=str(_REPO),
@@ -221,7 +230,7 @@ def _spawn_session(
             f"isolated {codec} exited {completed.returncode} and wrote no "
             f"summary.csv in {dest}{extra}"
         )
-    session = session_from_bundle(LabBundle.read(dest), codec)
+    session = session_from_bundle(LabBundle.read(dest), codec, source=dest)
     if completed.returncode != 0:
         session.add_note(f"worker exited {completed.returncode}")
     return session
@@ -510,6 +519,7 @@ def run_bf16(
     model_dir: str | Path = MODEL_DIR,
     messages: Sequence[str] = MESSAGES,
     max_new_tokens: int = MAX_NEW_TOKENS,
+    max_seq: int = MAX_SEQ,
     interval_s: float = POLL_INTERVAL_S,
     verbose: bool = True,
     trust_remote_code: bool = False,
@@ -540,6 +550,7 @@ def run_bf16(
             out_dir=out_dir,
             model_dir=model_dir,
             max_new_tokens=max_new_tokens,
+            max_seq=max_seq,
             interval_s=interval_s,
             verbose=verbose,
             trust_remote_code=trust_remote_code,
@@ -632,7 +643,25 @@ def run_bf16(
 
         checker = quality or quality_ok
         history_pairs: list[tuple[str, str]] = []
+        kinds = _eval_item_kinds(plate, items_json, len(messages))
+        from .nll import score_prefix
+
         for index, prompt in enumerate(messages, start=1):
+            sampler.mark("msg_send", index, detail=prompt)
+            if kinds[index - 1] == "ppl":
+                result = score_prefix(
+                    tokenizer, prompt, max_seq=max_seq, model=model
+                )
+                _record_ppl(
+                    session,
+                    sampler,
+                    codec="bf16",
+                    index=index,
+                    prompt=prompt,
+                    quality=checker,
+                    result=result,
+                )
+                continue
             hist = history_pairs if conversation == "history" else None
             ids = encode(prompt, history=hist)
             prompt_tokens = int(ids.shape[-1])
@@ -648,7 +677,6 @@ def run_bf16(
                         "first_token", message_id, detail=f"ttft={(stamps[0] - t0) * 1000:.0f} ms"
                     )
 
-            sampler.mark("msg_send", index, detail=prompt)
             torch.cuda.synchronize()
             t0 = time.perf_counter()
             with torch.no_grad():
@@ -838,7 +866,25 @@ def run_nf4(
         stop = stop_token_ids(tokenizer)
         checker = quality or quality_ok
         history_pairs: list[tuple[str, str]] = []
+        kinds = _eval_item_kinds(plate, items_json, len(messages))
+        from .nll import score_prefix
+
         for index, prompt in enumerate(messages, start=1):
+            sampler.mark("msg_send", index, detail=prompt)
+            if kinds[index - 1] == "ppl":
+                result = score_prefix(
+                    tokenizer, prompt, max_seq=max_seq, loop=loop
+                )
+                _record_ppl(
+                    session,
+                    sampler,
+                    codec="nf4",
+                    index=index,
+                    prompt=prompt,
+                    quality=checker,
+                    result=result,
+                )
+                continue
             hist = history_pairs if conversation == "history" else None
             packed = chat_text(tokenizer, prompt, history=hist)
             ids = tokenizer(packed, return_tensors="pt", add_special_tokens=False).input_ids[0]
@@ -849,7 +895,6 @@ def run_nf4(
                     sampler.mark("first_token", message_id, detail="prefill done")
                 seen.append(token_id)
 
-            sampler.mark("msg_send", index, detail=prompt)
             # `generate` resets the KV cache itself. Independent turns are a
             # clean prefill; history mode still resets KV but the packed prompt
             # contains prior replies, so this is growing prefill.
@@ -923,9 +968,74 @@ def run_nf4(
         return finished if out_dir is None else _write_single(finished, out_dir)
 
 
+def _eval_item_kinds(
+    plate: str, items_json: str | Path | None, n: int
+) -> list[str]:
+    """Per-message kind for the eval plate. Smoke / hard stay generate-only."""
+    kinds = [""] * n
+    if plate != "eval" or not items_json:
+        return kinds
+    from .eval import load_eval_script
+
+    items = load_eval_script(items_json).items
+    for index, item in enumerate(items):
+        if index >= n:
+            break
+        kinds[index] = item.kind.lower()
+    return kinds
+
+
+def _record_ppl(
+    session: LabSession,
+    sampler: Sampler,
+    *,
+    codec: str,
+    index: int,
+    prompt: str,
+    quality: Callable[[int, str], bool] | None,
+    result: Any,
+) -> None:
+    """One teacher-forced prefix: frozen message row + sidecar NLL, no generate."""
+    row = _message_row(
+        codec,
+        index,
+        prompt,
+        "",
+        prompt_tokens=int(result.prompt_tokens),
+        new_tokens=0,
+        prefill_ms=float(result.elapsed_ms),
+        decode_ms=0.0,
+        decode_tok_s=0.0,
+        stop_reason="loglikelihood",
+        quality=quality,
+    )
+    session.messages.append(row)
+    session.loglikelihood.append(
+        {
+            "codec": codec,
+            "message_id": index,
+            "nll": result.nll,
+            "n_tokens": result.n_tokens,
+            "roundtrip": result.roundtrip,
+            "notes": result.notes,
+        }
+    )
+    sampler.mark(
+        "first_token",
+        index,
+        detail=f"teacher-forced nll {result.elapsed_ms:.0f} ms",
+    )
+    sampler.mark("msg_done", index, detail=_done_detail(row))
+
+
 def _write_single(session: LabSession, out_dir: str | Path) -> LabSession:
     """Write one session's CSVs (``run_both`` writes the merged tables)."""
-    session.as_bundle().write(out_dir)
+    dest = Path(out_dir)
+    session.as_bundle().write(dest)
+    if session.loglikelihood:
+        from .nll import write_loglikelihood
+
+        write_loglikelihood(dest / "loglikelihood.csv", session.loglikelihood)
     return session
 
 
@@ -991,6 +1101,7 @@ def run_both(
                 model_dir=model_dir,
                 messages=messages,
                 max_new_tokens=max_new_tokens,
+                max_seq=max_seq,
                 interval_s=interval_s,
                 verbose=verbose,
                 trust_remote_code=trust_remote_code,

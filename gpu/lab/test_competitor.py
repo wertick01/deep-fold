@@ -105,9 +105,10 @@ def gate_slots() -> None:
         str([stack.name for stack in OUR_STACKS]),
     )
     check(
-        "no competitor slot claims a measuring body yet",
-        not any(stack.wired for stack in COMPETITOR_STACKS),
-        "skeleton",
+        "bitsandbytes NF4 is the only competitor slot with an e2e body",
+        stack_by_name("bitsandbytes-nf4").wired
+        and not any(stack.wired for stack in COMPETITOR_STACKS if stack.name != "bitsandbytes-nf4"),
+        "bnb e2e; others skeleton",
     )
     check(
         "every competitor slot names the env var for its native artifact",

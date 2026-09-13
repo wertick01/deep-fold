@@ -427,12 +427,21 @@ class TokenLoop:
 
     # --- the forward -------------------------------------------------------
     @torch.no_grad()
-    def forward(self, ids: torch.Tensor, start_pos: int, *, logits: bool = True):
+    def forward(
+        self,
+        ids: torch.Tensor,
+        start_pos: int,
+        *,
+        logits: bool = True,
+        all_positions: bool = False,
+    ):
         """``ids`` is ``[N]``; writes KV slots ``start_pos..start_pos+N-1``.
 
         Returns the ``[vocab]`` logits of the *last* position, or ``None`` when
         ``logits=False`` (a prefill chunk that is not the last one -- the point of
-        prefill is the cache, not the distribution).
+        prefill is the cache, not the distribution). ``all_positions=True`` is
+        teacher-forced NLL: ``[N, vocab]`` at every consumed token, still eager
+        for ``N > 1`` (the CUDA graph is decode ``N == 1`` only).
         """
         n = int(ids.numel())
         seq = start_pos + n
@@ -469,9 +478,13 @@ class TokenLoop:
             x = x.add_(g_down.run(F.silu(gate) * up)[0])
 
         kv.seq_len = seq
+        if all_positions:
+            hidden = self.rms(x, self.final_norm, eps)
+            y = self._head.run(hidden)[0]
+            return y if y.dim() == 2 else y.view(1, -1)
         if not logits:
             return None
-        return self._head.run(rms(x[-1:], self.final_norm, eps))[0].view(-1)
+        return self._head.run(self.rms(x[-1:], self.final_norm, eps))[0].view(-1)
 
     def _attend(
         self,
@@ -528,6 +541,38 @@ class TokenLoop:
             out = self.forward(ids[lo:hi], lo, logits=(hi == n))
         assert out is not None
         return out
+
+    @torch.no_grad()
+    def loglikelihood(
+        self, prompt_ids: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, float]:
+        """Teacher-forced logits at every prompt position. Does not sample.
+
+        Walks the prompt in :attr:`prefill_chunk` pieces so N stays inside the
+        live GEMM cap, but runs ``lm_head`` on every token of each chunk. Returns
+        ``(logits [T, vocab], ids [T], elapsed_ms)``. The lab adapter scores
+        ``ids[1:]`` against ``logits[:-1]``. Empty or ``T > max_seq`` raise
+        ``ValueError`` so the adapter can turn that into an empty cell rather
+        than truncating.
+        """
+        self.reset()
+        ids = prompt_ids.reshape(-1).to(self.device, torch.long)
+        n = int(ids.numel())
+        if n == 0:
+            raise ValueError("empty prompt")
+        if n > self.max_seq:
+            raise ValueError(f"position {n} past max_seq={self.max_seq}")
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        parts: list[torch.Tensor] = []
+        step = max(1, self.prefill_chunk)
+        for lo in range(0, n, step):
+            hi = min(lo + step, n)
+            part = self.forward(ids[lo:hi], lo, all_positions=True)
+            parts.append(part if part.dim() == 2 else part.view(1, -1))
+        logits = parts[0] if len(parts) == 1 else torch.cat(parts, dim=0)
+        torch.cuda.synchronize()
+        return logits, ids, (time.perf_counter() - t0) * 1000.0
 
     @torch.no_grad()
     def step(self, token_id: int) -> torch.Tensor:

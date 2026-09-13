@@ -33,6 +33,10 @@ and **167 ms** TTFT, same harness (`gpu.lab.worker`). The BF16 row (23.1
 tok/s, 52 ms) is the committed CSV and was **not** re-run that day. Memory
 columns are still the committed CSV.
 
+The unlabeled mix of WAVE-2 31.6 with committed BF16 23.1 is retired on the
+README; the progress plate [`img/progress-3080.png`](img/progress-3080.png)
+keeps those rows on separate clusters.
+
 ## Comparison
 
 | Model | Weight MiB (BF16 / NF4) | nvidia-smi after load (BF16 / NF4) | CUDA working set (BF16 / NF4) | Mean TTFT ms (BF16 / NF4) | Mean decode tok/s (BF16 / NF4) | Smoke |

@@ -491,6 +491,26 @@ def gate_score_messages() -> None:
         accuracy(rows, "bf16") is None,
         "None, not 0",
     )
+    ppl_index = next(i for i, item in enumerate(items, start=1) if item.kind == "ppl")
+    filled = score_messages(
+        [{"codec": "nf4", "message_id": ppl_index, "response": "", "nll": 9.25, "n_tokens": 17}],
+        items,
+    )
+    check(
+        "nll on the message dict fills the ppl cell",
+        filled[0]["nll"] == 9.25 and filled[0]["n_tokens"] == 17,
+        str(filled[0]["nll"]),
+    )
+    sidecar = score_messages(
+        [{"codec": "nf4", "message_id": ppl_index, "response": ""}],
+        items,
+        loglikelihood=[{"message_id": ppl_index, "nll": 3.5, "n_tokens": 11, "notes": ""}],
+    )
+    check(
+        "nll from the sidecar fills the ppl cell when messages.csv has none",
+        sidecar[0]["nll"] == 3.5 and sidecar[0]["n_tokens"] == 11,
+        str(sidecar[0]["nll"]),
+    )
     orphan = score_messages([{"codec": "nf4", "message_id": 99, "response": "#### 1"}], items)
     check(
         "an orphan message_id fails closed",
@@ -664,7 +684,39 @@ def gate_worker_cli() -> None:
     check("the worker still defaults to the hard plate", default.plate == "hard", default.plate)
     import inspect
 
-    from gpu.lab.sessions import run_bf16, run_nf4
+    from gpu.lab.eval import FIXTURE_PATH, load_eval_fixture
+    from gpu.lab.sessions import _eval_item_kinds, _spawn_session, run_bf16, run_nf4
+    from gpu.lab.worker import main as worker_main
+
+    src = inspect.getsource(worker_main)
+    check(
+        "the isolated worker forwards items_json so kind=ppl can skip generate",
+        'extra["items_json"] = args.items_json' in src,
+        "items_json must reach run_bf16/run_nf4",
+    )
+    check(
+        "the isolated worker forwards plate=eval with the script",
+        'extra["plate"] = args.plate' in src,
+        "plate must reach _eval_item_kinds",
+    )
+    check(
+        "the isolated worker forwards max_seq into the session",
+        "max_seq=args.max_seq" in src,
+        "max_seq=",
+    )
+    items = load_eval_fixture(FIXTURE_PATH)
+    kinds = _eval_item_kinds("eval", FIXTURE_PATH, len(items))
+    check(
+        "eval kinds include the fixture ppl prefixes",
+        kinds.count("ppl") == 2 and "ppl" in kinds,
+        str(kinds),
+    )
+    skipped = _eval_item_kinds("hard", FIXTURE_PATH, len(items))
+    check(
+        "a hard-plate child does not treat eval kinds as ppl",
+        all(kind == "" for kind in skipped),
+        str(skipped),
+    )
 
     for name, fn in (("run_bf16", run_bf16), ("run_nf4", run_nf4)):
         check(
@@ -672,6 +724,12 @@ def gate_worker_cli() -> None:
             "plate" in inspect.signature(fn).parameters,
             "plate=",
         )
+    spawn_src = inspect.getsource(_spawn_session)
+    check(
+        "isolated children inherit UTF-8 IO so WikiText CJK is not a crash",
+        "PYTHONIOENCODING" in spawn_src,
+        "PYTHONIOENCODING=utf-8",
+    )
 
 
 def gate_module_runs_offline() -> None:

@@ -228,9 +228,13 @@ multiprocessors**. After a 64-row tile and split-K those counts are **128**
 and **64**. NF4 decode is **28.4 tok/s** against a same-session BF16 **24.3**.
 A prior NF4-only WAVE 2 figure was 31.6 tok/s; this paired re-measure is lower,
 still ahead of the BF16 row taken in the same session. This is **not** a
-claim that the kernel is faster than Marlin, AWQ, bitsandbytes, or llama.cpp:
-those stacks were not measured (skip rows, including an empty linear microbench
-grid: [`docs/runs/competitor-qwen25-3b/`](docs/runs/competitor-qwen25-3b/)).
+claim that the kernel is faster than Marlin, AWQ, bitsandbytes, or llama.cpp.
+A live bitsandbytes NF4 smoke on the same three prompts was **22.8 tok/s /
+57 ms** (`C:\dev\models\runs\competitor-qwen25-3b-20260913-bnb-e2e\`, isolated
+venv, `Linear4bit` over the HF tree). Our paired NF4 is **28.4 tok/s / 139 ms**.
+Report both; they are different stacks, not a kernel ranking. The committed
+folder [`docs/runs/competitor-qwen25-3b/`](docs/runs/competitor-qwen25-3b/)
+stays the SKIP matrix. Kernel µs on bitsandbytes are still 0/63 SKIP.
 Time to first token is still worse: **139 against 45 ms**, so prefill is the
 next floor. GEMM counters (Nsight, L2-rotated weights, not live tok/s): on
 3B `q_proj` decode, DRAM ~5%, tensor pipe ~1.4%, warp occupancy ~16%; prefill
@@ -241,6 +245,23 @@ tile. TokenLoop still chunks at 16 and is not raised in this wave. Compression s
 pays when the uncompressed model does not fit. The 14B figures further down
 are fit-versus-spill, not a kernel win, and they
 are not a comparison against Marlin.
+
+### What changed on this card
+
+![Progress on one RTX 3080 12 GB: starved 3B kernel, occupancy fix, honest pair, 14B and 20B fit versus spill, hard eval, local GSM8K slice](docs/img/progress-3080.png)
+
+*Figure. The arc on this card, each number labeled by the plate it came from.
+Committed 3B (`docs/runs/qwen25-3b/`, VRAM figure above) is the starved kernel:
+23.1 vs 17.0 tok/s — do not read decode speed off that picture. Occupancy-fix
+NF4-only was 31.6 tok/s / 167 ms, not a BF16 pair. The table above is the
+same-session pair, 24.3 vs 28.4 tok/s. 14B/20B working sets vs the 12,288 MiB
+card line; hard eval 7/12, 9/12, 8/12, 10/12 on a separate Q&A sheet. A local
+GSM8K slice of the first 200 of 1,319 main-test items (greedy,
+`max_new_tokens = 256`) is on this picture only — not a published GSM8K score.
+One live bitsandbytes NF4 smoke row (22.8 tok/s / 57 ms) is in the footer;
+that is a different stack, not a kernel ranking. This plate summarizes; it
+does not replace `lab-qwen25-14b.png` panel F or `hard-eval-qwen25.png`.
+Redraw: `python -m gpu.lab.progress_plate --redraw`.*
 
 ### Qwen2.5-14B-Instruct — BF16 spills off the card, NF4 stays on it
 
@@ -401,10 +422,14 @@ quality benchmark, and no accuracy claim is made from it. Method:
   retired). TTFT is still BF16: 45 against 139 ms. On 14B, NF4 is far ahead, and
   there the reason is that BF16 has already spilled into system RAM. On 20B NF4
   is 5.01 tok/s; there is no BF16 generate, so there is no speed comparison.
-  **Do not write that deep-fold is faster than existing 4-bit engines.** Marlin,
-  AWQ, GPTQ/Marlin, ExLlamaV2, llama.cpp CUDA Q4, and vLLM were not timed here
-  ([`docs/runs/competitor-qwen25-3b/`](docs/runs/competitor-qwen25-3b/) is all
-  SKIP, e2e and the named `[M,K]×[K,N]` microbench). Isolated venvs, later:
+  **Do not write that deep-fold is faster than existing 4-bit engines.** A live
+  bitsandbytes NF4 smoke (same three prompts, isolated venv) was 22.8 tok/s /
+  57 ms; our paired NF4 is 28.4 tok/s / 139 ms. Those are different stacks
+  (`Linear4bit` vs `CompressedLinear` + `TokenLoop`), not a kernel ranking.
+  Marlin, AWQ, GPTQ/Marlin, ExLlamaV2, llama.cpp CUDA Q4, and vLLM were not
+  timed. The committed folder
+  [`docs/runs/competitor-qwen25-3b/`](docs/runs/competitor-qwen25-3b/) stays
+  SKIP; live tok/s stay outside git. Isolated venvs:
   [`docs/competitor-venvs.md`](docs/competitor-venvs.md). Nsight counters in
   [`docs/runs/ncu/`](docs/runs/ncu/) are *our* kernel occupancy and pipes, not
   tok/s. Kernel-vs-CPU NF4 arithmetic lives in
@@ -420,6 +445,8 @@ quality benchmark, and no accuracy claim is made from it. Method:
   Go, and the HuggingFace tree are user-provided; Linux tok/s are unpublished.
 - **The lab can emit a synthetic figure** (`--dry-plot`), whose CSVs are
   stamped `FIXTURE`. Nothing in the tables above comes from that fixture.
+- **WikiText PPL is unpublished.** An NLL adapter exists; no corpus number
+  is quoted here.
 
 ## Build the compressor
 
@@ -500,6 +527,7 @@ Or redraw a committed plate from its CSVs:
 
 ```powershell
 python -c "from gpu.lab import comparison_figure; comparison_figure(r'docs/runs/qwen25-3b')"
+python -m gpu.lab.progress_plate --redraw
 ```
 
 ## Docs
@@ -509,6 +537,7 @@ the lab writeup are in English.
 
 | | |
 |---|---|
+| Progress plate (first graphs through now) | [docs/img/progress-3080.png](docs/img/progress-3080.png) |
 | Lab method and how to read the figure | [docs/lab.md](docs/lab.md) |
 | CLI (`doctor` / `run`) | [docs/ux.md](docs/ux.md) |
 | Hard eval (3B/14B questions, replies, times) | [docs/eval-hard-qwen25.md](docs/eval-hard-qwen25.md) |

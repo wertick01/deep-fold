@@ -56,7 +56,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from .catalog import LabModel, lab_by_slug
-from .script import MESSAGES, RUNS_DIR
+from .script import MESSAGES, RUNS_DIR, chat_text, quality_ok
 
 __all__ = [
     "COMPETITOR_COLUMNS",
@@ -223,6 +223,7 @@ COMPETITOR_STACKS: tuple[Stack, ...] = (
         modules=("bitsandbytes", "transformers", "torch"),
         artifact_env="DEEPFOLD_MODEL",
         artifact_kind="hf-dir",
+        wired=True,
         note=(
             "Linear4bit over the HF BF16 tree, quant_type='nf4'. Isolated venv "
             r"C:\dev\models\venvs\bitsandbytes-nf4 -- never torch-gpu. Windows "
@@ -1128,16 +1129,225 @@ _PROBES = {
 }
 
 
+def _stop_ids(tokenizer: Any) -> list[int]:
+    """Qwen-family stops from this tokenizer. Does not import ``gpu.loop`` (that
+    package pulls ``gpu.nf4`` via ``gpu.loop.__init__``)."""
+    ids: list[int] = []
+    eos = getattr(tokenizer, "eos_token_id", None)
+    if isinstance(eos, int):
+        ids.append(eos)
+    elif isinstance(eos, (list, tuple)):
+        ids.extend(int(x) for x in eos if x is not None)
+    unk = getattr(tokenizer, "unk_token_id", None)
+    convert = getattr(tokenizer, "convert_tokens_to_ids", None)
+    if callable(convert):
+        for name in ("<|im_end|>", "<|endoftext|>"):
+            tid = convert(name)
+            if isinstance(tid, int) and tid != unk:
+                ids.append(tid)
+    seen: set[int] = set()
+    out: list[int] = []
+    for tid in ids:
+        if tid not in seen:
+            seen.add(tid)
+            out.append(tid)
+    return out or [151643, 151645]
+
+
+def _step_clock(on_step: Any) -> Any:
+    import torch
+    from transformers import StoppingCriteria
+
+    class _Clock(StoppingCriteria):  # type: ignore[misc]
+        def __call__(self, input_ids, scores, **kwargs):  # noqa: ANN001, ANN003
+            on_step()
+            return torch.zeros(input_ids.shape[0], dtype=torch.bool, device=input_ids.device)
+
+    return _Clock()
+
+
+def _mean(values: Sequence[float]) -> float | None:
+    if not values:
+        return None
+    return float(sum(values) / len(values))
+
+
+def _measure_bitsandbytes(stack: Stack, probe: _Probe, args: argparse.Namespace) -> dict[str, Any]:
+    """HF ``generate`` over ``Linear4bit`` NF4. Times live on this 3080; never
+    copies ``gpu.nf4.bench`` or ``docs/runs/ncu/``."""
+    import gc
+
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, GenerationConfig
+
+    from .sampler import smi_used_mib
+
+    _refuse_our_kernel()
+    artifact = args.artifact
+    if not Path(artifact).is_dir():
+        probe.skip_reason = (
+            f"{SKIP} bitsandbytes NF4: HF tree is not a directory at {artifact or 'unset'}."
+        )
+        return probe.payload(stack)
+
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=torch.bfloat16,
+        bnb_4bit_use_double_quant=False,
+    )
+    tokenizer = AutoTokenizer.from_pretrained(
+        artifact, local_files_only=True, trust_remote_code=False
+    )
+    model = AutoModelForCausalLM.from_pretrained(
+        artifact,
+        quantization_config=bnb_config,
+        device_map={"": 0},
+        local_files_only=True,
+        trust_remote_code=False,
+    )
+    model.eval()
+    torch.cuda.synchronize()
+    smi_after = smi_used_mib()
+    probe.note(f"smi_after_load_mib={smi_after}")
+
+    stop = _stop_ids(tokenizer)
+    pad_id = tokenizer.pad_token_id
+    if pad_id is None:
+        pad_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else stop[0]
+    generation = GenerationConfig(
+        max_new_tokens=int(args.max_new_tokens),
+        do_sample=False,
+        num_beams=1,
+        use_cache=True,
+        eos_token_id=list(stop),
+        pad_token_id=int(pad_id),
+    )
+
+    def encode(text: str):
+        packed = chat_text(tokenizer, text)
+        return tokenizer(packed, return_tensors="pt", add_special_tokens=False).input_ids.to("cuda")
+
+    with torch.no_grad():
+        model.generate(
+            input_ids=encode("Hello."),
+            generation_config=GenerationConfig(
+                max_new_tokens=8,
+                do_sample=False,
+                num_beams=1,
+                use_cache=True,
+                eos_token_id=list(stop),
+                pad_token_id=int(pad_id),
+            ),
+        )
+    torch.cuda.synchronize()
+
+    prompts = prompts_for(args.prompts)
+    ttfts: list[float] = []
+    tok_s: list[float] = []
+    messages: list[dict[str, Any]] = []
+    for index, prompt in enumerate(prompts, start=1):
+        ids = encode(prompt)
+        prompt_tokens = int(ids.shape[-1])
+        stamps: list[float] = []
+
+        def on_step() -> None:
+            torch.cuda.synchronize()
+            stamps.append(time.perf_counter())
+
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        with torch.no_grad():
+            output = model.generate(
+                input_ids=ids,
+                attention_mask=torch.ones_like(ids),
+                generation_config=generation,
+                stopping_criteria=[_step_clock(on_step)],
+            )
+        torch.cuda.synchronize()
+        t_end = time.perf_counter()
+        new_ids = output[0][prompt_tokens:].tolist()
+        response = tokenizer.decode(new_ids, skip_special_tokens=True)
+        prefill_ms = ((stamps[0] if stamps else t_end) - t0) * 1000.0
+        decode_ms = ((stamps[-1] if stamps else t_end) - (stamps[0] if stamps else t_end)) * 1000.0
+        decode_steps = max(0, len(stamps) - 1)
+        decode_tok_s = decode_steps / (decode_ms / 1000.0) if decode_ms > 0 else 0.0
+        ok = quality_ok(index, response)
+        ttfts.append(prefill_ms)
+        tok_s.append(decode_tok_s)
+        messages.append(
+            {
+                "message_id": index,
+                "prompt": prompt,
+                "response": response,
+                "prompt_tokens": prompt_tokens,
+                "new_tokens": len(new_ids),
+                "prefill_ms": prefill_ms,
+                "decode_ms": decode_ms,
+                "decode_tok_s": decode_tok_s,
+                "quality_ok": ok,
+            }
+        )
+        probe.note(
+            f"msg{index} ttft_ms={prefill_ms:.1f} tok_s={decode_tok_s:.1f} "
+            f"new={len(new_ids)} quality={ok}"
+        )
+
+    dest = Path(args.out)
+    dest.mkdir(parents=True, exist_ok=True)
+    (dest / "messages.json").write_text(
+        json.dumps(messages, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+
+    try:
+        model.to("cpu")
+    except Exception:  # noqa: BLE001 -- unload is best-effort before the child exits
+        pass
+    del model, tokenizer
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    _refuse_our_kernel()
+    mean_ttft = _mean(ttfts)
+    mean_tok = _mean(tok_s)
+    smoke = all(row["quality_ok"] for row in messages) if messages else None
+    probe.note(f"prompts={args.prompts}, max_new_tokens={args.max_new_tokens}")
+    return {
+        "stack": stack.name,
+        "install": "present",
+        "skip_reason": "",
+        "mean_ttft_ms": mean_ttft,
+        "mean_decode_tok_s": mean_tok,
+        "smi_after_mib": smi_after,
+        "smoke_ok": smoke,
+        "notes": "; ".join([stack.note, *probe.notes]),
+    }
+
+
+_MEASURE = {
+    "bitsandbytes-nf4": _measure_bitsandbytes,
+}
+
+
 def _worker_main(args: argparse.Namespace) -> int:
     """The isolated slot. Probes for real, writes ``competitor.json``, exits."""
     stack = stack_by_name(args.stack)
     dest = Path(args.out)
     dest.mkdir(parents=True, exist_ok=True)
     probe = _Probe()
+    payload: dict[str, Any]
     try:
         _refuse_our_kernel()
         _PROBES[stack.name](probe, args.artifact)
-        if not probe.skip_reason:
+        if probe.skip_reason:
+            payload = probe.payload(stack)
+        elif stack.name in _MEASURE:
+            payload = _MEASURE[stack.name](stack, probe, args)
+        else:
             probe.skip_reason = (
                 f"{SKIP} {stack.label}: the stack loads and the artifact is on disk, but "
                 "this slot has no inference body yet (K3 skeleton). Empty tok/s cells on "
@@ -1147,10 +1357,11 @@ def _worker_main(args: argparse.Namespace) -> int:
                 f"probe passed with prompts={args.prompts}, "
                 f"max_new_tokens={args.max_new_tokens}"
             )
+            payload = probe.payload(stack)
     except Exception as exc:  # noqa: BLE001 -- an unloadable stack is the measurement
-        probe.install = "missing"
+        probe.install = "missing" if "import" in type(exc).__name__.lower() or not probe.notes else "present"
         probe.skip_reason = f"{SKIP} {stack.label}: {type(exc).__name__}: {exc}"
-    payload = probe.payload(stack)
+        payload = probe.payload(stack)
     (dest / "competitor.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )

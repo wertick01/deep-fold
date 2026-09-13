@@ -56,14 +56,19 @@ def _parser() -> argparse.ArgumentParser:
         default="hard",
         help=(
             "which scorer owns --items-json: the hard plate (gsm8k / yesno / needle) "
-            "or the eval stub (mcq / truthful / ppl). Only affects the quality_ok "
-            "column; the authoritative table is written by the parent."
+            "or the eval stub (mcq / truthful / ppl). The child must see this so "
+            "kind=ppl runs teacher-forced NLL instead of generate."
         ),
     )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:  # noqa: BLE001 -- a closed pipe still has to load the model
+        pass
     args = _parser().parse_args(argv)
     from gpu.lab.sessions import run_bf16, run_nf4
 
@@ -71,6 +76,8 @@ def main(argv: list[str] | None = None) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     extra: dict = {}
     if args.items_json:
+        extra["items_json"] = args.items_json
+        extra["plate"] = args.plate
         if args.plate == "eval":
             from gpu.lab.eval import load_eval_script
 
@@ -89,6 +96,7 @@ def main(argv: list[str] | None = None) -> int:
         out_dir=out_dir,
         model_dir=args.model_dir,
         max_new_tokens=args.max_new_tokens,
+        max_seq=args.max_seq,
         interval_s=args.interval,
         verbose=not args.quiet,
         trust_remote_code=args.trust_remote_code,
@@ -100,7 +108,6 @@ def main(argv: list[str] | None = None) -> int:
     else:
         run_nf4(
             chr_path=args.chr_path,
-            max_seq=args.max_seq,
             graphs=args.graphs,
             **common,
         )

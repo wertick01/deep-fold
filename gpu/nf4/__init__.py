@@ -35,7 +35,7 @@ if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
 from gpu.ext_bin import find_ext, have_host_compiler  # noqa: E402
-from .plan import LIVE_MAX_N  # noqa: E402
+from .plan import LIVE_MAX_N, PLAN_MAX_N  # noqa: E402
 
 _ext: Any = None
 
@@ -155,18 +155,24 @@ def nf4_gemm(
     M: int,
     K: int,
     K_pad: int,
+    max_n: int = LIVE_MAX_N,
 ) -> torch.Tensor:
-    """Fused NF4 dequant-MMA. ``x`` is BF16 ``[K, N]`` or ``[K]`` (live N in 1..16).
+    """Fused NF4 dequant-MMA. ``x`` is BF16 ``[K, N]`` or ``[K]``.
 
-    ``N>LIVE_MAX_N`` is a host problem: this wrapper raises without loading the
-    extension; ``nf4_linear`` chunks. Wide N is plan-only.
+    Default ``max_n`` is :data:`LIVE_MAX_N` (16): TokenLoop / ``nf4_linear``
+    chunk above that. Pass ``max_n=PLAN_MAX_N`` only from the oracle.
     """
     n = 1 if x.dim() == 1 else int(x.size(-1))
-    if n < 1 or n > LIVE_MAX_N:
+    cap = int(max_n)
+    if cap < 1 or cap > PLAN_MAX_N:
+        raise RuntimeError(f"chr_nf4_gemm: max_n={cap} not in 1..{PLAN_MAX_N}")
+    if n < 1 or n > cap:
         raise RuntimeError(
-            f"chr_nf4_gemm: N={n} not in 1..{LIVE_MAX_N} (host must chunk N>{LIVE_MAX_N})"
+            f"chr_nf4_gemm: N={n} not in 1..{cap} (host must chunk N>{LIVE_MAX_N})"
         )
-    return _load_ext().nf4_gemm(packed, scale, x, int(M), int(K), int(K_pad))
+    return _load_ext().nf4_gemm(
+        packed, scale, x, int(M), int(K), int(K_pad), int(cap)
+    )
 
 
 def nf4_plan(

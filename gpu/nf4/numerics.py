@@ -14,7 +14,8 @@ Two error legs, never added into one number:
 ``gpu/nf4/verify.py`` prints an extra ``vs bf16(W)`` figure that mixes both legs;
 this table does not. It never loads the 3B, never JIT-compiles the extension
 unless ``--cuda`` is set *and* nvidia-smi says the card is free (or
-``--cuda-force`` after the lab). ``N`` stays in 1..16.
+``--cuda-force`` after the lab). Live ``N`` stays in 1..16. ``--plan-n``
+allows 17..64 for the kernel oracle only; TokenLoop still chunks at 16.
 
 Table / CSV columns: ``leg, surface, kind, source, M, K, N, status,
 max_abs, mean_abs, rmse, cosine, rel, skip_reason``. ``leg=quant`` is BF16 vs
@@ -41,6 +42,7 @@ _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
+from gpu.nf4.plan import LIVE_MAX_N, PLAN_MAX_N  # noqa: E402
 from gpu.tests.nf4_oracle import decode_nf4, encode_nf4, k_pad, matmul_f32  # noqa: E402
 
 __all__ = [
@@ -203,12 +205,12 @@ def random_bf16_w(m: int, k: int, seed: int, *, scale: float = 0.02) -> np.ndarr
     return w.to(torch.bfloat16).float().numpy()
 
 
-def rms_norm_x(k: int, n: int, seed: int) -> np.ndarray:
+def rms_norm_x(k: int, n: int, seed: int, *, max_n: int = LIVE_MAX_N) -> np.ndarray:
     """BF16 activations, RMS-normalised, returned as float32 [K, N] (the kernel's x)."""
     import torch
 
-    if not 1 <= int(n) <= 16:
-        raise ValueError(f"N={n} not in 1..16")
+    if not 1 <= int(n) <= int(max_n):
+        raise ValueError(f"N={n} not in 1..{max_n}")
     g = torch.Generator(device="cpu").manual_seed(int(seed))
     x = torch.randn(int(k), int(n), dtype=torch.bfloat16, generator=g)
     rms = x.float().pow(2).mean().sqrt().clamp_min(1e-6)
@@ -301,6 +303,7 @@ def cuda_nf4_gemm(
     kp: int,
     *,
     gemm: Callable[..., object] | None = None,
+    max_n: int = LIVE_MAX_N,
 ) -> np.ndarray:
     """``y[M, N]`` float32 from the CUDA kernel (or an injected host ``gemm``).
 
@@ -328,7 +331,7 @@ def cuda_nf4_gemm(
     packed_t = packed_t.to(device="cuda", dtype=torch.uint8)
     scale_t = scale_t.to(device="cuda", dtype=torch.float16)
     x_t = x_host.to(device="cuda")
-    y = nf4_gemm(packed_t, scale_t, x_t, int(m), int(k), int(kp))
+    y = nf4_gemm(packed_t, scale_t, x_t, int(m), int(k), int(kp), int(max_n))
     torch.cuda.synchronize()
     out = y.float().detach().cpu().numpy()
     del y, packed_t, scale_t, x_t, x_host
@@ -378,6 +381,7 @@ def run_kind(
     source: str,
     gemm: Callable[..., object] | None = None,
     kernel_reason: str | None = None,
+    max_n: int = LIVE_MAX_N,
 ) -> list[Row]:
     """One matrix: quant (if ``w_bf16`` given) then kernel (or a skip row).
 
@@ -386,8 +390,8 @@ def run_kind(
     """
     m, k = packed.shape[0], x.shape[0]
     n = int(x.shape[1])
-    if not 1 <= n <= 16:
-        raise ValueError(f"N={n} not in 1..16")
+    if not 1 <= n <= int(max_n):
+        raise ValueError(f"N={n} not in 1..{max_n}")
     kp = k_pad(k)
     w_hat = decode_nf4(packed, scale, m, k)
     y_cpu = matmul_f32(w_hat, np.ascontiguousarray(x, dtype=np.float32))
@@ -433,7 +437,9 @@ def run_kind(
         rows.append(_skip_kernel(kind, source, m, k, n, kernel_reason))
         return rows
     try:
-        y_gpu = cuda_nf4_gemm(packed, scale, x, m, k, kp, gemm=gemm)
+        y_gpu = cuda_nf4_gemm(
+            packed, scale, x, m, k, kp, gemm=gemm, max_n=max_n
+        )
     except Exception as exc:  # noqa: BLE001 - reporter, not a kernel
         rows.append(
             _skip_kernel(kind, source, m, k, n, f"{type(exc).__name__}: {exc}")
@@ -479,6 +485,7 @@ def run_random(
     row_chunk: int = 256,
     kernel_reason: str | None = None,
     gemm: Callable[..., object] | None = None,
+    max_n: int = LIVE_MAX_N,
 ) -> list[Row]:
     """Synthetic BF16 W, Python NF4 encode, CPU GEMM; kernel only if allowed."""
     rows: list[Row] = []
@@ -487,7 +494,7 @@ def run_random(
         w = random_bf16_w(m_use, int(k), seed + i)
         packed, scale = encode_nf4_chunked(w, row_chunk=row_chunk)
         for n in ns:
-            x = rms_norm_x(int(k), int(n), seed + 1000 + i + n)
+            x = rms_norm_x(int(k), int(n), seed + 1000 + i + n, max_n=max_n)
             rows.extend(
                 run_kind(
                     kind,
@@ -498,6 +505,7 @@ def run_random(
                     source="random",
                     gemm=gemm,
                     kernel_reason=kernel_reason,
+                    max_n=max_n,
                 )
             )
     return rows
@@ -601,12 +609,13 @@ def run_real(
     row_chunk: int = 256,
     kernel_reason: str | None = None,
     gemm: Callable[..., object] | None = None,
+    max_n: int = LIVE_MAX_N,
 ) -> list[Row]:
     """Optional ``.chr`` / HuggingFace dir. CPU reads only; kernel still gated."""
     rows: list[Row] = []
     for n in ns:
-        if not 1 <= int(n) <= 16:
-            raise ValueError(f"N={n} not in 1..16")
+        if not 1 <= int(n) <= int(max_n):
+            raise ValueError(f"N={n} not in 1..{max_n}")
     for kind, m_expect, k_expect in kinds:
         chr_name = CHR_SLOT[kind].format(layer=int(layer))
         hf_name = HF_WEIGHT[kind].format(layer=int(layer))
@@ -677,7 +686,7 @@ def run_real(
             packed, scale, w_bf16 = _cap_rows(packed, scale, w_bf16, max_rows)
             k = int(k_expect if w_bf16 is None else w_bf16.shape[1])
             for n in ns:
-                x = rms_norm_x(k, int(n), seed + 3000 + n)
+                x = rms_norm_x(k, int(n), seed + 3000 + n, max_n=max_n)
                 rows.extend(
                     run_kind(
                         kind,
@@ -688,6 +697,7 @@ def run_real(
                         source=source,
                         gemm=gemm,
                         kernel_reason=kernel_reason,
+                        max_n=max_n,
                     )
                 )
         except Exception as exc:  # noqa: BLE001
@@ -785,13 +795,16 @@ def write_csv(path: str | Path, rows: Sequence[Row]) -> None:
             )
 
 
-def _parse_ns(text: str) -> list[int]:
+def _parse_ns(text: str, *, max_n: int = LIVE_MAX_N) -> list[int]:
     ns = [int(p) for p in str(text).split(",") if p.strip()]
     if not ns:
         raise ValueError("need at least one N")
     for n in ns:
-        if not 1 <= n <= 16:
-            raise ValueError(f"N={n} not in 1..16 (host chunks N>16; this reporter does not)")
+        if not 1 <= n <= int(max_n):
+            raise ValueError(
+                f"N={n} not in 1..{max_n} (live TokenLoop chunks above "
+                f"{LIVE_MAX_N}; pass --plan-n for the 17..{PLAN_MAX_N} oracle)"
+            )
     return ns
 
 
@@ -814,7 +827,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--tiny", action="store_true", help="cap M at 64 (CPU tests / smoke)")
     p.add_argument("--max-rows", type=int, default=0, help="cap M; 0 = full 3B rows")
-    p.add_argument("--n", default="1", help="comma-separated N in 1..16 (default 1)")
+    p.add_argument(
+        "--n",
+        default="1",
+        help=f"comma-separated N (default 1; live 1..{LIVE_MAX_N}, --plan-n up to {PLAN_MAX_N})",
+    )
     p.add_argument("--kinds", default="", help="comma-separated slots; default all 7")
     p.add_argument("--seed", type=int, default=20260913)
     p.add_argument("--row-chunk", type=int, default=256)
@@ -832,6 +849,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="after the lab: run --cuda even if smi still looks high (Windows sticky reserved)",
     )
+    p.add_argument(
+        "--plan-n",
+        action="store_true",
+        help=f"allow N up to {PLAN_MAX_N} for the kernel oracle (does not change TokenLoop)",
+    )
     p.add_argument("--gpu-index", type=int, default=0)
     p.add_argument("--csv", default="", help="optional CSV path (does not write docs/runs/qwen25-3b)")
     return p.parse_args(argv)
@@ -839,7 +861,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    ns = _parse_ns(args.n)
+    max_n = PLAN_MAX_N if args.plan_n else LIVE_MAX_N
+    ns = _parse_ns(args.n, max_n=max_n)
     kinds = _parse_kinds(args.kinds or None)
     max_rows = 64 if args.tiny and args.max_rows <= 0 else int(args.max_rows)
     kernel_reason = cuda_launch_reason(
@@ -852,6 +875,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"kernel leg: SKIP ({kernel_reason})")
     else:
         print("kernel leg: CUDA chr_nf4_gemm vs CPU NF4 GEMM")
+        if max_n > LIVE_MAX_N:
+            print(f"plan-n oracle: N up to {max_n}; TokenLoop still chunks at {LIVE_MAX_N}")
     print()
 
     rows: list[Row] = []
@@ -864,6 +889,7 @@ def main(argv: list[str] | None = None) -> int:
                 max_rows=max_rows,
                 row_chunk=int(args.row_chunk),
                 kernel_reason=kernel_reason,
+                max_n=max_n,
             )
         )
     chr_path = args.chr.strip() or None
@@ -880,6 +906,7 @@ def main(argv: list[str] | None = None) -> int:
                 max_rows=max_rows,
                 row_chunk=int(args.row_chunk),
                 kernel_reason=kernel_reason,
+                max_n=max_n,
             )
         )
     print(format_table(rows))

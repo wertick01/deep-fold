@@ -67,9 +67,15 @@ int chr_nf4_gemm_plan(const chr_nf4_dev_t *w, int32_t N, int32_t have_ws,
                       chr_nf4_plan_t *out);
 
 /* ws must hold at least plan.ws_floats floats when plan.ws_floats > 0.
- * ws == NULL is legal and means "no split-K". Returns -7 if ws is too small. */
+ * ws == NULL is legal and means "no split-K". Returns -7 if ws is too small.
+ * Live TokenLoop uses this entry (N in [1, 16]). */
 int chr_nf4_gemm_ws(const chr_nf4_dev_t *w, const void *x, void *y, int32_t N,
                     float *ws, int64_t ws_floats, void *stream);
+
+/* Same launch as chr_nf4_gemm_ws, but N may go up to max_n (clamped to [1, 64]).
+ * Oracle / numerics only. TokenLoop must keep calling chr_nf4_gemm_ws. */
+int chr_nf4_gemm_ws_max(const chr_nf4_dev_t *w, const void *x, void *y, int32_t N,
+                        float *ws, int64_t ws_floats, void *stream, int32_t max_n);
 
 /* Tuning override for the microbench, so one process can time old vs new.
  * path: 0 auto, 1 force classic decode tile, 2 force small decode tile.

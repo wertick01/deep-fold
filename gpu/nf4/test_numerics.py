@@ -204,6 +204,14 @@ def test_n_refused() -> None:
         check(True, "N=17 refused (TokenLoop ceiling stays 16)")
     else:
         check(False, "N=17 should be refused")
+    try:
+        num._parse_ns("17")
+    except ValueError:
+        check(True, "CLI N=17 refused without --plan-n")
+    else:
+        check(False, "CLI N=17 should be refused")
+    got = num._parse_ns("17,32,64", max_n=num.PLAN_MAX_N)
+    check(got == [17, 32, 64], f"--plan-n parses 17,32,64: {got}")
 
 
 def test_no_eager_kernel_import() -> None:

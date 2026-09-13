@@ -1646,14 +1646,17 @@ extern "C" int chr_nf4_gemm_plan(const chr_nf4_dev_t *w, int32_t N,
   return plan_impl(h, N, have_ws, out);
 }
 
-extern "C" int chr_nf4_gemm_ws(const chr_nf4_dev_t *w, const void *x, void *y,
-                               int32_t N, float *ws, int64_t ws_floats,
-                               void *stream) {
+extern "C" int chr_nf4_gemm_ws_max(const chr_nf4_dev_t *w, const void *x, void *y,
+                                   int32_t N, float *ws, int64_t ws_floats,
+                                   void *stream, int32_t max_n) {
   if (!x || !y) {
     return -1;
   }
+  if (max_n < 1 || max_n > kPlanMaxN) {
+    return -2;
+  }
   chr_nf4_dev_t h{};
-  const int rc = check_args(w, N, /*need_ptrs=*/true, &h, kLiveMaxN);
+  const int rc = check_args(w, N, /*need_ptrs=*/true, &h, max_n);
   if (rc != 0) {
     return rc;
   }
@@ -1745,6 +1748,12 @@ extern "C" int chr_nf4_gemm_ws(const chr_nf4_dev_t *w, const void *x, void *y,
 
   const cudaError_t err = cudaGetLastError();
   return err == cudaSuccess ? 0 : -6;
+}
+
+extern "C" int chr_nf4_gemm_ws(const chr_nf4_dev_t *w, const void *x, void *y,
+                                int32_t N, float *ws, int64_t ws_floats,
+                                void *stream) {
+  return chr_nf4_gemm_ws_max(w, x, y, N, ws, ws_floats, stream, kLiveMaxN);
 }
 
 extern "C" int chr_nf4_gemm(const chr_nf4_dev_t *w, const void *x, void *y,

@@ -33,7 +33,7 @@ const char *gemm_err(int rc) {
 } // namespace
 
 torch::Tensor nf4_gemm(torch::Tensor packed, torch::Tensor scale, torch::Tensor x,
-                        int64_t M, int64_t K, int64_t K_pad) {
+                        int64_t M, int64_t K, int64_t K_pad, int64_t max_n) {
   TORCH_CHECK(packed.is_cuda() && scale.is_cuda() && x.is_cuda(),
               "packed, scale, and x must be CUDA tensors");
   TORCH_CHECK(packed.scalar_type() == torch::kByte, "packed must be uint8");
@@ -89,8 +89,9 @@ torch::Tensor nf4_gemm(torch::Tensor packed, torch::Tensor scale, torch::Tensor 
   }
 
   cudaStream_t stream = c10::cuda::getCurrentCUDAStream();
-  const int rc = chr_nf4_gemm_ws(&w, x.data_ptr(), y.data_ptr(), N, ws_ptr,
-                                 plan.ws_floats, stream);
+  const int rc = chr_nf4_gemm_ws_max(&w, x.data_ptr(), y.data_ptr(), N, ws_ptr,
+                                      plan.ws_floats, stream,
+                                      static_cast<int32_t>(max_n));
   TORCH_CHECK(rc == 0, "chr_nf4_gemm failed (", rc, "): ", gemm_err(rc));
   return y;
 }
@@ -129,7 +130,9 @@ void nf4_set_tuning(int64_t path, int64_t split_k, int64_t one_wave) {
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("nf4_gemm", &nf4_gemm,
-        "chr_nf4_gemm: y[M,N] = dequant_nf4(packed,scale) @ x[K,N], live N in 1..16");
+        "chr_nf4_gemm: y[M,N] = dequant_nf4(packed,scale) @ x[K,N]; max_n is 16 for live generate",
+        py::arg("packed"), py::arg("scale"), py::arg("x"), py::arg("M"),
+        py::arg("K"), py::arg("K_pad"), py::arg("max_n") = 16);
   m.def("nf4_plan", &nf4_plan,
         "launch plan for (M, K, K_pad, N): grid, tile, CTAs, workspace floats",
         py::arg("M"), py::arg("K"), py::arg("K_pad"), py::arg("N"),

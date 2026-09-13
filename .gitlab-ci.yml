@@ -1,0 +1,6 @@
+# CPU-only. The 3080 lab is not run in CI.
+test:
+  image: golang:1.22
+  stage: test
+  script:
+    - go test ./...

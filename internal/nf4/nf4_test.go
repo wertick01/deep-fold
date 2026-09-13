@@ -279,6 +279,18 @@ func TestNF4Pad65(t *testing.T) {
 	}
 }
 
+func TestNF4TinyGroupScaleUnderflowsF16(t *testing.T) {
+	// Qwen-14B has rows whose max-abs is below the binary16 normal range.
+	// Flushing that scale to 0 used to abort compress. Treat it as a zero group.
+	w := make([]float32, 64)
+	for i := range w {
+		w[i] = 1e-12
+	}
+	if _, _, err := Encode(w, 1, 64); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestNF4RejectNaN(t *testing.T) {
 	w := rowIOver63()
 	w[3] = float32(math.NaN())

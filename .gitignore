@@ -6,4 +6,13 @@ __pycache__/
 *.chr
 *.verify.json
 /models/
-
+*.exe
+*.pyd
+*.pdf
+*.obj
+*.lib
+*.exp
+*.pdb
+*.ilk
+gpu/*/build/
+docs/tz/

@@ -1,0 +1,36 @@
+t_s,codec,event,message_id,detail
+0.0401,bf16,start,,"codec=bf16, interval=0.12s"
+0.5652,bf16,load_start,,"from_pretrained Qwen2.5-3B-Instruct, bf16"
+8.4401,bf16,load_end,,load_s=7.8
+8.4414,bf16,warmup_start,,"8 greedy tokens, not in any reported number"
+9.2555,bf16,warmup_end,,warmup_ms=814
+9.2562,bf16,msg_send,1,Reply with one short sentence. What is the capital of France?
+9.3162,bf16,first_token,1,ttft=60 ms
+9.6007,bf16,msg_done,1,"8 new tokens, ttft=60 ms, 24.7 tok/s, stop=eos, quality_ok=true"
+9.6018,bf16,msg_send,2,And the capital of Germany?
+9.6451,bf16,first_token,2,ttft=43 ms
+9.9509,bf16,msg_done,2,"8 new tokens, ttft=43 ms, 22.9 tok/s, stop=eos, quality_ok=true"
+9.9515,bf16,msg_send,3,What is 17 times 19? Reply with the number only.
+10.0044,bf16,first_token,3,ttft=53 ms
+10.1423,bf16,msg_done,3,"4 new tokens, ttft=53 ms, 21.8 tok/s, stop=eos, quality_ok=true"
+12.0690,bf16,unload_start,,"del model/tokenizer, gc, empty_cache"
+12.6196,bf16,unload_end,,"smi_after_unload=7459 MiB, torch_alloc=8 MiB"
+12.6510,bf16,stop,,peak_smi=7535 MiB
+0.0477,nf4,start,,"codec=nf4, interval=0.12s"
+0.5767,nf4,load_start,,load_model qwen25-3b.nf4.chr
+4.1453,nf4,load_end,,"load_s=3.5, 252 nf4 linears (1405.7 MiB), 181 bf16 tensors (0.46 MiB), embed=nf4-rows (157.6 MiB), tied_lm_head=True, total=1563.8 MiB, 1.6s"
+4.2411,nf4,warmup_start,,"TokenLoop(layers=36, hidden=2048, q/kv=16/2x128, max_seq=512, groups=145, prefill_chunk=16, norm=exact, overlap=True, graph=off)"
+5.6751,nf4,graph_capture,,graph=linears
+5.6751,nf4,warmup_end,,"warmup_ms=1111, graph=linears"
+5.6954,nf4,msg_send,1,Reply with one short sentence. What is the capital of France?
+5.9121,nf4,first_token,1,prefill done
+6.3247,nf4,msg_done,1,"8 new tokens, ttft=216 ms, 17.0 tok/s, stop=eos, quality_ok=true"
+6.3251,nf4,msg_send,2,And the capital of Germany?
+6.5340,nf4,first_token,2,prefill done
+6.9413,nf4,msg_done,2,"8 new tokens, ttft=209 ms, 17.2 tok/s, stop=eos, quality_ok=true"
+6.9418,nf4,msg_send,3,What is 17 times 19? Reply with the number only.
+7.1543,nf4,first_token,3,prefill done
+7.3327,nf4,msg_done,3,"4 new tokens, ttft=212 ms, 16.8 tok/s, stop=eos, quality_ok=true"
+7.9392,nf4,unload_start,,"del loop/model/tokenizer, gc, empty_cache"
+8.5277,nf4,unload_end,,"smi_after_unload=1626 MiB, torch_alloc=8 MiB"
+8.5603,nf4,stop,,peak_smi=3286 MiB

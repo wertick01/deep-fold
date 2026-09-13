@@ -1,0 +1,858 @@
+"""The two codec sessions, run one after the other on a single 12 GB card.
+
+``run_bf16`` is the baseline people already trust: HuggingFace
+``from_pretrained`` + ``generate``. ``run_nf4`` is our driver:
+``gpu.host.load_model`` + ``gpu.loop.TokenLoop``, no ``from_pretrained`` on the
+weight shards and no ``transformers.generate`` anywhere near it.
+
+Hard constraints, enforced by the shape of this module:
+
+* **Never both models resident.** ``run_both`` finishes the BF16 session --
+  including unload -- before the NF4 load starts, and refuses to start NF4 on a
+  card that is still full.
+* ``torch.cuda.empty_cache()`` lives in :func:`unload`, which runs *between*
+  sessions. It is never called inside a token loop.
+* **Independent turns.** Every message is a fresh single-user conversation with
+  the KV cache reset, so every TTFT is a clean prefill and the two codecs stay
+  comparable. Recorded in ``summary.notes``.
+
+Timing is split the same way on both paths: ``prefill_ms`` is the time to the
+first generated token, ``decode_tok_s`` counts only the tokens after it. Prefill
+is never averaged into tok/s.
+"""
+
+from __future__ import annotations
+
+import gc
+import os
+import subprocess
+import sys
+import tempfile
+import time
+import warnings
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Sequence
+
+from .bundle import LabBundle, mean
+from .sampler import MIB, Sampler, smi_used_mib
+from .script import (
+    CHR_PATH,
+    MAX_NEW_TOKENS,
+    MAX_SEQ,
+    MESSAGES,
+    MODEL_DIR,
+    POLL_INTERVAL_S,
+    TURNS_NOTE,
+    chat_text,
+    quality_ok,
+    stop_token_ids,
+)
+
+__all__ = ["LabSession", "run_both", "run_bf16", "run_nf4", "unload"]
+
+_REPO = Path(__file__).resolve().parents[2]
+
+# After an isolated worker exits, nvidia-smi must fall this far below that
+# session's peak before the other codec starts. The kernel itself must not
+# still be holding a model.
+RELEASED_BELOW_PEAK_MIB = 1500.0
+IDLE_HEADROOM_MIB = 600.0
+
+
+@dataclass
+class LabSession:
+    """One codec's tables. ``summary`` is a single row; the rest are lists."""
+
+    codec: str
+    timeline: list[dict[str, Any]] = field(default_factory=list)
+    events: list[dict[str, Any]] = field(default_factory=list)
+    messages: list[dict[str, Any]] = field(default_factory=list)
+    summary: dict[str, Any] = field(default_factory=dict)
+
+    def as_bundle(self) -> LabBundle:
+        return LabBundle.of(
+            timeline=self.timeline,
+            events=self.events,
+            messages=self.messages,
+            summary=[self.summary] if self.summary else [],
+        )
+
+    def add_note(self, note: str) -> None:
+        existing = str(self.summary.get("notes", "")).strip()
+        self.summary["notes"] = f"{existing}; {note}" if existing else note
+
+
+def session_from_bundle(bundle: LabBundle, codec: str) -> LabSession:
+    """Rebuild a session from CSVs a worker wrote."""
+    session = LabSession(codec)
+    session.timeline = bundle.rows_for("timeline", codec)
+    session.events = bundle.rows_for("events", codec)
+    session.messages = bundle.rows_for("messages", codec)
+    summary = bundle.summary_for(codec)
+    session.summary = dict(summary) if summary else {"codec": codec}
+    return session
+
+
+def _spawn_session(
+    codec: str,
+    *,
+    out_dir: str | Path | None,
+    model_dir: str | Path,
+    chr_path: str | Path = CHR_PATH,
+    max_new_tokens: int = MAX_NEW_TOKENS,
+    max_seq: int = MAX_SEQ,
+    interval_s: float = POLL_INTERVAL_S,
+    graphs: bool = True,
+    verbose: bool = True,
+    trust_remote_code: bool = False,
+) -> LabSession:
+    """Child process loads the model, records, exits; this process never holds it."""
+    parent = Path(out_dir) if out_dir is not None else Path(tempfile.mkdtemp(prefix="lab-iso-"))
+    dest = parent / codec
+    dest.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        sys.executable,
+        "-m",
+        "gpu.lab.worker",
+        "--codec",
+        codec,
+        "--out",
+        str(dest),
+        "--model-dir",
+        str(model_dir),
+        "--chr",
+        str(chr_path),
+        "--max-new-tokens",
+        str(max_new_tokens),
+        "--max-seq",
+        str(max_seq),
+        "--interval",
+        str(interval_s),
+    ]
+    if trust_remote_code:
+        cmd.append("--trust-remote-code")
+    if not graphs:
+        cmd.append("--no-graphs")
+    if not verbose:
+        cmd.append("--quiet")
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(_REPO) + os.pathsep + env.get("PYTHONPATH", "")
+    print(f"[isolated {codec}] {' '.join(cmd)}", flush=True)
+    completed = subprocess.run(cmd, cwd=str(_REPO), env=env)
+    # Windows keeps nvidia-smi high until the process is fully gone.
+    time.sleep(1.5)
+    if not (dest / "summary.csv").is_file():
+        raise RuntimeError(
+            f"isolated {codec} exited {completed.returncode} and wrote no summary.csv in {dest}"
+        )
+    session = session_from_bundle(LabBundle.read(dest), codec)
+    if completed.returncode != 0:
+        session.add_note(f"worker exited {completed.returncode}")
+    return session
+
+
+def _wait_released(peak_mib: float | None, idle_mib: float | None, *, seconds: float = 45.0) -> tuple[bool, float | None]:
+    """Wait until nvidia-smi drops after a worker process has exited."""
+    deadline = time.time() + seconds
+    used = smi_used_mib()
+    while time.time() < deadline:
+        used = smi_used_mib()
+        if used is None:
+            return True, used
+        if peak_mib is not None and used < float(peak_mib) - RELEASED_BELOW_PEAK_MIB:
+            return True, used
+        if idle_mib is not None and used < float(idle_mib) + IDLE_HEADROOM_MIB:
+            return True, used
+        time.sleep(1.0)
+    return False, used
+
+
+# --------------------------------------------------------------------------- #
+# shared plumbing
+# --------------------------------------------------------------------------- #
+
+
+def unload(sampler: Sampler | None = None, detail: str = "") -> float | None:
+    """Collect and hand unused CUDA blocks back to the driver.
+
+    Called **between** sessions and at the end of one, never on a token path.
+    Returns nvidia-smi used MiB after the release. On Windows that number often
+    stays near the previous peak: the process keeps the CUDA pool, and the
+    next session reuses it. ``torch.cuda.memory_allocated()`` is the signal
+    that the dense weights are actually gone.
+    """
+    import torch
+
+    if sampler is not None:
+        sampler.mark("unload_start", detail=detail)
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        ipc = getattr(torch.cuda, "ipc_collect", None)
+        for _ in range(3):
+            gc.collect()
+            torch.cuda.empty_cache()
+            if callable(ipc):
+                ipc()
+        gc.collect()
+        torch.cuda.empty_cache()
+    else:
+        gc.collect()
+    after = smi_used_mib()
+    if sampler is not None:
+        alloc = (
+            torch.cuda.memory_allocated() / MIB if torch.cuda.is_available() else None
+        )
+        after_text = "unknown" if after is None else f"{after:.0f} MiB"
+        alloc_text = "n/a" if alloc is None else f"{alloc:.0f} MiB"
+        sampler.mark(
+            "unload_end",
+            detail=f"smi_after_unload={after_text}, torch_alloc={alloc_text}",
+        )
+    return after
+
+
+def _cpu_then_drop(*objects: Any) -> None:
+    """Move leftover modules off the GPU, then drop the Python refs."""
+    for obj in objects:
+        if obj is None:
+            continue
+        try:
+            if hasattr(obj, "to"):
+                obj.to("cpu")
+            elif hasattr(obj, "cpu"):
+                obj.cpu()
+        except Exception:
+            pass
+    gc.collect()
+
+
+def _require_cuda() -> None:
+    import torch
+
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "the live lab needs a CUDA device (conda env torch-gpu). "
+            "For a GPU-free artifact use `python -m gpu.lab.run --dry-plot`."
+        )
+
+
+def _is_cuda_oom(exc: BaseException) -> bool:
+    """HuggingFace sometimes wraps the allocator error in a plain RuntimeError."""
+    import torch
+
+    if isinstance(exc, torch.cuda.OutOfMemoryError):
+        return True
+    return isinstance(exc, RuntimeError) and "out of memory" in str(exc).lower()
+
+
+def _message_row(
+    codec: str,
+    message_id: int,
+    prompt: str,
+    response: str,
+    *,
+    prompt_tokens: int,
+    new_tokens: int,
+    prefill_ms: float,
+    decode_ms: float,
+    decode_tok_s: float,
+    stop_reason: str,
+) -> dict[str, Any]:
+    return {
+        "codec": codec,
+        "message_id": message_id,
+        "prompt": prompt,
+        "response": response,
+        "prompt_tokens": prompt_tokens,
+        "new_tokens": new_tokens,
+        "prefill_ms": prefill_ms,
+        "decode_ms": decode_ms,
+        "decode_tok_s": decode_tok_s,
+        "stop_reason": stop_reason,
+        "quality_ok": quality_ok(message_id, response),
+    }
+
+
+def _done_detail(row: dict[str, Any]) -> str:
+    """``msg_done`` hover text. tok/s lives here and in the table, not on a
+    fourth crowded plot row."""
+    return (
+        f"{row['new_tokens']} new tokens, ttft={row['prefill_ms']:.0f} ms, "
+        f"{row['decode_tok_s']:.1f} tok/s, stop={row['stop_reason']}, "
+        f"quality_ok={str(bool(row['quality_ok'])).lower()}"
+    )
+
+
+def _finish(
+    session: LabSession,
+    sampler: Sampler,
+    *,
+    load_s: float | None,
+    vram_before: float | None,
+    vram_after_load_smi: float | None,
+    vram_after_load_torch: float | None,
+    weight_mib: float | None,
+    kv_mib: float | None,
+    notes: str,
+) -> LabSession:
+    """Close the sampler and fold everything into the frozen summary row."""
+    sampler.stop()
+    session.timeline = sampler.timeline_rows()
+    session.events = sampler.event_rows()
+    rows = session.messages
+    all_ok = bool(rows) and all(bool(row["quality_ok"]) for row in rows)
+    if sampler.errors:
+        notes = f"{notes}; nvidia-smi errors: {sampler.errors[0]}"
+    session.summary = {
+        "codec": session.codec,
+        "load_s": load_s,
+        "vram_before_mib": vram_before,
+        "vram_after_load_smi_mib": vram_after_load_smi,
+        "vram_after_load_torch_mib": vram_after_load_torch,
+        "vram_peak_smi_mib": sampler.peak_used_mib,
+        "weight_mib": weight_mib,
+        "kv_mib": kv_mib,
+        "mean_ttft_ms": mean([row["prefill_ms"] for row in rows]),
+        "mean_decode_tok_s": mean([row["decode_tok_s"] for row in rows]),
+        "n_messages": len(rows),
+        "quality_all_ok": all_ok,
+        "notes": notes,
+    }
+    return session
+
+
+# --------------------------------------------------------------------------- #
+# BF16: HuggingFace, the baseline
+# --------------------------------------------------------------------------- #
+
+
+def _step_clock(on_step: Callable[[], None]):
+    """A ``StoppingCriteria`` that never stops -- it only timestamps each token.
+
+    ``generate`` calls this once per generated token, the first time right after
+    prefill, which is exactly the TTFT boundary we need. It is the only hook in
+    the HF loop that fires per step without touching the sampling path.
+    """
+    import torch
+    from transformers import StoppingCriteria
+
+    class _Clock(StoppingCriteria):
+        def __call__(self, input_ids, scores, **kwargs):  # noqa: ANN001, ANN204
+            on_step()
+            return torch.zeros(input_ids.shape[0], dtype=torch.bool, device=input_ids.device)
+
+    return _Clock()
+
+
+def run_bf16(
+    out_dir: str | Path | None = None,
+    *,
+    model_dir: str | Path = MODEL_DIR,
+    messages: Sequence[str] = MESSAGES,
+    max_new_tokens: int = MAX_NEW_TOKENS,
+    interval_s: float = POLL_INTERVAL_S,
+    verbose: bool = True,
+    trust_remote_code: bool = False,
+    isolated: bool = False,
+) -> LabSession:
+    """Uncompressed baseline: ``from_pretrained`` + greedy ``generate``.
+
+    ``out_dir`` is accepted for symmetry and, when given, receives this single
+    session's CSVs. ``run_both`` writes the merged ones.
+
+    A CUDA OOM is a recorded session (empty messages, the exception in
+    ``notes``), not a crashed cell. That is the 14B/20B measurement on 12 GB.
+
+    ``isolated=True`` runs the session in a child process so this process never
+    holds the weights. Use that from the notebook: otherwise Windows keeps the
+    CUDA pool and the next codec's VRAM trace is unreadable.
+    """
+    if isolated:
+        return _spawn_session(
+            "bf16",
+            out_dir=out_dir,
+            model_dir=model_dir,
+            max_new_tokens=max_new_tokens,
+            interval_s=interval_s,
+            verbose=verbose,
+            trust_remote_code=trust_remote_code,
+        )
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
+
+    _require_cuda()
+    model_dir = str(model_dir)
+    session = LabSession("bf16")
+    sampler = Sampler("bf16", interval_s=interval_s, verbose=verbose)
+    sampler.start()
+    vram_before = smi_used_mib()
+    time.sleep(min(0.5, interval_s * 4))  # a few idle samples before the load
+
+    model = None
+    tokenizer = None
+    load_s = None
+    vram_after_smi = None
+    vram_after_torch = None
+    weight_mib = None
+    try:
+        sampler.mark("load_start", detail=f"from_pretrained {Path(model_dir).name}, bf16")
+        t_load = time.perf_counter()
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_dir, local_files_only=True, trust_remote_code=trust_remote_code
+        )
+        load_kw = dict(
+            device_map={"": 0}, local_files_only=True, trust_remote_code=trust_remote_code
+        )
+        try:
+            model = AutoModelForCausalLM.from_pretrained(
+                model_dir, dtype=torch.bfloat16, **load_kw
+            )
+        except TypeError:  # transformers < 5 spelled it torch_dtype
+            model = AutoModelForCausalLM.from_pretrained(
+                model_dir, torch_dtype=torch.bfloat16, **load_kw
+            )
+        model.eval()
+        torch.cuda.synchronize()
+        load_s = time.perf_counter() - t_load
+        vram_after_smi = smi_used_mib()
+        vram_after_torch = torch.cuda.memory_allocated() / MIB
+        sampler.mark("load_end", detail=f"load_s={load_s:.1f}")
+
+        # Deduplicated by pointer: Qwen2.5-3B ties lm_head to embed_tokens and
+        # counting that [151936, 2048] table twice would invent ~594 MiB.
+        weight_mib = (
+            sum({p.data_ptr(): p.numel() * p.element_size() for p in model.parameters()}.values())
+            / MIB
+        )
+
+        stop = stop_token_ids(tokenizer)
+        pad_id = tokenizer.pad_token_id
+        if pad_id is None:
+            pad_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else stop[0]
+        generation = GenerationConfig(
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            num_beams=1,
+            use_cache=True,
+            eos_token_id=list(stop),
+            pad_token_id=int(pad_id),
+        )
+
+        def encode(text: str):
+            packed = chat_text(tokenizer, text)
+            return tokenizer(packed, return_tensors="pt", add_special_tokens=False).input_ids.to(
+                "cuda"
+            )
+
+        sampler.mark("warmup_start", detail="8 greedy tokens, not in any reported number")
+        t_warm = time.perf_counter()
+        with torch.no_grad():
+            model.generate(
+                input_ids=encode("Hello."),
+                generation_config=GenerationConfig(
+                    max_new_tokens=8,
+                    do_sample=False,
+                    num_beams=1,
+                    use_cache=True,
+                    eos_token_id=list(stop),
+                    pad_token_id=int(pad_id),
+                ),
+            )
+        torch.cuda.synchronize()
+        sampler.mark("warmup_end", detail=f"warmup_ms={(time.perf_counter() - t_warm) * 1000:.0f}")
+
+        for index, prompt in enumerate(messages, start=1):
+            ids = encode(prompt)
+            prompt_tokens = int(ids.shape[-1])
+            stamps: list[float] = []
+
+            def on_step(message_id: int = index) -> None:
+                # Synchronize so the stamp is a real device boundary, not a queued
+                # launch. ~0.2 ms against a ~30 ms decode step.
+                torch.cuda.synchronize()
+                stamps.append(time.perf_counter())
+                if len(stamps) == 1:
+                    sampler.mark(
+                        "first_token", message_id, detail=f"ttft={(stamps[0] - t0) * 1000:.0f} ms"
+                    )
+
+            sampler.mark("msg_send", index, detail=prompt)
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            with torch.no_grad():
+                output = model.generate(
+                    input_ids=ids,
+                    attention_mask=torch.ones_like(ids),
+                    generation_config=generation,
+                    stopping_criteria=[_step_clock(on_step)],
+                )
+            torch.cuda.synchronize()
+            t_end = time.perf_counter()
+
+            new_ids = output[0][prompt_tokens:].tolist()
+            response = tokenizer.decode(new_ids, skip_special_tokens=True)
+            prefill_ms = ((stamps[0] if stamps else t_end) - t0) * 1000.0
+            decode_ms = (
+                (stamps[-1] if stamps else t_end) - (stamps[0] if stamps else t_end)
+            ) * 1000.0
+            decode_steps = max(0, len(stamps) - 1)
+            row = _message_row(
+                "bf16",
+                index,
+                prompt,
+                response,
+                prompt_tokens=prompt_tokens,
+                new_tokens=len(new_ids),
+                prefill_ms=prefill_ms,
+                decode_ms=decode_ms,
+                decode_tok_s=decode_steps / (decode_ms / 1000.0) if decode_ms > 0 else 0.0,
+                stop_reason="eos" if new_ids and new_ids[-1] in stop else "max_new_tokens",
+            )
+            session.messages.append(row)
+            sampler.mark("msg_done", index, detail=_done_detail(row))
+            # Fresh `generate` call per turn: HF builds a new cache, so the next
+            # prompt is a clean prefill. Nothing is carried across messages.
+
+        try:
+            model.to("cpu")
+        except Exception:
+            pass
+        del model, tokenizer
+        unload(sampler, detail="del model/tokenizer, gc, empty_cache")
+        finished = _finish(
+            session,
+            sampler,
+            load_s=load_s,
+            vram_before=vram_before,
+            vram_after_load_smi=vram_after_smi,
+            vram_after_load_torch=vram_after_torch,
+            weight_mib=weight_mib,
+            kv_mib=None,
+            notes=(
+                "HuggingFace from_pretrained + generate, dense bf16 GEMM; "
+                f"{TURNS_NOTE}; ttft = time to first generated token; "
+                "kv_mib empty: the HF cache is transient, not a preallocated block"
+            ),
+        )
+        return finished if out_dir is None else _write_single(finished, out_dir)
+    except Exception as exc:
+        _cpu_then_drop(model, tokenizer)
+        model = None
+        tokenizer = None
+        gc.collect()
+        unload(sampler, detail=f"{type(exc).__name__}")
+        if not _is_cuda_oom(exc):
+            sampler.stop(detail=f"failed: {type(exc).__name__}")
+            raise
+        finished = _finish(
+            session,
+            sampler,
+            load_s=load_s,
+            vram_before=vram_before,
+            vram_after_load_smi=vram_after_smi,
+            vram_after_load_torch=vram_after_torch,
+            weight_mib=weight_mib,
+            kv_mib=None,
+            notes=(
+                f"CUDA OOM on {Path(model_dir).name}: {exc}. "
+                "Recorded miss, not a crashed cell."
+            ),
+        )
+        return finished if out_dir is None else _write_single(finished, out_dir)
+
+
+# --------------------------------------------------------------------------- #
+# NF4: our driver
+# --------------------------------------------------------------------------- #
+
+
+def run_nf4(
+    out_dir: str | Path | None = None,
+    *,
+    model_dir: str | Path = MODEL_DIR,
+    chr_path: str | Path = CHR_PATH,
+    messages: Sequence[str] = MESSAGES,
+    max_new_tokens: int = MAX_NEW_TOKENS,
+    max_seq: int = MAX_SEQ,
+    interval_s: float = POLL_INTERVAL_S,
+    graphs: bool = True,
+    verbose: bool = True,
+    trust_remote_code: bool = False,
+    isolated: bool = False,
+) -> LabSession:
+    """Our driver: ``load_model`` + ``TokenLoop``, greedy, one forward per token.
+
+    The ``.chr`` is the only weight file opened. ``transformers`` is used for the
+    tokenizer and the chat template, never for the forward pass.
+
+    ``isolated=True`` runs in a child process so this process never holds the
+    weights. The notebook must use that, or the compressed VRAM trace starts
+    on top of the dense CUDA pool.
+    """
+    if isolated:
+        return _spawn_session(
+            "nf4",
+            out_dir=out_dir,
+            model_dir=model_dir,
+            chr_path=chr_path,
+            max_new_tokens=max_new_tokens,
+            max_seq=max_seq,
+            interval_s=interval_s,
+            graphs=graphs,
+            verbose=verbose,
+            trust_remote_code=trust_remote_code,
+        )
+    import torch
+
+    from gpu.host import load_model
+    from gpu.loop import TokenLoop
+
+    _require_cuda()
+    model_dir, chr_path = str(model_dir), str(chr_path)
+    if not Path(chr_path).is_file():
+        raise FileNotFoundError(f"no NF4 file at {chr_path}")
+
+    from transformers import AutoTokenizer
+
+    session = LabSession("nf4")
+    sampler = Sampler("nf4", interval_s=interval_s, verbose=verbose)
+    sampler.start()
+    vram_before = smi_used_mib()
+    time.sleep(min(0.5, interval_s * 4))
+
+    model = None
+    tokenizer = None
+    loop = None
+    load_s = None
+    vram_after_smi = None
+    vram_after_torch = None
+    weight_mib = None
+    kv_mib = None
+    graph_mode = "off"
+    prefill_chunk = None
+    try:
+        sampler.mark("load_start", detail=f"load_model {Path(chr_path).name}")
+        t_load = time.perf_counter()
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_dir, local_files_only=True, trust_remote_code=trust_remote_code
+        )
+        model, report = load_model(model_dir, chr_path)
+        torch.cuda.synchronize()
+        load_s = time.perf_counter() - t_load
+        vram_after_smi = smi_used_mib()
+        vram_after_torch = torch.cuda.memory_allocated() / MIB
+        sampler.mark("load_end", detail=f"load_s={load_s:.1f}, {report}")
+
+        loop = TokenLoop(model, max_seq=max_seq, norm="exact", overlap=True)
+        sampler.mark("warmup_start", detail=repr(loop))
+        warm_ms = loop.warmup(prompt=8, tokens=16)
+        graph_mode = "off"
+        if graphs:
+            graph_mode = loop.capture_graphs()
+            sampler.mark(
+                "graph_capture",
+                detail=f"graph={graph_mode}"
+                + (f" ({loop.graph_error})" if loop.graph_error else ""),
+            )
+        torch.cuda.synchronize()
+        sampler.mark("warmup_end", detail=f"warmup_ms={warm_ms:.0f}, graph={graph_mode}")
+
+        stop = stop_token_ids(tokenizer)
+        for index, prompt in enumerate(messages, start=1):
+            packed = chat_text(tokenizer, prompt)
+            ids = tokenizer(packed, return_tensors="pt", add_special_tokens=False).input_ids[0]
+            seen: list[int] = []
+
+            def on_token(token_id: int, message_id: int = index) -> None:
+                if not seen:
+                    sampler.mark("first_token", message_id, detail="prefill done")
+                seen.append(token_id)
+
+            sampler.mark("msg_send", index, detail=prompt)
+            # `generate` resets the KV cache itself, so the turn is independent.
+            run = loop.generate(ids, max_new_tokens, stop=stop, on_token=on_token)
+            response = tokenizer.decode(run.tokens, skip_special_tokens=True)
+            row = _message_row(
+                "nf4",
+                index,
+                prompt,
+                response,
+                prompt_tokens=run.prompt_len,
+                new_tokens=len(run.tokens),
+                prefill_ms=run.prefill_ms,
+                decode_ms=run.decode_ms,
+                decode_tok_s=run.decode_tok_s,
+                stop_reason="eos" if run.stop_token is not None else "max_new_tokens",
+            )
+            session.messages.append(row)
+            sampler.mark("msg_done", index, detail=_done_detail(row))
+
+        weight_mib = loop.weight_bytes / MIB
+        kv_mib = loop.kv.mib
+        prefill_chunk = loop.prefill_chunk
+        try:
+            loop.kv = None
+        except Exception:
+            pass
+        try:
+            model.to("cpu")
+        except Exception:
+            pass
+        del loop, model, tokenizer
+        unload(sampler, detail="del loop/model/tokenizer, gc, empty_cache")
+        finished = _finish(
+            session,
+            sampler,
+            load_s=load_s,
+            vram_before=vram_before,
+            vram_after_load_smi=vram_after_smi,
+            vram_after_load_torch=vram_after_torch,
+            weight_mib=weight_mib,
+            kv_mib=kv_mib,
+            notes=(
+                f"gpu.host.load_model + gpu.loop.TokenLoop, graph={graph_mode}, "
+                f"max_seq={max_seq}, prefill_chunk={prefill_chunk}; {TURNS_NOTE}; "
+                "ttft = prefill of the whole prompt; no from_pretrained, no transformers.generate"
+            ),
+        )
+        return finished if out_dir is None else _write_single(finished, out_dir)
+    except Exception as exc:
+        _cpu_then_drop(loop, model, tokenizer)
+        loop = None
+        model = None
+        tokenizer = None
+        gc.collect()
+        unload(sampler, detail=f"{type(exc).__name__}")
+        if not _is_cuda_oom(exc):
+            sampler.stop(detail=f"failed: {type(exc).__name__}")
+            raise
+        finished = _finish(
+            session,
+            sampler,
+            load_s=load_s,
+            vram_before=vram_before,
+            vram_after_load_smi=vram_after_smi,
+            vram_after_load_torch=vram_after_torch,
+            weight_mib=weight_mib,
+            kv_mib=kv_mib,
+            notes=(
+                f"CUDA OOM on {Path(chr_path).name}: {exc}. "
+                "Recorded miss, not a crashed cell."
+            ),
+        )
+        return finished if out_dir is None else _write_single(finished, out_dir)
+
+
+def _write_single(session: LabSession, out_dir: str | Path) -> LabSession:
+    """Write one session's CSVs (``run_both`` writes the merged tables)."""
+    session.as_bundle().write(out_dir)
+    return session
+
+
+# --------------------------------------------------------------------------- #
+# both, in order, on one card
+# --------------------------------------------------------------------------- #
+
+
+def _card_is_clear(peak_mib: float | None, idle_mib: float | None = None) -> tuple[bool, float | None]:
+    """Has nvidia-smi dropped after the previous worker exited?"""
+    used = smi_used_mib()
+    if used is None:
+        return True, used
+    if peak_mib is not None and used < float(peak_mib) - RELEASED_BELOW_PEAK_MIB:
+        return True, used
+    if idle_mib is not None and used < float(idle_mib) + IDLE_HEADROOM_MIB:
+        return True, used
+    return False, used
+
+
+def run_both(
+    out_dir: str | Path | None = None,
+    *,
+    codec: str = "both",
+    model_dir: str | Path = MODEL_DIR,
+    chr_path: str | Path = CHR_PATH,
+    messages: Sequence[str] = MESSAGES,
+    max_new_tokens: int = MAX_NEW_TOKENS,
+    max_seq: int = MAX_SEQ,
+    interval_s: float = POLL_INTERVAL_S,
+    graphs: bool = True,
+    verbose: bool = True,
+    trust_remote_code: bool = False,
+    isolated: bool = True,
+) -> LabBundle:
+    """BF16 session, process exit, NF4 session -- sequential, on one GPU.
+
+    ``isolated=True`` (the default) runs each codec in a child process so the
+    GPU never holds both, and nvidia-smi actually comes back in between.
+
+    Writes ``timeline.csv``, ``events.csv``, ``messages.csv`` and
+    ``summary.csv`` into ``out_dir`` when it is given, and returns the bundle
+    :func:`gpu.lab.comparison_figure` draws.
+    """
+    if codec not in ("both", "bf16", "nf4"):
+        raise ValueError(f"codec={codec!r}; expected 'both', 'bf16' or 'nf4'")
+
+    idle = smi_used_mib()
+    sessions: list[LabSession] = []
+    child_out = out_dir if isolated else None
+    if codec in ("both", "bf16"):
+        sessions.append(
+            run_bf16(
+                out_dir=child_out,
+                model_dir=model_dir,
+                messages=messages,
+                max_new_tokens=max_new_tokens,
+                interval_s=interval_s,
+                verbose=verbose,
+                trust_remote_code=trust_remote_code,
+                isolated=isolated,
+            )
+        )
+
+    if codec in ("both", "nf4"):
+        clear, used = True, None
+        if sessions:
+            peak = sessions[-1].summary.get("vram_peak_smi_mib")
+            clear, used = _wait_released(peak, idle)
+            if not clear:
+                unload()
+                clear, used = _wait_released(peak, idle, seconds=15.0)
+            if not clear:
+                note = (
+                    f"NF4 session skipped: nvidia-smi still at {used:.0f} MiB after the "
+                    f"BF16 worker exited (peak {float(peak) if peak is not None else 'n/a'} MiB, "
+                    f"idle {idle if idle is None else f'{idle:.0f}'} MiB). Restart the kernel "
+                    "if this process still holds a previous model."
+                )
+                sessions[-1].add_note(note)
+                warnings.warn(note, RuntimeWarning, stacklevel=2)
+        if clear:
+            if sessions and used is not None:
+                nf4_note = f"card cleared to {used:.0f} MiB before the NF4 load"
+            else:
+                nf4_note = ""
+            nf4_session = run_nf4(
+                out_dir=child_out,
+                model_dir=model_dir,
+                chr_path=chr_path,
+                messages=messages,
+                max_new_tokens=max_new_tokens,
+                max_seq=max_seq,
+                interval_s=interval_s,
+                graphs=graphs,
+                verbose=verbose,
+                trust_remote_code=trust_remote_code,
+                isolated=isolated,
+            )
+            if nf4_note:
+                nf4_session.add_note(nf4_note)
+            sessions.append(nf4_session)
+
+    bundle = LabBundle()
+    for session in sessions:
+        bundle = bundle.merge(session.as_bundle())
+    if out_dir is not None:
+        bundle.write(out_dir)
+    return bundle

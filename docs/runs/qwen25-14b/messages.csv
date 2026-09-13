@@ -1,0 +1,7 @@
+codec,message_id,prompt,response,prompt_tokens,new_tokens,prefill_ms,decode_ms,decode_tok_s,stop_reason,quality_ok
+bf16,1,Reply with one short sentence. What is the capital of France?,The capital of France is Paris.,42,8,1012.18,8257.79,0.847684,eos,true
+bf16,2,And the capital of Germany?,The capital of Germany is Berlin.,35,8,1019.24,7321.78,0.956051,eos,true
+bf16,3,What is 17 times 19? Reply with the number only.,323,45,4,1053.96,3111.94,0.964027,eos,true
+nf4,1,Reply with one short sentence. What is the capital of France?,The capital of France is Paris.,42,8,758.1,1121.31,6.24269,eos,true
+nf4,2,And the capital of Germany?,The capital of Germany is Berlin.,35,8,755.497,1041.61,6.72039,eos,true
+nf4,3,What is 17 times 19? Reply with the number only.,323,45,4,762.754,445.802,6.72944,eos,true

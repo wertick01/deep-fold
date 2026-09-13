@@ -100,7 +100,7 @@ func Compress(opt CompressOptions) error {
 				if isNonFinite(err) {
 					return fmt.Errorf("non-finite value in tensor %s", canon)
 				}
-				return err
+				return fmt.Errorf("%s: %w", canon, err)
 			}
 			it.Name = canon
 			it.Tensor.Kind = kind

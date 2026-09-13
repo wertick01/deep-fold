@@ -143,6 +143,18 @@ func encodeGroup64(g *[GroupSize]float32) (idx [GroupSize]byte, s16 uint16, err 
 	s16 = f16.FromFloat32(s32)
 	s := f16.ToFloat32(s16)
 	if !finite(s) || s <= 0 {
+		// IEEE binary16 flushes tiny scales to 0 and overflows huge ones to Inf.
+		// A near-zero group is a zero group (scale 1, codes cluster at 0).
+		// A group above the f16 range is clamped; NF4 cannot store a larger scale.
+		if s32 > 65504 {
+			s32 = 65504
+		} else {
+			s32 = 1
+		}
+		s16 = f16.FromFloat32(s32)
+		s = f16.ToFloat32(s16)
+	}
+	if !finite(s) || s <= 0 {
 		return idx, 0, fmt.Errorf("nf4: scale is not finite positive")
 	}
 	for i := 0; i < GroupSize; i++ {

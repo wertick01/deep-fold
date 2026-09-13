@@ -5,8 +5,8 @@
 | Роль на 3080 12 ГБ | Репозиторий | Скачать | BF16 в 12 ГБ | После нашего NF4 |
 |---|---|---|---|---|
 | С запасом | [Qwen/Qwen2.5-3B-Instruct](https://huggingface.co/Qwen/Qwen2.5-3B-Instruct) | **6,2 ГБ** | да (~6,2 ГБ весов, leftover ~5 ГБ) | да, воздух |
-| Впритык | [Qwen/Qwen2.5-14B-Instruct](https://huggingface.co/Qwen/Qwen2.5-14B-Instruct) | **29,5 ГБ** | нет (~29,5 ГБ) | да, leftover ~3,5 ГБ |
-| Не влезает | [internlm/internlm2_5-20b-chat](https://huggingface.co/internlm/internlm2_5-20b-chat) | **~40 ГБ** | нет (~40 ГБ) | нет: ~11,3 ГБ одних 4.5-бит весов + CUDA уже > 12 ГБ |
+| Впритык | [Qwen/Qwen2.5-14B-Instruct](https://huggingface.co/Qwen/Qwen2.5-14B-Instruct) | **29,5 ГБ** | на карте нет: CUDA working set ~28 ГиБ, spill в shared GPU memory; `nvidia-smi` упирается в 12288 МиБ | да, leftover ~3,5 ГБ (на карте, без spill) |
+| Не влезает | [internlm/internlm2_5-20b-chat](https://huggingface.co/internlm/internlm2_5-20b-chat) | **~40 ГБ** | нет (~40 ГБ) | не меряли: ~11,3 ГБ 4.5-бит весов + CUDA уже > 12 ГБ; TokenLoop ещё Qwen-shaped (`wqkv` не подключён) |
 
 32B Qwen (~65 ГБ) не берём: больше лимита 40 ГБ на файл модели. 20B — ближайший «не влезет даже в NF4», который ещё качается.
 

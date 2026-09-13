@@ -1,0 +1,3 @@
+Live lab artifacts copied from
+C:\dev\models\runs\lab-qwen25-14b-20260913-114101
+on the author's RTX 3080 12 GB. Not a synthetic fixture.

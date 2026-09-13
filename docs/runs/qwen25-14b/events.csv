@@ -1,0 +1,36 @@
+t_s,codec,event,message_id,detail
+0.0383,bf16,start,,"codec=bf16, interval=0.12s"
+0.5650,bf16,load_start,,"from_pretrained Qwen2.5-14B-Instruct, bf16"
+41.7208,bf16,load_end,,load_s=41.1
+41.7227,bf16,warmup_start,,"8 greedy tokens, not in any reported number"
+51.0216,bf16,warmup_end,,warmup_ms=9299
+51.0222,bf16,msg_send,1,Reply with one short sentence. What is the capital of France?
+52.0345,bf16,first_token,1,ttft=1012 ms
+60.3106,bf16,msg_done,1,"8 new tokens, ttft=1012 ms, 0.8 tok/s, stop=eos, quality_ok=true"
+60.3118,bf16,msg_send,2,And the capital of Germany?
+61.3311,bf16,first_token,2,ttft=1019 ms
+68.6536,bf16,msg_done,2,"8 new tokens, ttft=1019 ms, 1.0 tok/s, stop=eos, quality_ok=true"
+68.6541,bf16,msg_send,3,What is 17 times 19? Reply with the number only.
+69.7081,bf16,first_token,3,ttft=1054 ms
+72.8208,bf16,msg_done,3,"4 new tokens, ttft=1054 ms, 1.0 tok/s, stop=eos, quality_ok=true"
+140.3411,bf16,unload_start,,"del model/tokenizer, gc, empty_cache"
+143.5730,bf16,unload_end,,"smi_after_unload=915 MiB, torch_alloc=8 MiB"
+143.6230,bf16,stop,,peak_smi=11997 MiB
+0.0420,nf4,start,,"codec=nf4, interval=0.12s"
+0.5681,nf4,load_start,,load_model qwen25-14b.nf4.chr
+10.3057,nf4,load_end,,"load_s=9.7, 337 nf4 linears (7088.2 MiB), 241 bf16 tensors (1.60 MiB), embed=nf4-rows (394.5 MiB), tied_lm_head=False, total=7484.3 MiB, 7.4s"
+10.5028,nf4,warmup_start,,"TokenLoop(layers=48, hidden=5120, q/kv=40/8x128, max_seq=512, groups=193, prefill_chunk=16, norm=exact, overlap=True, graph=off)"
+14.0956,nf4,graph_capture,,graph=linears
+14.0956,nf4,warmup_end,,"warmup_ms=3008, graph=linears"
+14.1137,nf4,msg_send,1,Reply with one short sentence. What is the capital of France?
+14.8722,nf4,first_token,1,prefill done
+15.9940,nf4,msg_done,1,"8 new tokens, ttft=758 ms, 6.2 tok/s, stop=eos, quality_ok=true"
+15.9945,nf4,msg_send,2,And the capital of Germany?
+16.7503,nf4,first_token,2,prefill done
+17.7920,nf4,msg_done,2,"8 new tokens, ttft=755 ms, 6.7 tok/s, stop=eos, quality_ok=true"
+17.7925,nf4,msg_send,3,What is 17 times 19? Reply with the number only.
+18.5555,nf4,first_token,3,prefill done
+19.0014,nf4,msg_done,3,"4 new tokens, ttft=763 ms, 6.7 tok/s, stop=eos, quality_ok=true"
+24.1139,nf4,unload_start,,"del loop/model/tokenizer, gc, empty_cache"
+24.7647,nf4,unload_end,,"smi_after_unload=1533 MiB, torch_alloc=8 MiB"
+24.8106,nf4,stop,,peak_smi=9356 MiB

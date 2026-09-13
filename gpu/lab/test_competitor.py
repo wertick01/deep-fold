@@ -313,6 +313,12 @@ def gate_run_matrix_is_all_skips() -> None:
         )
         summary = root / "summary.csv"
         check("the matrix wrote summary.csv", summary.is_file(), "summary.csv")
+        source = root / "SOURCE.txt"
+        check(
+            "the matrix wrote SOURCE.txt that forbids invented tok/s",
+            source.is_file() and "Do not invent" in source.read_text(encoding="utf-8"),
+            "SOURCE.txt",
+        )
         text = summary.read_text(encoding="utf-8")
         check(
             "no digit-bearing speed cell was written",
@@ -430,6 +436,25 @@ def gate_cli() -> None:
 
     check("--list exits 0 with no GPU", competitor_main(["--list"]) == 0, "list")
     check("--detect exits 0 with no GPU", competitor_main(["--detect"]) == 0, "detect")
+    with tempfile.TemporaryDirectory(prefix="competitor-detect-out-") as tmp:
+        dest = Path(tmp) / "summary.csv"
+        rc = competitor_main(["--detect", "--out", str(dest)])
+        check("--detect --out exits 0", rc == 0, "detect-out")
+        check("--detect --out wrote the skip CSV", dest.is_file(), str(dest))
+        back = read_competitor_csv(dest)
+        check(
+            "detect-only numeric cells stay empty",
+            back
+            and all(
+                row["mean_decode_tok_s"] is None and row["mean_ttft_ms"] is None for row in back
+            ),
+            "empty cells",
+        )
+        check(
+            "detect-only rows are greppable SKIP",
+            all(str(row["skip_reason"]).startswith(SKIP) for row in back),
+            "SKIP:",
+        )
     check(
         "--detect on our own rows also works",
         competitor_main(["--detect", "--stacks", "ours"]) == 0,

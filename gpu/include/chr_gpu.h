@@ -17,8 +17,9 @@ typedef struct {
 } chr_nf4_dev_t;
 
 /* x: __nv_bfloat16 [K, N] row-major; y: __nv_bfloat16 [M, N].
- * N in [1, 16]: N=1 decode tile (BM=128, BN=8, BK=256); N=2..16 prefill
- * (BM=64, BN=16 pad, BK=128, epilogue masks n>=N). No CUDA-core GEMV.
+ * N in [1, 16]: N=1 decode tile (BM=128, BN=8, BK=256); N=2..8 prefill
+ * (BM=64, BN=8 pad, BK=128); N=9..16 prefill (BM=64, BN=16 pad, BK=128,
+ * epilogue masks n>=N). No CUDA-core GEMV.
  * N>16 returns -2 — this call does not slice; the host chunks into N<=16.
  * (-2 is no longer "any N!=1".)
  * stream is cudaStream_t (0 / nullptr = default stream).

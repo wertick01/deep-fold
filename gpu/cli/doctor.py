@@ -89,8 +89,7 @@ def _nf4_artifact() -> tuple[Path | None, bool, bool]:
     """In-tree extension, whether the sources are newer, whether this Python can load it.
 
     Globs both suffixes: ``.pyd`` on Windows, ``.so`` on Linux
-    (``wave8-runtime.md`` §3.1 -- the wrapper only looks for ``.pyd`` today,
-    doctor must not repeat that blindness).
+    (``gpu.ext_bin.find_ext`` -- the generate wrapper used to look only for ``.pyd``).
 
     The ABI tag matters as much as the file's existence: a
     ``chr_nf4_ext.cp311-win_amd64.pyd`` is not importable from Python 3.12, and

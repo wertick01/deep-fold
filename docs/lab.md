@@ -221,8 +221,8 @@ archives (rotated SVG labels, two separate stories). Use `03_codec_lab.ipynb`.
 
 ## How to run
 
-Generate (no notebook; `sm_86` only; GGUF refused; sibling `.chr` matched by
-CHR0 header):
+Generate (no notebook; `sm_86` only; Ada/Hopper/Blackwell refused, not a
+port; GGUF refused; sibling `.chr` matched by CHR0 header):
 
 ```powershell
 python -m gpu.cli doctor

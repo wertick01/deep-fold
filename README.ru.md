@@ -387,6 +387,9 @@ What is 17 times 19? Reply with the number only.
   по-разному: BF16 идёт путём HuggingFace, NF4 — порциями не более 16 позиций.
 - **Память под изображение входит в показания `nvidia-smi`.** Она настоящая, она
   на той же карте, и здесь она не вычитается.
+- **Generate только Ampere `sm_86`.** Ada / Hopper / Blackwell — именованный
+  отказ, не порт. «Два клика, все ОС» — не утверждение: CUDA, компилятор, Go и
+  дерево HuggingFace ставит пользователь; Linux tok/s не опубликованы.
 - **Лаборатория умеет рисовать синтетическую картинку** (`--dry-plot`), её CSV
   помечены как `FIXTURE`. В таблицах выше нет ничего из этой заготовки.
 
@@ -414,9 +417,17 @@ chr compress --in <model-dir> --out <model>.nf4.chr --codec nf4
 
 ## Запустить лабораторию
 
-Генерация из упакованного `.chr` без ноутбука. Только Ampere `sm_86`; GGUF
-отклоняется; соседний `.chr` берётся только если заголовок CHR0 совпадает с
-этой моделью (`hidden_size`, `num_layers`, `vocab_size`):
+Генерация из упакованного `.chr` без ноутбука. Только Ampere `sm_86`
+(класс RTX 3080); GGUF отклоняется; соседний `.chr` берётся только если
+заголовок CHR0 совпадает с этой моделью (`hidden_size`, `num_layers`,
+`vocab_size`).
+
+Это **не** «два клика на любой ОС». `doctor` / `run` не ставят драйвер
+NVIDIA, CUDA-колесо PyTorch, MSVC/`nvcc`, Go и дерево HuggingFace. macOS
+сжимает и не генерирует. Linux может загрузить `.so`; **опубликованных Linux
+tok/s нет**. Ada (`sm_89`), Hopper и Blackwell **отказывают generate** —
+образ это `-gencode=arch=compute_86,code=sm_86` без PTX. Это отказ, а не
+порт ядра.
 
 ```powershell
 conda activate torch-gpu

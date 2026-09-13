@@ -21,6 +21,33 @@ If this tag came from the Ollama library, retry:
 
 That command downloads the same HuggingFace id; it does not convert the GGUF."""
 
+
+def unknown_ollama_tag(tag: str) -> str:
+    """WAVE 10 P2 §3.4. Unknown library name, including ``llama3.1:8b``."""
+    return (
+        f"from-ollama: unknown tag {tag!r}.\n"
+        "Deepfold maps allowlisted Ollama library names to HuggingFace ids and\n"
+        "downloads BF16 safetensors. It never reads ~/.ollama and never loads GGUF.\n"
+        "Allowlisted tags: qwen2.5:3b, qwen2.5:3b-instruct, qwen2.5:14b,\n"
+        "qwen2.5:14b-instruct.\n"
+        "Pass --hf <id> only for a row in that table\n"
+        "(e.g. internlm/internlm2_5-20b-chat).\n"
+        "Download the HuggingFace repo yourself, then:\n"
+        "\n"
+        "  deepfold run --model <that directory>"
+    )
+
+
+NEED_HUB = """\
+from-ollama needs huggingface_hub to download BF16 safetensors.
+Install the extra:
+
+  pip install "deepfold[hub]"
+
+Or download the HuggingFace repo yourself, then:
+
+  deepfold run --model <that directory>"""
+
 #: Kept for the doctor / catalog copy. It is *not* the generate authority any
 #: more: after wave10 P1 that is `gpu.host.attach` (the walker) plus the
 #: config-only pre-refuse in `gpu.graphs`.
@@ -116,7 +143,8 @@ def wrong_capability(capability: tuple[int, int] | None) -> str:
     return (
         f"This GPU is {sm}. The NF4 kernel is built only for sm_86\n"
         "(-gencode=arch=compute_86,code=sm_86; no PTX).\n"
-        "Measured machine: RTX 3080. Other NVIDIA GPUs are not a fallback."
+        "Measured machine: RTX 3080. Ada / Hopper / Blackwell are refused, "
+        "not a kernel port."
     )
 
 
@@ -187,7 +215,7 @@ def generate_unmeasured(capability: tuple[int, int]) -> str:
     sm = f"sm_{capability[0]}{capability[1]}"
     return (
         f"generate: no -- binary is sm_86 SASS only; this GPU is {sm}. "
-        "Rebuild with extra gencode to experiment; unmeasured (D2)."
+        "Ada / Hopper / Blackwell are refused, not a kernel port (D2)."
     )
 
 

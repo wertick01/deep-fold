@@ -7,7 +7,7 @@ file duplicates the ``.cu`` arithmetic so occupancy can be asserted without a
 GPU; if they diverge, the kernel is the truth.
 
 ``CLASSIC`` BM=128 ``N==1``, force only (wave-2). ``SMALL`` BM=64 ``N==1`` auto.
-``PREFILL`` BM=64, ``N`` in 2..16.
+``PREFILL`` BM=64, ``N`` in 2..16 (BN=8 smem when N<=8, BN=16 otherwise).
 """
 
 from __future__ import annotations
@@ -44,6 +44,12 @@ _TILES = {
     SMALL: (64, 128, 128, 3 * 64 * 64 + 3 * 128 * 2),
     PREFILL: (64, 128, 256, 3 * 64 * 64 + 3 * 128 * 16 * 2),
 }
+
+
+def _prefill_smem(n: int) -> int:
+    """BN=8 for N<=8, BN=16 for N=9..16. Must match nf4_gemm.cu plan_impl."""
+    bn = 8 if int(n) <= 8 else 16
+    return 3 * 64 * 64 + 3 * 128 * bn * 2
 
 
 def k_pad(k: int) -> int:
@@ -135,6 +141,8 @@ def plan(
         path = PREFILL
 
     bm, bk, block, smem = _TILES[path]
+    if path == PREFILL:
+        smem = _prefill_smem(N)
     grid_x = _ceil_div(M, bm)
     n_ktiles = _ceil_div(kp, bk)
 

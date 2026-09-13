@@ -4,7 +4,8 @@
 // Specs: docs/spec/stitch-gpu.md (wins), docs/spec/nf4.md §1, docs/kernel-ampere.md
 // Decode N=1, M large:  BM=128, BN=8 pad,  BK=256, block=256, stages=3, split_k=1.
 // Decode N=1, M small:  BM=64,  BN=8 pad,  BK=128, block=128, stages=3, split_k>1.
-// Prefill N=2..16:      BM=64,  BN=16 pad, BK=128, block=256, stages=3, split_k>=1.
+// Prefill N=2..8:       BM=64,  BN=8 pad,  BK=128, block=256, stages=3, split_k>=1.
+// Prefill N=9..16:      BM=64,  BN=16 pad, BK=128, block=256, stages=3, split_k>=1.
 // MMA: only mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32
 // N>16 is not launched here: return -2 and let the host chunk.
 //
@@ -67,22 +68,32 @@ constexpr int kDefaultOneWave = 70;
 constexpr int kTargetCtas = 140;
 
 // Prefill tile (kernel-ampere.md §2 / §4). Scales stay in __ldg, not smem.
+// N<=8 uses BN=8 so a tail chunk does not pad a second m16n8; N=9..16 keep
+// BN=16. x is cp.async'd as a compact [BK, N] blob (16 B aligned at k0*N) and
+// expanded to [BK, BN] after the wait -- per-row cp.async cannot do odd N
+// (2-byte row starts) and is misaligned for many even N as well.
 constexpr int pBM = 64;
-constexpr int pBN = 16;
+constexpr int pBN8 = 8;
+constexpr int pBN16 = 16;
 constexpr int pBK = 128;
 constexpr int pBlock = 256;
 constexpr int pStages = 3;
 constexpr int pPackedStageBytes = pBM * (pBK / 2); // 4096
-constexpr int pXStageElems = pBK * pBN;             // 2048 bf16, layout [BK, 16]
-constexpr int pSmemBytes =
-    pStages * pPackedStageBytes + pStages * pXStageElems * 2; // 24576
+constexpr int pXStageElems8 = pBK * pBN8;           // 1024 bf16, layout [BK, 8]
+constexpr int pXStageElems16 = pBK * pBN16;         // 2048 bf16, layout [BK, 16]
+constexpr int pSmemBytes8 =
+    pStages * pPackedStageBytes + pStages * pXStageElems8 * 2; // 18432
+constexpr int pSmemBytes16 =
+    pStages * pPackedStageBytes + pStages * pXStageElems16 * 2; // 24576
+
+// Prefill ring: BN=8 for N=2..8, BN=16 for N=9..16. Both stay on path=2.
 
 // How the 8 warps are cut. Wave 2 cut them 4 along M x 2 along N, which made
 // the two N warps of a row block reconstruct the *same* 16x16 W fragment: a
 // prefill column cost twice the dequant of a decode column for identical
 // weight traffic. They are now cut 4 along M x 2 along K, and each warp issues
-// both m16n8 MMAs (n < 8 and n >= 8) from one A fragment. BM, BK, block, smem
-// and therefore the whole planner are unchanged -- see compute_tile_prefill.
+// both m16n8 MMAs (n < 8 and n >= 8) from one A fragment. BM, BK, and block
+// stay put; smem follows BN (8 vs 16) -- see compute_tile_prefill.
 constexpr int pWarpsM = 4;
 constexpr int pWarpsK = 2;
 //: 8 FP32 accumulators per lane, padded to 9 so the one cross-warp reduce at
@@ -90,15 +101,17 @@ constexpr int pWarpsK = 2;
 constexpr int pRedStride = 9;
 constexpr int pRedFloats = pWarpsM * 32 * pRedStride; // 1152
 
-static_assert(pBN == 16, "prefill pads N to 16 for two m16n8 along N");
 static_assert(pPackedStageBytes == 4096, "prefill packed stage");
-static_assert(pXStageElems == 2048, "prefill x stage");
-static_assert(pSmemBytes == 24576, "prefill ring");
+static_assert(pXStageElems8 == 1024, "prefill x stage BN=8");
+static_assert(pXStageElems16 == 2048, "prefill x stage BN=16");
+static_assert(pSmemBytes8 == 18432, "prefill ring BN=8");
+static_assert(pSmemBytes16 == 24576, "prefill ring BN=16");
+static_assert(pSmemBytes16 <= 99 * 1024, "must not blow the sm_86 99 KiB cap");
 static_assert(pBlock == kBlock, "both launches are 256 threads");
 static_assert(pWarpsM * pWarpsK == pBlock / 32, "8 warps, 4 along M x 2 along K");
 static_assert(pWarpsM * 16 == pBM, "each M warp owns one m16n8k16 A fragment");
 static_assert(pWarpsK * kGroup == pBK, "each K warp owns one 64-wide scale group");
-static_assert(static_cast<int>(pRedFloats * sizeof(float)) <= pSmemBytes,
+static_assert(static_cast<int>(pRedFloats * sizeof(float)) <= pSmemBytes8,
               "the cross-warp reduce reuses the staging ring");
 
 // Canonical NF4 LUT, docs/spec/nf4.md §1, binary32 bits (not recomputed quantiles).
@@ -637,7 +650,7 @@ __global__ void chr_nf4_reduce_splitk(const float *__restrict__ partial,
   y[i] = __float2bfloat16(acc);
 }
 
-// --- prefill N=2..16: BM=64, BN=16, BK=128, 4 warps along M x 2 along N -----
+// --- prefill N=2..16: BM=64, BN=8 or 16, BK=128, 4 along M x 2 along K -----
 
 __device__ void issue_packed_prefill(uint8_t *dst, const uint8_t *packed,
                                      int m0, int M, int k0, int K_pad,
@@ -663,46 +676,102 @@ __device__ void issue_packed_prefill(uint8_t *dst, const uint8_t *packed,
   }
 }
 
-// x is [K, 16] row-major: each K-row is 32 B, two 16 B cp.async per row.
-__device__ void issue_x_prefill_n16(__nv_bfloat16 *dst, const __nv_bfloat16 *x,
-                                     int k0, int K) {
+// Compact [min(BK, K-k0), N] into the x stage via 16 B cp.async. k0 is a
+// multiple of BK, so x + k0*N is 16-byte aligned whenever x is, and the copy
+// does not depend on the per-row alignment of a [K, N] layout (N=3 rows
+// start 6 B apart). srcSize 0/4/8/16 zero-fills the rest of each 16 B dest;
+// leftover 2 B (odd n_k and odd N) are patched after the wait.
+template <int BN>
+__device__ void issue_x_prefill(__nv_bfloat16 *dst, const __nv_bfloat16 *x,
+                                 int k0, int K, int N) {
+  static_assert(BN == 8 || BN == 16, "prefill BN is one or two m16n8");
+  constexpr int kStageBytes = pBK * BN * 2;
   const int tid = static_cast<int>(threadIdx.x);
-  const int row = tid >> 1; // 0..127
-  const int half = tid & 1;
-  __nv_bfloat16 *out = dst + row * pBN + half * 8;
-  int src_bytes = 0;
-  const __nv_bfloat16 *src = x;
-  const int k = k0 + row;
-  if (k < K) {
-    src = x + static_cast<size_t>(k) * pBN + half * 8;
-    src_bytes = 16;
+  const int n_k = K > k0 ? min(pBK, K - k0) : 0;
+  const int n_bytes = n_k * N * 2;
+  const int aligned = n_bytes & ~15;
+  const int rem = n_bytes - aligned;
+  const char *gbase = reinterpret_cast<const char *>(
+      x + static_cast<size_t>(k0) * static_cast<size_t>(N));
+  char *sbase = reinterpret_cast<char *>(dst);
+  const int off = tid * 16;
+  if (off >= kStageBytes) {
+    return;
   }
-  cp_async_ca_16(out, src, src_bytes);
+  int src_bytes = 0;
+  const void *src = x;
+  if (off + 16 <= n_bytes) {
+    src = gbase + off;
+    src_bytes = 16;
+  } else if (off == aligned && rem > 0) {
+    src = gbase + off;
+    src_bytes = rem >= 8 ? 8 : rem >= 4 ? 4 : 0;
+  } else if (off >= aligned + (rem > 0 ? 16 : 0)) {
+    src_bytes = 0;
+  }
+  cp_async_ca_16(sbase + off, src, src_bytes);
 }
 
-// Scalar copy for N=2..15: global rows are N*2 bytes, not a 16 B granule.
-// Writes every smem element the MMA will read, so pad columns and K tails are
-// exact zeros. ``NCOLS`` is the padded width this launch actually reads: 8 when
-// N <= 8, because then the whole n >= 8 m16n8 is skipped and filling those
-// columns would be work spent on a fragment nobody multiplies.
-template <int NCOLS>
-__device__ void fill_x_prefill(__nv_bfloat16 *dst, const __nv_bfloat16 *x,
-                                int k0, int K, int N) {
-  static_assert(NCOLS == 8 || NCOLS == 16, "prefill fills one or both m16n8");
-  constexpr int kShift = (NCOLS == 16) ? 4 : 3;
-  constexpr int kElems = pBK * NCOLS;
-  const int tid = static_cast<int>(threadIdx.x);
-  const __nv_bfloat16 z = __float2bfloat16(0.f);
-  for (int i = tid; i < kElems; i += pBlock) {
-    const int local_k = i >> kShift;
-    const int n = i & (NCOLS - 1);
-    const int k = k0 + local_k;
-    __nv_bfloat16 v = z;
-    if (n < N && k < K) {
-      v = x[static_cast<size_t>(k) * static_cast<size_t>(N) + n];
-    }
-    dst[local_k * pBN + n] = v;
+template <int BN>
+__device__ void patch_x_prefill_tail(__nv_bfloat16 *dst, const __nv_bfloat16 *x,
+                                     int k0, int K, int N) {
+  const int n_k = K > k0 ? min(pBK, K - k0) : 0;
+  const int n_bytes = n_k * N * 2;
+  const int rem = n_bytes & 15;
+  if (rem == 0) {
+    return;
   }
+  const int src_bytes = rem >= 8 ? 8 : rem >= 4 ? 4 : 0;
+  const int n_left = (rem - src_bytes) / 2;
+  const int tid = static_cast<int>(threadIdx.x);
+  if (tid < n_left) {
+    const int elem = (n_bytes / 16) * 8 + src_bytes / 2 + tid;
+    dst[elem] = x[static_cast<size_t>(k0) * static_cast<size_t>(N) +
+                  static_cast<size_t>(elem)];
+  }
+}
+
+// Compact [BK, N] in the first pBK*N slots -> padded [BK, BN] the MMA walks.
+template <int BN>
+__device__ void expand_x_prefill(__nv_bfloat16 *xs, int N) {
+  constexpr int kRegs = (pBK * BN) / pBlock;
+  __nv_bfloat16 r[kRegs];
+  const int tid = static_cast<int>(threadIdx.x);
+#pragma unroll
+  for (int i = 0; i < kRegs; ++i) {
+    r[i] = xs[tid + i * pBlock];
+  }
+  __syncthreads();
+  const __nv_bfloat16 z = __float2bfloat16(0.f);
+#pragma unroll
+  for (int i = 0; i < kRegs; ++i) {
+    xs[tid + i * pBlock] = z;
+  }
+  __syncthreads();
+#pragma unroll
+  for (int i = 0; i < kRegs; ++i) {
+    const int src = tid + i * pBlock;
+    if (src < pBK * N) {
+      const int row = src / N;
+      const int col = src - row * N;
+      xs[row * BN + col] = r[i];
+    }
+  }
+}
+
+template <int BN>
+__device__ void prepare_x_prefill(__nv_bfloat16 *xs, const __nv_bfloat16 *x,
+                                   int k0, int K, int N) {
+  if (N == BN) {
+    return;
+  }
+  const int n_k = K > k0 ? min(pBK, K - k0) : 0;
+  if ((n_k * N * 2) & 15) {
+    patch_x_prefill_tail<BN>(xs, x, k0, K, N);
+    __syncthreads();
+  }
+  expand_x_prefill<BN>(xs, N);
+  __syncthreads();
 }
 
 // One warp = 16 rows x one 64-wide scale group x both m16n8 columns blocks.
@@ -721,10 +790,8 @@ __device__ void fill_x_prefill(__nv_bfloat16 *dst, const __nv_bfloat16 *x,
 //  3. One ``__ldg`` per row per group, not one per row per 16-wide step: the
 //     four steps inside a group share a scale by construction.
 //
-// ``WIDE`` is ``N > 8`` and is uniform across the block. When it is false the
-// n >= 8 fragment is never formed, so a tail chunk of 3..8 columns stops paying
-// MMA and smem traffic for padding it would mask off at the store anyway.
-template <bool WIDE>
+// ``WIDE`` is the BN=16 tile (N=9..16). BN=8 never forms the n >= 8 fragment.
+template <int BN, bool WIDE>
 __device__ __forceinline__ void compute_tile_prefill(
     const uint8_t *pk, const __nv_bfloat16 *xs, const uint16_t *scale, int m0,
     int M, int K, int k0, int n_groups, float &d0, float &d1, float &d2,
@@ -745,7 +812,9 @@ __device__ __forceinline__ void compute_tile_prefill(
   const uint8_t *row_pk0 = pk + local0 * (pBK / 2);
   const uint8_t *row_pk1 = pk + local1 * (pBK / 2);
   // B: n = groupID, so this lane holds column g of the low m16n8 and column
-  // g + 8 of the high one. Both walk k with stride pBN through the x stage.
+  // g + 8 of the high one. Both walk k with stride BN through the x stage.
+  static_assert(BN == 8 || BN == 16, "prefill BN is one or two m16n8");
+  static_assert(!WIDE || BN == 16, "high m16n8 only exists on the BN=16 tile");
   const __nv_bfloat16 *x_lo = xs + g;
   const __nv_bfloat16 *x_hi = xs + g + 8;
 
@@ -781,14 +850,14 @@ __device__ __forceinline__ void compute_tile_prefill(
         a1 = dequant_pair_live(row_pk1, k0, k_lo, s1);
         a3 = dequant_pair_live(row_pk1, k0, k_hi, s1);
       }
-      const int o_lo = (k_lo - k0) * pBN;
-      const int o_hi = (k_hi - k0) * pBN;
-      const uint32_t b0 = pack_bf16x2_bits(x_lo[o_lo], x_lo[o_lo + pBN]);
-      const uint32_t b1 = pack_bf16x2_bits(x_lo[o_hi], x_lo[o_hi + pBN]);
+      const int o_lo = (k_lo - k0) * BN;
+      const int o_hi = (k_hi - k0) * BN;
+      const uint32_t b0 = pack_bf16x2_bits(x_lo[o_lo], x_lo[o_lo + BN]);
+      const uint32_t b1 = pack_bf16x2_bits(x_lo[o_hi], x_lo[o_hi + BN]);
       mma_m16n8k16(a0, a1, a2, a3, b0, b1, d0, d1, d2, d3);
       if (WIDE) {
-        const uint32_t c0 = pack_bf16x2_bits(x_hi[o_lo], x_hi[o_lo + pBN]);
-        const uint32_t c1 = pack_bf16x2_bits(x_hi[o_hi], x_hi[o_hi + pBN]);
+        const uint32_t c0 = pack_bf16x2_bits(x_hi[o_lo], x_hi[o_lo + BN]);
+        const uint32_t c1 = pack_bf16x2_bits(x_hi[o_hi], x_hi[o_hi + BN]);
         mma_m16n8k16(a0, a1, a2, a3, c0, c1, e0, e1, e2, e3);
       }
     }
@@ -815,33 +884,33 @@ __device__ __forceinline__ void compute_tile_prefill(
       a3 = dequant_pair(row_pk1, k0, k_hi, K, s1);
     }
     const __nv_bfloat16 z = __float2bfloat16(0.f);
-    const int o_lo = (k_lo - k0) * pBN;
-    const int o_hi = (k_hi - k0) * pBN;
+    const int o_lo = (k_lo - k0) * BN;
+    const int o_hi = (k_hi - k0) * BN;
     const bool lo0 = k_lo < K, lo1 = k_lo + 1 < K;
     const bool hi0 = k_hi < K, hi1 = k_hi + 1 < K;
     const uint32_t b0 = pack_bf16x2_bits(lo0 ? x_lo[o_lo] : z,
-                                         lo1 ? x_lo[o_lo + pBN] : z);
+                                         lo1 ? x_lo[o_lo + BN] : z);
     const uint32_t b1 = pack_bf16x2_bits(hi0 ? x_lo[o_hi] : z,
-                                         hi1 ? x_lo[o_hi + pBN] : z);
+                                         hi1 ? x_lo[o_hi + BN] : z);
     mma_m16n8k16(a0, a1, a2, a3, b0, b1, d0, d1, d2, d3);
     if (WIDE) {
       const uint32_t c0 = pack_bf16x2_bits(lo0 ? x_hi[o_lo] : z,
-                                           lo1 ? x_hi[o_lo + pBN] : z);
+                                           lo1 ? x_hi[o_lo + BN] : z);
       const uint32_t c1 = pack_bf16x2_bits(hi0 ? x_hi[o_hi] : z,
-                                           hi1 ? x_hi[o_hi + pBN] : z);
+                                           hi1 ? x_hi[o_hi + BN] : z);
       mma_m16n8k16(a0, a1, a2, a3, c0, c1, e0, e1, e2, e3);
     }
   }
 }
 
-__global__ void __launch_bounds__(256, 2)
-    chr_nf4_gemm_prefill_n16(const uint8_t *__restrict__ packed,
-                              const uint16_t *__restrict__ scale,
-                              const __nv_bfloat16 *__restrict__ x,
-                              __nv_bfloat16 *__restrict__ y,
-                              float *__restrict__ partial, int M, int K,
-                              int K_pad, int N, int n_ktiles,
-                              int tiles_per_split) {
+template <int BN>
+__device__ void prefill_gemm_body(
+    const uint8_t *__restrict__ packed, const uint16_t *__restrict__ scale,
+    const __nv_bfloat16 *__restrict__ x, __nv_bfloat16 *__restrict__ y,
+    float *__restrict__ partial, int M, int K, int K_pad, int N,
+    int n_ktiles, int tiles_per_split) {
+  static_assert(BN == 8 || BN == 16, "prefill BN is one or two m16n8");
+  constexpr int kXStageElems = pBK * BN;
   const int m0 = static_cast<int>(blockIdx.x) * pBM;
   // grid.y is the K split (TTFT is the second occupancy floor: 3B prefill
   // chunks are N<=16, so grid.x = ceil(M / 64) is 32 CTAs on q_proj).
@@ -850,10 +919,6 @@ __global__ void __launch_bounds__(256, 2)
   const int n_tiles_local = min(tiles_per_split, n_ktiles - tile0);
   const int n_groups = K_pad / kGroup;
   const int packed_stride = K_pad / 2;
-  const bool x_async = (N == 16);
-  // Uniform across the block: N <= 8 leaves the n >= 8 m16n8 unformed, so
-  // neither the fill nor the MMA pays for columns the store would mask.
-  const bool wide = (N > 8);
 
   extern __shared__ char smem[];
   uint8_t *pk_base = reinterpret_cast<uint8_t *>(smem);
@@ -866,9 +931,7 @@ __global__ void __launch_bounds__(256, 2)
       const int k0 = (tile0 + s) * pBK;
       issue_packed_prefill(pk_base + s * pPackedStageBytes, packed, m0, M, k0,
                            K_pad, packed_stride);
-      if (x_async) {
-        issue_x_prefill_n16(x_base + s * pXStageElems, x, k0, K);
-      }
+      issue_x_prefill<BN>(x_base + s * kXStageElems, x, k0, K, N);
     }
     cp_async_commit();
   }
@@ -883,33 +946,19 @@ __global__ void __launch_bounds__(256, 2)
       const int k0 = (tile0 + tile + pStages - 1) * pBK;
       issue_packed_prefill(pk_base + smem_write * pPackedStageBytes, packed, m0,
                            M, k0, K_pad, packed_stride);
-      if (x_async) {
-        issue_x_prefill_n16(x_base + smem_write * pXStageElems, x, k0, K);
-      }
+      issue_x_prefill<BN>(x_base + smem_write * kXStageElems, x, k0, K, N);
     }
     cp_async_commit();
     cp_async_wait<pStages - 2>();
     __syncthreads();
 
     const int k0 = (tile0 + tile) * pBK;
-    if (!x_async) {
-      if (wide) {
-        fill_x_prefill<16>(x_base + smem_read * pXStageElems, x, k0, K, N);
-      } else {
-        fill_x_prefill<8>(x_base + smem_read * pXStageElems, x, k0, K, N);
-      }
-      __syncthreads();
-    }
+    prepare_x_prefill<BN>(x_base + smem_read * kXStageElems, x, k0, K, N);
 
     const uint8_t *pk = pk_base + smem_read * pPackedStageBytes;
-    const __nv_bfloat16 *xs = x_base + smem_read * pXStageElems;
-    if (wide) {
-      compute_tile_prefill<true>(pk, xs, scale, m0, M, K, k0, n_groups, d0, d1,
-                                 d2, d3, e0, e1, e2, e3);
-    } else {
-      compute_tile_prefill<false>(pk, xs, scale, m0, M, K, k0, n_groups, d0, d1,
-                                  d2, d3, e0, e1, e2, e3);
-    }
+    const __nv_bfloat16 *xs = x_base + smem_read * kXStageElems;
+    compute_tile_prefill<BN, (BN == 16)>(pk, xs, scale, m0, M, K, k0, n_groups,
+                                          d0, d1, d2, d3, e0, e1, e2, e3);
 
     __syncthreads();
     smem_write = (smem_write + 1) % pStages;
@@ -1027,6 +1076,30 @@ __global__ void __launch_bounds__(256, 2)
       y1[n1 + 8] = __float2bfloat16(e3);
     }
   }
+}
+
+__global__ void __launch_bounds__(256, 2)
+    chr_nf4_gemm_prefill_n16(const uint8_t *__restrict__ packed,
+                              const uint16_t *__restrict__ scale,
+                              const __nv_bfloat16 *__restrict__ x,
+                              __nv_bfloat16 *__restrict__ y,
+                              float *__restrict__ partial, int M, int K,
+                              int K_pad, int N, int n_ktiles,
+                              int tiles_per_split) {
+  prefill_gemm_body<16>(packed, scale, x, y, partial, M, K, K_pad, N, n_ktiles,
+                         tiles_per_split);
+}
+
+__global__ void __launch_bounds__(256, 2)
+    chr_nf4_gemm_prefill_n8(const uint8_t *__restrict__ packed,
+                             const uint16_t *__restrict__ scale,
+                             const __nv_bfloat16 *__restrict__ x,
+                             __nv_bfloat16 *__restrict__ y,
+                             float *__restrict__ partial, int M, int K,
+                             int K_pad, int N, int n_ktiles,
+                             int tiles_per_split) {
+  prefill_gemm_body<8>(packed, scale, x, y, partial, M, K, K_pad, N, n_ktiles,
+                        tiles_per_split);
 }
 
 bool aligned16(const void *p) {
@@ -1154,7 +1227,7 @@ int plan_impl(const chr_nf4_dev_t &h, int32_t N, int32_t have_ws,
     p.grid_x = ceil_div(h.M, pBM);
     p.n_ktiles = ceil_div(h.K_pad, pBK);
     pick_split(p.grid_x, p.n_ktiles, have_ws, &p.grid_y, &p.tiles_per_split);
-    p.smem_bytes = pSmemBytes;
+    p.smem_bytes = N <= 8 ? pSmemBytes8 : pSmemBytes16;
     if (p.grid_y > 1) {
       p.ws_floats = static_cast<int64_t>(p.grid_y) * h.M * N;
     }
@@ -1169,8 +1242,9 @@ int check_args(const chr_nf4_dev_t *w, int32_t N, bool need_ptrs,
   if (!w) {
     return -1;
   }
-  // N in [1, 16]. N=1 is a decode tile. N=2..16 is prefill (pad to 16).
-  // N>16: host chunks into slices of at most 16; this entry does not slice.
+  // N in [1, 16]. N=1 is a decode tile. N=2..8 is prefill pad-8; N=9..16
+  // pad-16. N>16: host chunks into slices of at most 16; this entry does not
+  // slice.
   if (N < 1 || N > 16) {
     return -2;
   }
@@ -1256,14 +1330,24 @@ extern "C" int chr_nf4_gemm_ws(const chr_nf4_dev_t *w, const void *x, void *y,
     chr_nf4_gemm_decode_small<<<grid, block, sSmemBytes, s>>>(
         h.packed, h.scale, x_bf, y_bf, partial, h.M, h.K, h.K_pad, p.n_ktiles,
         p.tiles_per_split);
-  } else {
+  } else if (N <= 8) {
     cudaError_t attr = cudaFuncSetAttribute(
-        chr_nf4_gemm_prefill_n16, cudaFuncAttributeMaxDynamicSharedMemorySize,
-        pSmemBytes);
+        chr_nf4_gemm_prefill_n8, cudaFuncAttributeMaxDynamicSharedMemorySize,
+        pSmemBytes8);
     if (attr != cudaSuccess) {
       return -6;
     }
-    chr_nf4_gemm_prefill_n16<<<grid, block, pSmemBytes, s>>>(
+    chr_nf4_gemm_prefill_n8<<<grid, block, pSmemBytes8, s>>>(
+        h.packed, h.scale, x_bf, y_bf, partial, h.M, h.K, h.K_pad, N,
+        p.n_ktiles, p.tiles_per_split);
+  } else {
+    cudaError_t attr = cudaFuncSetAttribute(
+        chr_nf4_gemm_prefill_n16, cudaFuncAttributeMaxDynamicSharedMemorySize,
+        pSmemBytes16);
+    if (attr != cudaSuccess) {
+      return -6;
+    }
+    chr_nf4_gemm_prefill_n16<<<grid, block, pSmemBytes16, s>>>(
         h.packed, h.scale, x_bf, y_bf, partial, h.M, h.K, h.K_pad, N,
         p.n_ktiles, p.tiles_per_split);
   }

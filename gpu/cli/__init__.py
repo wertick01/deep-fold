@@ -1,8 +1,8 @@
 """``deepfold`` command line: doctor, compress, run.
 
-Without installing: ``python -m gpu.cli doctor`` and
-``python -m gpu.cli run --model DIR``. After ``pip install -e .`` the same
-entry point is ``deepfold`` on PATH.
+Without installing: ``python -m gpu.cli doctor``,
+``python -m gpu.cli run --model DIR``, and ``python -m gpu.cli from-ollama``.
+After ``pip install -e .`` the same entry point is ``deepfold`` on PATH.
 
 Generate is Ampere ``sm_86`` only; everything else refuses with a reason.
 GGUF is refused (the path is never opened). A sibling ``.chr`` is used only

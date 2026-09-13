@@ -38,7 +38,9 @@ _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
+from gpu.cli import from_ollama as from_ollama_mod  # noqa: E402
 from gpu.cli import messages, paths, run as run_mod  # noqa: E402
+from gpu.cli.ollama_map import ResolveError, resolve  # noqa: E402
 from gpu.cli.arch import gate  # noqa: E402
 from gpu.cli.doctor import (  # noqa: E402
     Machine,
@@ -631,24 +633,220 @@ def test_no_subcommand_prints_help_and_fails() -> None:
     assert "doctor" in err.getvalue()
 
 
-def test_from_ollama_refuses_without_reading_blobs() -> None:
-    real_open = builtins.open
+def _watch_open() -> tuple[list[str], object]:
     opened: list[str] = []
+    real_open = builtins.open
 
     def watched(file, *a, **kw):
         opened.append(str(file))
         return real_open(file, *a, **kw)
 
     builtins.open = watched  # type: ignore[assignment]
+    return opened, real_open
+
+
+def test_from_ollama_refuses_without_reading_blobs() -> None:
+    opened, real_open = _watch_open()
     err = io.StringIO()
     try:
         with redirect_stderr(err):
             code = main(["from-ollama", "llama3.1:8b"])
     finally:
         builtins.open = real_open  # type: ignore[assignment]
+    text = err.getvalue()
     assert code == 1
-    assert "never read ~/.ollama" in err.getvalue()
+    assert "unknown tag 'llama3.1:8b'" in text
+    assert "never reads ~/.ollama" in text
+    assert "qwen2.5:3b" in text
     assert not [p for p in opened if ".ollama" in p.lower()]
+    assert not [p for p in opened if "blobs" in p.lower() or p.lower().endswith(".gguf")]
+
+
+def test_from_ollama_qwen_yes_stub_snapshot_download() -> None:
+    called: list[dict[str, str]] = []
+
+    def stub(*, repo_id: str, local_dir: str) -> str:
+        called.append({"repo_id": repo_id, "local_dir": local_dir})
+        Path(local_dir).mkdir(parents=True, exist_ok=True)
+        (Path(local_dir) / "config.json").write_text("{}", encoding="utf-8")
+        return local_dir
+
+    opened, real_open = _watch_open()
+    original = from_ollama_mod._snapshot_download
+    from_ollama_mod._snapshot_download = stub  # type: ignore[assignment]
+    err, out = io.StringIO(), io.StringIO()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "hf"
+            with redirect_stderr(err), redirect_stdout(out):
+                code = main(["from-ollama", "qwen2.5:3b", "--yes", "--dir", str(dest)])
+    finally:
+        from_ollama_mod._snapshot_download = original  # type: ignore[assignment]
+        builtins.open = real_open  # type: ignore[assignment]
+    assert code == 0, err.getvalue()
+    assert called == [{"repo_id": "Qwen/Qwen2.5-3B-Instruct", "local_dir": str(dest)}]
+    assert f"deepfold run --model {dest}" in out.getvalue()
+    assert "Qwen/Qwen2.5-3B-Instruct" in err.getvalue()
+    assert not [p for p in opened if ".ollama" in p.lower()]
+
+
+def test_from_ollama_without_yes_and_no_tty_downloads_nothing() -> None:
+    called: list[dict[str, str]] = []
+
+    def stub(*, repo_id: str, local_dir: str) -> str:
+        called.append({"repo_id": repo_id, "local_dir": local_dir})
+        return local_dir
+
+    original = from_ollama_mod._snapshot_download
+    from_ollama_mod._snapshot_download = stub  # type: ignore[assignment]
+    err = io.StringIO()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "hf"
+            stdin = sys.stdin
+            sys.stdin = io.StringIO("")
+            try:
+                with redirect_stderr(err), redirect_stdout(io.StringIO()):
+                    code = main(["from-ollama", "qwen2.5:3b", "--dir", str(dest)])
+            finally:
+                sys.stdin = stdin
+    finally:
+        from_ollama_mod._snapshot_download = original  # type: ignore[assignment]
+    assert code == 1
+    assert called == []
+    assert "No TTY and no --yes" in err.getvalue()
+
+
+def test_from_ollama_blob_path_is_gguf_copy_and_not_opened() -> None:
+    opened, real_open = _watch_open()
+    blob = r"C:\Users\x\.ollama\models\blobs\sha256-dead"
+    err = io.StringIO()
+    try:
+        with redirect_stderr(err):
+            code = main(["from-ollama", blob])
+    finally:
+        builtins.open = real_open  # type: ignore[assignment]
+    assert code == 1
+    assert "cannot load GGUF" in err.getvalue()
+    assert "unknown tag" not in err.getvalue()
+    assert blob not in opened
+    assert not [p for p in opened if ".ollama" in p.lower() or "sha256-dead" in p.lower()]
+
+
+def test_from_ollama_hf_must_match_the_tag() -> None:
+    err = io.StringIO()
+    with redirect_stderr(err):
+        code = main(
+            ["from-ollama", "qwen2.5:3b", "--hf", "internlm/internlm2_5-20b-chat"]
+        )
+    assert code == 1
+    assert "does not match tag 'qwen2.5:3b'" in err.getvalue()
+    assert "Qwen/Qwen2.5-3B-Instruct" in err.getvalue()
+
+
+def test_from_ollama_unknown_tag_hf_internlm_is_allowed() -> None:
+    called: list[dict[str, str]] = []
+
+    def stub(*, repo_id: str, local_dir: str) -> str:
+        called.append({"repo_id": repo_id, "local_dir": local_dir})
+        Path(local_dir).mkdir(parents=True, exist_ok=True)
+        (Path(local_dir) / "config.json").write_text("{}", encoding="utf-8")
+        return local_dir
+
+    original = from_ollama_mod._snapshot_download
+    from_ollama_mod._snapshot_download = stub  # type: ignore[assignment]
+    err, out = io.StringIO(), io.StringIO()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "internlm"
+            with redirect_stderr(err), redirect_stdout(out):
+                code = main(
+                    [
+                        "from-ollama",
+                        "unknown",
+                        "--hf",
+                        "internlm/internlm2_5-20b-chat",
+                        "--yes",
+                        "--dir",
+                        str(dest),
+                    ]
+                )
+    finally:
+        from_ollama_mod._snapshot_download = original  # type: ignore[assignment]
+    assert code == 0, err.getvalue()
+    assert called == [{"repo_id": "internlm/internlm2_5-20b-chat", "local_dir": str(dest)}]
+
+
+def test_from_ollama_missing_hub_names_the_extra() -> None:
+    original_missing = from_ollama_mod._hub_missing
+    original_snap = from_ollama_mod._snapshot_download
+    from_ollama_mod._hub_missing = lambda: True  # type: ignore[assignment]
+    called: list[object] = []
+
+    def boom(**kw: object) -> str:
+        called.append(kw)
+        raise AssertionError("snapshot_download must not run")
+
+    from_ollama_mod._snapshot_download = boom  # type: ignore[assignment]
+    err = io.StringIO()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            with redirect_stderr(err):
+                code = main(
+                    ["from-ollama", "qwen2.5:3b", "--yes", "--dir", str(Path(tmp) / "hf")]
+                )
+    finally:
+        from_ollama_mod._hub_missing = original_missing  # type: ignore[assignment]
+        from_ollama_mod._snapshot_download = original_snap  # type: ignore[assignment]
+    assert code == 1
+    assert called == []
+    assert 'pip install "deepfold[hub]"' in err.getvalue() or "deepfold[hub]" in err.getvalue()
+
+
+def test_from_ollama_existing_tree_skips_snapshot() -> None:
+    called: list[object] = []
+
+    def boom(**kw: object) -> str:
+        called.append(kw)
+        raise AssertionError("already on disk")
+
+    original = from_ollama_mod._snapshot_download
+    from_ollama_mod._snapshot_download = boom  # type: ignore[assignment]
+    err, out = io.StringIO(), io.StringIO()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "qwen"
+            dest.mkdir()
+            (dest / "config.json").write_text("{}", encoding="utf-8")
+            with redirect_stderr(err), redirect_stdout(out):
+                code = main(["from-ollama", "qwen2.5:3b", "--dir", str(dest)])
+    finally:
+        from_ollama_mod._snapshot_download = original  # type: ignore[assignment]
+    assert code == 0, err.getvalue()
+    assert called == []
+    assert "Already on disk" in err.getvalue()
+    assert f"deepfold run --model {dest}" in out.getvalue()
+
+
+def test_ollama_map_resolve_strips_library_prefix() -> None:
+    mapped = resolve("library/qwen2.5:3b")
+    assert mapped.hf_id == "Qwen/Qwen2.5-3B-Instruct"
+    try:
+        resolve(r"C:\Users\x\.ollama\models\blobs\sha256-dead")
+    except ResolveError as exc:
+        assert exc.kind == "gguf"
+    else:  # pragma: no cover
+        raise AssertionError("a blob path must be GGUF, not an unknown tag")
+
+
+def test_parser_from_ollama_flags() -> None:
+    args = build_parser().parse_args(
+        ["from-ollama", "qwen2.5:3b", "--hf", "Qwen/Qwen2.5-3B-Instruct", "--yes", "--run"]
+    )
+    assert args.command == "from-ollama"
+    assert args.tag == "qwen2.5:3b"
+    assert args.hf == "Qwen/Qwen2.5-3B-Instruct"
+    assert args.yes is True and args.run is True
 
 
 # --------------------------------------------------------------------------- #

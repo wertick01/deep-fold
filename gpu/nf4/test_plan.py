@@ -110,11 +110,24 @@ def test_new_grid_fills_card() -> None:
     ok = True
     rows = []
     for name, m, k in SHAPES_3B:
-        for n in (2, 4, 8, 16):
+        for n in (2, 3, 4, 8, 9, 16):
             p = plan(m, k, n)
             ok &= p.path == PREFILL and _filled(p)
         rows.append(f"{name} {plan(m, k, 16).ctas}")
     check(ok, "prefill N=2..16 likewise: " + ", ".join(rows))
+
+    p8 = plan(2048, 2048, 8)
+    p9 = plan(2048, 2048, 9)
+    p16 = plan(2048, 2048, 16)
+    check(
+        p8.smem_bytes == 18432
+        and p9.smem_bytes == 24576
+        and p16.smem_bytes == 24576
+        and p8.smem_bytes < 99 * 1024
+        and p16.smem_bytes < 99 * 1024,
+        f"prefill BN=8 smem {p8.smem_bytes}B, BN=16 {p16.smem_bytes}B "
+        f"(N=9 {p9.smem_bytes}B), both under 99 KiB",
+    )
 
     # No shape may come out of the planner with fewer CTAs than wave 2 had.
     worst = min(
@@ -231,7 +244,7 @@ def test_matches_extension() -> None:
     fields = [f for f in Plan.__dataclass_fields__ if f in probe]
     ok = True
     for _, m, k in SHAPES_3B:
-        for n in (1, 2, 4, 8, 16):
+        for n in (1, 2, 3, 4, 8, 9, 16):
             for have_ws in (True, False):
                 c = nf4_plan(m, k, n, have_ws=have_ws)
                 p = plan(m, k, n, have_ws=have_ws)

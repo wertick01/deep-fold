@@ -272,8 +272,11 @@ def test_paths_agree() -> bool:
         (2048, 11008, 1),  # 3B down_proj: the long-K one
         (130, 65, 1),      # K tail inside a group, M not a tile multiple
         (2048, 2048, 4),
+        (256, 2048, 8),
+        (256, 2048, 9),
         (256, 2048, 16),
         (130, 65, 3),
+        (130, 65, 9),
     ]
     ok = True
     try:

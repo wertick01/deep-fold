@@ -1,0 +1,4 @@
+WAVE 10 K3 isolated competitor matrix (run_stack, not --detect).
+Each slot was attempted. Numeric cells are empty on purpose when skipped.
+A SKIP row is the result. Do not invent Marlin / AWQ / bitsandbytes / llama.cpp tok/s.
+This harness pip-installs nothing and does not convert GGUF to .chr.

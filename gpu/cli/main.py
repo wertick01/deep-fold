@@ -19,6 +19,7 @@ if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
 from . import doctor as doctor_mod  # noqa: E402
+from . import from_ollama as from_ollama_mod  # noqa: E402
 from . import run as run_mod  # noqa: E402
 
 PROG = "deepfold"
@@ -103,29 +104,32 @@ def build_parser() -> argparse.ArgumentParser:
 
     ollama = sub.add_parser(
         "from-ollama",
-        help="not implemented: Ollama stores GGUF, which this runtime cannot load",
+        help="map an allowlisted Ollama tag to a HuggingFace id (never GGUF)",
+        description=(
+            "Allowlisted Ollama library names become HuggingFace BF16 trees. "
+            "The command never reads ~/.ollama and never loads GGUF."
+        ),
     )
     ollama.add_argument("tag", help="library tag, e.g. qwen2.5:3b")
-    ollama.set_defaults(func=_from_ollama)
+    ollama.add_argument(
+        "--hf",
+        help="HuggingFace id; must match this tag, or be a table id if the tag is unknown",
+    )
+    ollama.add_argument("--dir", help="download destination (default: $DEEPFOLD_HOME/hf/<slug>)")
+    ollama.add_argument(
+        "--run",
+        action="store_true",
+        help="after resolving the tree, invoke deepfold run (compress is still first-run of run)",
+    )
+    ollama.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="do not ask before snapshot_download (required when stdin is not a TTY)",
+    )
+    ollama.set_defaults(func=from_ollama_mod.from_ollama)
 
     return ap
-
-
-def _from_ollama(args) -> int:
-    """Shipped refusal: Ollama stores GGUF, which this runtime cannot load."""
-    print(
-        f"from-ollama is not implemented in this build (tag {args.tag!r} was not "
-        "looked up).\n"
-        "It will map allowlisted library tags to the HuggingFace id they were "
-        "built from\n"
-        "and download BF16 safetensors. It will never read ~/.ollama and never "
-        "load GGUF.\n"
-        "Download the HuggingFace repo yourself, then:\n"
-        "\n"
-        "  deepfold run --model <that directory>",
-        file=sys.stderr,
-    )
-    return 1
 
 
 def main(argv: list[str] | None = None) -> int:

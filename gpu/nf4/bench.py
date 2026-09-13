@@ -301,6 +301,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="sequence columns to time (32 is chunked 2x16)")
     ap.add_argument("--shapes", default="core", choices=("core", "all"),
                     help="core = the five distinct 3B matrices, all = 8 with duplicates")
+    ap.add_argument(
+        "--only",
+        default="",
+        help="comma list of shape names (q_proj, k_proj, ...); overrides --shapes",
+    )
     ap.add_argument("--modes", default="wave2,wave9",
                     help=f"comma list from {sorted(MODES)}")
     ap.add_argument("--iters", type=int, default=64)
@@ -314,9 +319,18 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     ns = [int(v) for v in args.n.split(",") if v.strip()]
-    shapes = QWEN25_3B if args.shapes == "all" else [
-        s for s in QWEN25_3B if s.name in CORE
-    ]
+    if args.only.strip():
+        want = [n.strip() for n in args.only.split(",") if n.strip()]
+        by_name = {s.name: s for s in QWEN25_3B}
+        missing = [n for n in want if n not in by_name]
+        if missing:
+            print(f"unknown shape(s) {missing}; pick from {sorted(by_name)}")
+            return 2
+        shapes = [by_name[n] for n in want]
+    else:
+        shapes = QWEN25_3B if args.shapes == "all" else [
+            s for s in QWEN25_3B if s.name in CORE
+        ]
     modes = [m.strip() for m in args.modes.split(",") if m.strip()]
     bad = [m for m in modes if m not in MODES]
     if bad:

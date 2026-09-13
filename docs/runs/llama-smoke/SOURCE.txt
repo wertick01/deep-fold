@@ -1,0 +1,7 @@
+WAVE 10 leftover 7 — Llama smoke on the 3080.
+Walker (gpu.host.attach) already classifies Llama 3.x without qk-norm.
+from-ollama does not grow a llama3.1:8b row from this file.
+No Hub download. No ~/.ollama. No GGUF.
+
+SKIP: no HuggingFace Llama directory on disk. Looked at $DEEPFOLD_LLAMA and C:\dev\models (model_type=llama). Did not download meta-llama/Meta-Llama-3.1-8B-Instruct (gated, ~16 GB) and did not add llama3.1:8b to from-ollama.
+A skip row is the result. Do not invent a Llama tok/s.

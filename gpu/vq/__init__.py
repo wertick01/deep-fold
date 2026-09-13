@@ -30,7 +30,7 @@ _SOURCES = _KERNEL_SOURCES + (_INCLUDE / "chr_gpu.h",)
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
-from gpu.win_toolchain import inject_msvc_env, which_cl  # noqa: E402
+from gpu.ext_bin import find_ext, have_host_compiler  # noqa: E402
 
 _ext: Any = None
 
@@ -43,12 +43,12 @@ def _sources_newer_than(artifact: Path, sources=_SOURCES) -> bool:
 
 
 def _inplace_pyd() -> Path | None:
-    matches = sorted(_DIR.glob("chr_vq_ext*.pyd"))
+    matches = find_ext(_DIR, "chr_vq_ext")
     return matches[0] if matches else None
 
 
 def _import_pyd(directory: Path):
-    matches = sorted(directory.glob("chr_vq_ext*.pyd"))
+    matches = find_ext(directory, "chr_vq_ext")
     if not matches:
         return None
     sys.path.insert(0, str(directory))
@@ -60,7 +60,7 @@ def _import_pyd(directory: Path):
 
 
 def _try_import_pyd(directory: Path):
-    matches = sorted(directory.glob("chr_vq_ext*.pyd"))
+    matches = find_ext(directory, "chr_vq_ext")
     if not matches or _sources_newer_than(matches[0]):
         return None
     return _import_pyd(directory)
@@ -106,7 +106,7 @@ def _load_ext():
 
     import warnings
 
-    if inject_msvc_env() or which_cl():
+    if have_host_compiler():
         try:
             _ext = _jit_load()
             return _ext
@@ -130,10 +130,15 @@ def _load_ext():
             _ext = compiled
             return _ext
 
+    if os.name == "nt":
+        raise RuntimeError(
+            "chr_vq_ext: no compiler (cl.exe) and no .pyd/.so. "
+            r'call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools'
+            r'\VC\Auxiliary\Build\vcvars64.bat" then re-run, or setup.py build_ext --inplace.'
+        )
     raise RuntimeError(
-        "chr_vq_ext: no compiler (cl.exe) and no .pyd. "
-        r'call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools'
-        r'\VC\Auxiliary\Build\vcvars64.bat" then re-run, or setup.py build_ext --inplace.'
+        "chr_vq_ext: no compiler (nvcc/g++) and no .pyd/.so. "
+        "python gpu/vq/setup.py build_ext --inplace"
     )
 
 

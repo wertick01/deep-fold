@@ -668,6 +668,14 @@ def run_matrix(
             )
         )
         write_competitor_csv(root / "summary.csv", rows)
+    (root / "SOURCE.txt").write_text(
+        "WAVE 10 K3 isolated competitor matrix (run_stack, not --detect).\n"
+        "Each slot was attempted. Numeric cells are empty on purpose when skipped.\n"
+        "A SKIP row is the result. Do not invent Marlin / AWQ / bitsandbytes / "
+        "llama.cpp tok/s.\n"
+        "This harness pip-installs nothing and does not convert GGUF to .chr.\n",
+        encoding="utf-8",
+    )
     return rows
 
 
@@ -933,14 +941,44 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.detect:
         print(f"lab {lab.slug}  ({lab.title})")
-        for detection in detect_all(stacks, model_dir=lab.model_dir, chr_path=lab.chr_path):
+        detections = detect_all(stacks, model_dir=lab.model_dir, chr_path=lab.chr_path)
+        rows = []
+        for detection in detections:
+            stack = stack_by_name(detection.stack)
             state = "RUNNABLE" if detection.runnable else "SKIP"
             print(f"\n{detection.stack:<19} install={detection.install:<8} {state}")
             if detection.artifact:
                 print(f"  artifact: {detection.artifact}")
             if detection.skip_reason:
                 print(f"  {detection.skip_reason}")
+            extra = ""
+            if detection.runnable:
+                extra = (
+                    "Detect only: not launched (3080 left for the NF4 kernel). "
+                    "A skip row with empty numeric cells is the result until a child runs."
+                )
+                rows.append(
+                    CompetitorRow(
+                        stack=stack.name,
+                        install=detection.install,
+                        skip_reason=f"{SKIP} {stack.label}: detect-only, generate not started",
+                        notes=f"{stack.note} {extra}".strip(),
+                    )
+                )
+            else:
+                rows.append(CompetitorRow.skip(stack, detection))
         print("\nNo GPU touched, nothing installed, nothing downloaded.")
+        if args.out:
+            dest = Path(args.out)
+            csv_path = dest / "summary.csv" if dest.suffix.lower() != ".csv" else dest
+            write_competitor_csv(csv_path, rows)
+            (csv_path.parent / "SOURCE.txt").write_text(
+                "WAVE 10 K3 detect-only matrix.\n"
+                "Numeric cells are empty on purpose. A SKIP row is the result.\n"
+                "Do not invent Marlin / AWQ / bitsandbytes / llama.cpp tok/s.\n",
+                encoding="utf-8",
+            )
+            print(f"\nwrote {csv_path}")
         return 0
 
     out_dir = Path(args.out) if args.out else Path(RUNS_DIR) / time.strftime(

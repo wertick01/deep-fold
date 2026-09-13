@@ -386,6 +386,9 @@ quality benchmark, and no accuracy claim is made from it. Method:
   positions.
 - **Display memory is inside the `nvidia-smi` reading.** It is real, it is on
   the same card, and it is not subtracted away here.
+- **Generate is Ampere `sm_86` only.** Ada / Hopper / Blackwell are a named
+  refuse, not a port. “Two clicks, all OS” is not a claim: CUDA, the compiler,
+  Go, and the HuggingFace tree are user-provided; Linux tok/s are unpublished.
 - **The lab can emit a synthetic figure** (`--dry-plot`), whose CSVs are
   stamped `FIXTURE`. Nothing in the tables above comes from that fixture.
 
@@ -413,9 +416,16 @@ they would flush to zero in float16 are encoded as a scale of `1`; see
 
 ## Run the lab
 
-Generate from a packed `.chr` without a notebook. Ampere `sm_86` only; GGUF
-is refused; a sibling `.chr` is used only when its CHR0 header matches this
-model (`hidden_size`, `num_layers`, `vocab_size`):
+Generate from a packed `.chr` without a notebook. Ampere `sm_86` only (RTX
+3080 class); GGUF is refused; a sibling `.chr` is used only when its CHR0
+header matches this model (`hidden_size`, `num_layers`, `vocab_size`).
+
+This is **not** two clicks on every OS. `doctor` / `run` do not install the
+NVIDIA driver, a CUDA PyTorch wheel, MSVC/`nvcc`, Go, or a HuggingFace tree.
+macOS can compress and cannot generate. Linux can load a `.so`; there is
+**no published Linux tok/s**. Ada (`sm_89`), Hopper, and Blackwell **refuse
+generate** — the image is `-gencode=arch=compute_86,code=sm_86` with no
+PTX. That is a refuse, not a kernel port.
 
 ```powershell
 conda activate torch-gpu

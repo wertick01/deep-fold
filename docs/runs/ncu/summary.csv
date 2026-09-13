@@ -1,0 +1,5 @@
+case,kernel,n_launches,dram_pct,tensor_pct,occupancy_pct,dram_read,dram_read_unit,dram_write,dram_write_unit,registers,block,grid,smem,smem_unit
+qwen25-3b-q_proj-n1,chr_nf4_gemm_decode_small,15,5.12,1.38,15.73,2.37,Mbyte,0.0,Kbyte,55.0,128.0,128.0,13.06,Kbyte/block
+qwen25-3b-q_proj-n16,chr_nf4_gemm_prefill_n16,15,6.6,2.72,28.8,2.67,Mbyte,54.91,byte,96.0,256.0,128.0,24.58,Kbyte/block
+qwen25-3b-k_proj-n1,chr_nf4_gemm_decode_small,15,3.35,0.85,8.33,322.43,Kbyte,0.0,byte,55.0,128.0,64.0,13.06,Kbyte/block
+qwen25-3b-k_proj-n16,chr_nf4_gemm_prefill_n16,15,4.28,1.65,16.45,418.94,Kbyte,5.76,Kbyte,96.0,256.0,64.0,24.58,Kbyte/block

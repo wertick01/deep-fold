@@ -18,3 +18,4 @@ gpu/*/build/
 /build/
 *.egg-info/
 docs/tz/
+.cursor

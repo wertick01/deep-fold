@@ -254,6 +254,82 @@ def test_n3_tails() -> bool:
     return ok and leak_ok
 
 
+def test_paths_agree() -> bool:
+    """Every decode path and every split_k must answer the same thing.
+
+    Wave 2 had one launch, so "the kernel is correct" was one claim. It now has
+    a 128-row tile, a 64-row tile, and a split-K reduce over FP32 partials, and
+    the occupancy win is worthless if they disagree. The reference is the
+    wave-2 launch (BM=128, split_k=1) for N=1 and split_k=1 for prefill; the
+    tolerance is one BF16 ULP, because both sides accumulate in FP32 and only
+    the store rounds.
+    """
+    from nf4 import nf4_plan, nf4_set_tuning  # noqa: PLC0415
+
+    cases = [
+        (2048, 2048, 1),   # 3B q/o_proj: 16 CTAs in wave 2
+        (256, 2048, 1),    # 3B GQA k/v_proj: 2 CTAs in wave 2
+        (2048, 11008, 1),  # 3B down_proj: the long-K one
+        (130, 65, 1),      # K tail inside a group, M not a tile multiple
+        (2048, 2048, 4),
+        (256, 2048, 16),
+        (130, 65, 3),
+    ]
+    ok = True
+    try:
+        for m, k, n in cases:
+            k_p = 64 * ((k + 63) // 64)
+            g = torch.Generator(device="cuda")
+            g.manual_seed(100 + m + k + n)
+            packed = torch.randint(
+                0, 256, (m, k_p // 2), dtype=torch.int32, device="cuda", generator=g
+            ).to(torch.uint8)
+            scale = (
+                0.04 + 0.20 * torch.rand(m, k_p // 64, device="cuda", generator=g)
+            ).to(torch.float16)
+            x = rms_norm_x(k, seed=200 + m + n, N=n)
+
+            nf4_set_tuning(path=1 if n == 1 else 0, split_k=1)
+            ref = nf4_gemm(packed, scale, x, m, k, k_p).float()
+            torch.cuda.synchronize()
+            ulp = float(ref.abs().max().item()) * 2.0**-8 + 1e-4
+
+            variants = [("auto", 0, 0)]
+            variants += [(f"split_k={s}", 2 if n == 1 else 0, s) for s in (2, 4, 8, 16)]
+            for label, path, split in variants:
+                nf4_set_tuning(path=path, split_k=split)
+                p = nf4_plan(m, k, n)
+                got = nf4_gemm(packed, scale, x, m, k, k_p).float()
+                torch.cuda.synchronize()
+                err = float((got - ref).abs().max().item())
+                # The workspace must stay a reduction buffer, never a dense W.
+                dense_bytes = m * k * 2
+                ws_bytes = int(p["ws_floats"]) * 4
+                case_ok = err <= ulp and ws_bytes < dense_bytes
+                ok = ok and case_ok
+                if not case_ok:
+                    print(
+                        f"FAIL paths agree {m}x{k} N={n} {label}: maxabs={err:.6g} "
+                        f"(1 ULP {ulp:.6g}), ws={ws_bytes}B vs dense W {dense_bytes}B"
+                    )
+            nf4_set_tuning(path=0, split_k=0)
+            p_auto = nf4_plan(m, k, n)
+            p_old = nf4_plan(m, k, n, have_ws=False) if n == 1 else None
+            old_ctas = (m + 127) // 128 if n == 1 else (m + 63) // 64
+            print(
+                f"  {m}x{k} N={n}: wave2 {old_ctas} CTAs -> auto {p_auto['ctas']} "
+                f"CTAs grid=({p_auto['grid_x']},{p_auto['grid_y']}) "
+                f"ws={p_auto['ws_floats'] * 4 / 1024:.0f} KiB vs dense W "
+                f"{m * k * 2 / 1024:.0f} KiB"
+            )
+            del p_old
+    finally:
+        nf4_set_tuning(path=0, split_k=0, one_wave=0)
+    if ok:
+        print("PASS decode tiles and every split_k agree within 1 BF16 ULP")
+    return ok
+
+
 def test_gate() -> bool:
     if not CHR_PATH.is_file():
         print(f"SKIP gate_proj: {CHR_PATH} missing")
@@ -272,8 +348,13 @@ def test_gate() -> bool:
     ok, maxabs, rmse = run_case(
         f"gate_proj {w.M}x{w.K} N=1", w.packed, w.scale, x, w.M, w.K, w.K_pad
     )
-    grid = (w.M + 127) // 128
-    print(f"  grid ceil(M/128)={grid}")
+    from nf4 import nf4_plan  # noqa: PLC0415
+
+    p = nf4_plan(w.M, w.K, 1)
+    print(
+        f"  grid=({p['grid_x']},{p['grid_y']}) {p['ctas']} CTAs, "
+        f"tile {p['bm']}x{p['bk']}; wave 2 was ceil(M/128)={(w.M + 127) // 128}"
+    )
     return ok
 
 
@@ -410,6 +491,7 @@ def main() -> int:
         test_toy_n16(),
         test_n3_tails(),
         test_n_gt_16(),
+        test_paths_agree(),
         test_gate(),
         test_gate_n16(),
         test_linear(),

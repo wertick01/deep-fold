@@ -8,9 +8,11 @@ the current process so a rebuild can happen in-place.
 
 from __future__ import annotations
 
+import importlib
 import os
 import shutil
 import subprocess
+import warnings
 from pathlib import Path
 
 _VCVARS = Path(
@@ -48,6 +50,32 @@ def ensure_ninja_on_path() -> None:
         os.environ["PATH"] = str(_NINJA_DIR) + os.pathsep + os.environ.get("PATH", "")
 
 
+def ensure_msvccompiler_attr() -> None:
+    """Make ``distutils._msvccompiler`` resolvable for ``torch.utils.cpp_extension``.
+
+    torch 2.5 reaches for ``distutils._msvccompiler._get_vc_env`` to find the
+    MSVC environment. setuptools 82 still ships that submodule but no longer
+    imports it into the shimmed ``distutils`` package, so the attribute lookup
+    raises ``AttributeError`` *inside* the JIT build. ``gpu/nf4/__init__.py``
+    catches that and warns, then loads whatever ``.pyd`` is lying around -- so
+    a stale kernel binary silently answers for edited ``.cu`` sources. Import
+    the submodule so the attribute exists; a newer torch that stops asking
+    makes this a no-op.
+    """
+    try:
+        import distutils
+    except ImportError:  # no distutils at all (3.12+ without setuptools)
+        return
+    if hasattr(distutils, "_msvccompiler"):
+        return
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # "_get_vc_env is private" on import
+        try:
+            importlib.import_module("setuptools._distutils._msvccompiler")
+        except Exception:  # noqa: BLE001 - the caller falls back to a .pyd
+            return
+
+
 def _vcvars_path() -> Path | None:
     if _VCVARS.is_file():
         return _VCVARS
@@ -82,6 +110,7 @@ def inject_msvc_env() -> bool:
     """Return True if ``cl.exe`` is visible after this call."""
     global _injected
     ensure_ninja_on_path()
+    ensure_msvccompiler_attr()
     if which_cl():
         _injected = True
         return True

@@ -50,6 +50,16 @@ def _parser() -> argparse.ArgumentParser:
         default="independent",
         help="independent (KV reset, smoke) or history (growing prefill)",
     )
+    parser.add_argument(
+        "--plate",
+        choices=("hard", "eval"),
+        default="hard",
+        help=(
+            "which scorer owns --items-json: the hard plate (gsm8k / yesno / needle) "
+            "or the eval stub (mcq / truthful / ppl). Only affects the quality_ok "
+            "column; the authoritative table is written by the parent."
+        ),
+    )
     return parser
 
 
@@ -61,12 +71,20 @@ def main(argv: list[str] | None = None) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     extra: dict = {}
     if args.items_json:
-        from gpu.lab.hard import load_script
+        if args.plate == "eval":
+            from gpu.lab.eval import load_eval_script
 
-        script = load_script(args.items_json, history=(args.conversation == "history"))
-        extra["messages"] = script.prompts
-        extra["quality"] = script.quality_fn
-        extra["conversation"] = script.conversation
+            eval_script = load_eval_script(args.items_json)
+            extra["messages"] = eval_script.prompts
+            extra["quality"] = eval_script.quality_fn
+            extra["conversation"] = "independent"
+        else:
+            from gpu.lab.hard import load_script
+
+            script = load_script(args.items_json, history=(args.conversation == "history"))
+            extra["messages"] = script.prompts
+            extra["quality"] = script.quality_fn
+            extra["conversation"] = script.conversation
     common = dict(
         out_dir=out_dir,
         model_dir=args.model_dir,

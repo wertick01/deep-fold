@@ -1,0 +1,92 @@
+{
+  "plate": "eval",
+  "max_new_tokens": 256,
+  "note": "Eight repo-authored items for the eval-harness stub (gpu.lab.eval). NOT lm-eval, NOT WikiText, NOT MMLU. The 12-item hard plate (hard_items.json) is unchanged and is still the reasoning plate. No item is a HuggingFace row id: every gold is in this file, so nothing here can tempt a download. Task names copy lm-eval spelling so a later real harness can emit the same strings; the prompts are ours.",
+  "items": [
+    {
+      "id": "eval-gsm8k-jars",
+      "kind": "gsm8k",
+      "task": "gsm8k",
+      "gold": "120",
+      "note": "repo-authored arithmetic; shares the extract_number scorer with the hard plate",
+      "prompt": "A crate holds 12 jars. A warehouse receives 8 full crates and then 24 loose jars. How many jars does it have in total? Show the steps, then put the final integer after ####."
+    },
+    {
+      "id": "eval-gsm8k-posts",
+      "kind": "gsm8k",
+      "task": "gsm8k",
+      "gold": "21",
+      "note": "fence-post count; the run is 80 m and both ends carry a post",
+      "prompt": "A straight fence run is 80 meters long. One post is placed every 4 meters, and both ends of the run carry a post. How many posts are needed? Show the steps, then put the final integer after ####."
+    },
+    {
+      "id": "eval-mmlu-osi",
+      "kind": "mcq",
+      "task": "mmlu",
+      "gold": "B",
+      "choices": [
+        "Data link layer",
+        "Network layer",
+        "Transport layer",
+        "Session layer"
+      ],
+      "note": "MMLU-shaped letter extract, fail closed; not an MMLU row",
+      "prompt": "Which layer of the OSI model is responsible for routing packets between separate networks?\nA. Data link layer\nB. Network layer\nC. Transport layer\nD. Session layer\nReply with the letter only."
+    },
+    {
+      "id": "eval-arc-ice",
+      "kind": "mcq",
+      "task": "arc_challenge",
+      "gold": "C",
+      "choices": [
+        "Its mass increases",
+        "Its temperature rises",
+        "Its volume increases",
+        "It becomes denser than liquid water"
+      ],
+      "note": "ARC-shaped; water expands on freezing, so the 'denser' distractor is the myth",
+      "prompt": "Liquid water freezes into ice at standard pressure. What happens to the water?\nA. Its mass increases\nB. Its temperature rises\nC. Its volume increases\nD. It becomes denser than liquid water\nReply with the letter only."
+    },
+    {
+      "id": "eval-winogrande-trophy",
+      "kind": "yesno",
+      "task": "winogrande",
+      "gold": "no",
+      "note": "Winogrande-shaped pronoun binding, asked as a binary so the yesno scorer applies",
+      "prompt": "The trophy did not fit in the suitcase because it was too large. Does \"it\" refer to the suitcase? Reply with Yes or No only."
+    },
+    {
+      "id": "eval-truthfulqa-senses",
+      "kind": "truthful",
+      "task": "truthfulqa",
+      "gold": "more than five",
+      "needles": [
+        "more than five",
+        "more than 5",
+        "more than the five"
+      ],
+      "rejects": [
+        "exactly five",
+        "only five",
+        "just five",
+        "five senses in total"
+      ],
+      "note": "TruthfulQA-shaped: the school answer 'exactly five' is the myth. Neither phrase present is pending_human, never a silent pass.",
+      "prompt": "According to modern physiology, do humans have exactly five senses or more than five? Answer in one short sentence."
+    },
+    {
+      "id": "eval-ppl-registers",
+      "kind": "ppl",
+      "task": "ppl_fixture",
+      "note": "loglikelihood smoke prefix, self-authored, ~40 tokens. Not WikiText, not C4.",
+      "prompt": "The packed weights never leave their four-bit form. Instead of writing a dense copy back to memory, the kernel rebuilds each tile inside registers and then discards it. Nothing dense is ever stored."
+    },
+    {
+      "id": "eval-ppl-rumour",
+      "kind": "ppl",
+      "task": "ppl_fixture",
+      "note": "second loglikelihood smoke prefix, self-authored, ~35 tokens",
+      "prompt": "A benchmark nobody can reproduce is a rumour. Record the card, the driver, the prompt and the session that produced every number, or leave the cell empty and say why."
+    }
+  ]
+}

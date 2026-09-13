@@ -1,0 +1,225 @@
+"""Refuse / diagnostic copy for the CLI. One module so tests assert wording.
+
+GGUF, unknown architecture, `.chr` without a sidecar, no compiler, the 3B
+speed line, CPU torch, wrong capability, macOS, missing ``chr``, CUDA OOM,
+InternLM extras. Generate verdicts stay ASCII so a Windows console on a
+non-UTF-8 code page prints them.
+"""
+
+from __future__ import annotations
+
+# --------------------------------------------------------------------------- #
+# wave7-ux.md §8
+# --------------------------------------------------------------------------- #
+
+GGUF = """\
+Deepfold cannot load GGUF (including Ollama blobs under ~/.ollama).
+chr compress reads HuggingFace BF16/FP16 safetensors only.
+If this tag came from the Ollama library, retry:
+
+  deepfold from-ollama <tag>
+
+That command downloads the same HuggingFace id; it does not convert the GGUF."""
+
+#: Kept for the doctor / catalog copy. It is *not* the generate authority any
+#: more: after wave10 P1 that is `gpu.host.attach` (the walker) plus the
+#: config-only pre-refuse in `gpu.graphs`.
+SUPPORTED_MODEL_TYPES = ("qwen2", "internlm2", "llama", "mistral (no SWA)")
+
+
+def unknown_arch(model_type: str | None, refusal: str = "") -> str:
+    """The walker's own refusal, plus which glue families exist.
+
+    Points at the missing **family id**, not at ``model_type``: after the walker
+    ships, "supports qwen2 and internlm2 layouts only" is the wrong sentence --
+    a Llama attaches and a Qwen2 with a vision tower does not
+    (wave8-arch §2.3, wave10-product §2.3).
+    """
+    found = model_type if model_type else "<missing>"
+    head = refusal.rstrip() + "\n\n" if refusal else ""
+    return (
+        f"{head}"
+        f"config.json model_type={found}.\n"
+        "TokenLoop implements two glue families: llama_swiglu (split q/k/v/o + "
+        "SwiGLU,\n"
+        "measured on Qwen2.5-3B/14B; also Llama 3.x without qk-norm and Mistral "
+        "when its\n"
+        "sliding window is off) and internlm_gqa (fused wqkv, measured on "
+        "internlm2.5-20B).\n"
+        "This is not a general GGUF/HuggingFace runtime."
+    )
+
+
+def deferred_arch(model_type: str | None) -> str:
+    """Not a refusal: the config is off the measured list, so the walker decides.
+
+    Printed to stderr by ``deepfold run`` before it compresses. The gate cannot
+    say yes from ``config.json`` alone here, but ``model_type`` is also not
+    evidence of *no*: the graph is what counts.
+    """
+    found = model_type if model_type else "<missing>"
+    return (
+        f"[warn] model_type={found} is not one of the measured layouts "
+        "(qwen2, internlm2, llama, mistral).\n"
+        "        Nothing in config.json rules it out, so attach() will walk the "
+        "module tree\n"
+        "        at load time and refuse if it is not llama_swiglu or "
+        "internlm_gqa."
+    )
+
+
+CHR_WITHOUT_SIDECAR = """\
+Need a HuggingFace directory (config.json + tokenizer) plus a .chr.
+The .chr is weights only; it is not a full model file."""
+
+NO_COMPILER = """\
+NF4 kernel is not built. Install Visual Studio Build Tools (C++), or
+build gpu/nf4 with vcvars64.bat. Jupyter is not required."""
+
+NO_COMPILER_POSIX = """\
+NF4 kernel is not built. Install the CUDA toolkit (nvcc) and a C++ compiler
+(g++), or build it in place:
+
+  python gpu/nf4/setup.py build_ext --inplace"""
+
+THREE_B_SPEED = """\
+On this 12 GB card both copies of 3B fit. Packed NF4 decode is now ahead of
+the committed BF16 row; time to first token is still slower.
+NF4 pays off when the 16-bit model does not fit (14B, 20B)."""
+
+
+# --------------------------------------------------------------------------- #
+# wave8-install.md §8
+# --------------------------------------------------------------------------- #
+
+CPU_TORCH = """\
+PyTorch has no CUDA. Deepfold's kernel is Ampere CUDA (sm_86), not CPU.
+Default "pip install torch" is often the CPU wheel.
+Install a CUDA 12.4 wheel, then re-run doctor:
+
+  pip install torch --index-url https://download.pytorch.org/whl/cu124
+
+Deepfold does not install the NVIDIA driver."""
+
+NO_TORCH = """\
+PyTorch is not installed in this interpreter. Deepfold's kernel is Ampere
+CUDA (sm_86); the CUDA wheel is not on the default PyPI index:
+
+  pip install torch --index-url https://download.pytorch.org/whl/cu124
+
+Deepfold does not install the NVIDIA driver."""
+
+
+def wrong_capability(capability: tuple[int, int] | None) -> str:
+    """wave8-install.md §8, with the capability doctor actually saw."""
+    sm = f"sm_{capability[0]}{capability[1]}" if capability else "unknown"
+    return (
+        f"This GPU is {sm}. The NF4 kernel is built only for sm_86\n"
+        "(-gencode=arch=compute_86,code=sm_86; no PTX).\n"
+        "Measured machine: RTX 3080. Other NVIDIA GPUs are not a fallback."
+    )
+
+
+MACOS_RUN = """\
+deepfold run needs the Ampere CUDA kernel. There is no CUDA kernel on macOS.
+chr compress on this Mac is supported; copy the .chr to a CUDA sm_86 machine."""
+
+MISSING_CHR = """\
+chr (Go compressor) was not found. Deepfold does not pack weights in Python.
+Put chr.exe on PATH, set DEEPFOLD_CHR_BIN, or from a checkout:
+
+  go build -o chr.exe ./cmd/chr"""
+
+MISSING_CHR_POSIX = """\
+chr (Go compressor) was not found. Deepfold does not pack weights in Python.
+Put chr on PATH, set DEEPFOLD_CHR_BIN, or from a checkout:
+
+  go build -o chr ./cmd/chr"""
+
+
+def missing_chr() -> str:
+    import os
+
+    return MISSING_CHR if os.name == "nt" else MISSING_CHR_POSIX
+
+
+def cuda_oom(
+    used_mib: int | None, total_mib: int | None, weight_mib: float | None
+) -> str:
+    """wave8-install.md §8. OOM is a recorded miss (wave8-runtime D9), not a crash."""
+    used = str(used_mib) if used_mib is not None else "?"
+    total = str(total_mib) if total_mib is not None else "12288"
+    weights = f"{weight_mib:.0f}" if weight_mib is not None else "?"
+    return (
+        "CUDA OOM. Recorded miss, not a crash.\n"
+        f"nvidia-smi: {used} / {total} MiB (this card is 12 GB). "
+        f"Packed weights: {weights} MiB.\n"
+        "Close other GPU apps or use a model whose NF4 working set fits "
+        "(14B/20B are\n"
+        "the reason to use NF4; 3B also fits BF16 on this card)."
+    )
+
+
+INTERNLM_EXTRAS = """\
+internlm2 needs the InternLM extra: einops, and sentencepiece==0.1.99
+(0.2.2 rejects InternLM's <0x00> pieces). Install it, then re-run:
+
+  pip install "deepfold[internlm]"
+  pip install einops "sentencepiece==0.1.99"
+
+This is a package gate, not a notebook."""
+
+COMPRESS_FAILED = "Deepfold did not load anything."
+
+
+# --------------------------------------------------------------------------- #
+# wave8-runtime.md §2.1 -- the one-line generate verdict
+# --------------------------------------------------------------------------- #
+
+GENERATE_SHIP = "generate: yes (ship, sm_86)"
+
+GENERATE_EXPERIMENTAL = (
+    "generate: experimental (unmeasured arch, DEEPFOLD_ALLOW_UNMEASURED_ARCH=1)"
+)
+
+
+def generate_unmeasured(capability: tuple[int, int]) -> str:
+    sm = f"sm_{capability[0]}{capability[1]}"
+    return (
+        f"generate: no -- binary is sm_86 SASS only; this GPU is {sm}. "
+        "Rebuild with extra gencode to experiment; unmeasured (D2)."
+    )
+
+
+GENERATE_TURING = (
+    "generate: no -- Turing sm_75 has no BF16 tensor cores and no cp.async. "
+    "This GEMM is Ampere fused reconstruct+HMMA."
+)
+
+GENERATE_CPU = (
+    "generate: no -- CPU only. chr compress / chr verify work. "
+    "There is no CPU fused GEMM."
+)
+
+GENERATE_APPLE = (
+    "generate: no -- Apple GPU is not CUDA. chr compress / verify on CPU. "
+    "This runtime does not run on M2."
+)
+
+GENERATE_ROCM = (
+    "generate: no -- ROCm is not implemented. NVIDIA CUDA Ampere (sm_86 ship) only."
+)
+
+
+def generate_unsupported(capability: tuple[int, int]) -> str:
+    sm = f"sm_{capability[0]}{capability[1]}"
+    return (
+        f"generate: no -- this GPU is {sm}; the shipped kernel image is sm_86 "
+        "SASS only, and sm_86 is the only measured arch (D1)."
+    )
+
+
+GENERATE_NO_TORCH = "generate: no -- torch is not importable; cannot probe the device."
+
+DOCTOR_OK = "doctor: run is possible"
+DOCTOR_COMPRESS_ONLY = "doctor: compress is possible, generate is not"

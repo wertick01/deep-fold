@@ -34,7 +34,15 @@ import torch.nn.functional as F
 from .graph import Gemm, GemmGroup, GraphedGemmGroup, capture, nf4_max_n
 from .kv_cache import KVCache
 
-__all__ = ["TokenLoop", "Generation", "rms_norm_exact", "split_internlm_wqkv"]
+__all__ = [
+    "TokenLoop",
+    "Generation",
+    "PACKERS",
+    "rms_norm_exact",
+    "split_concat_qkv",
+    "split_internlm_wqkv",
+    "split_neox_qkv",
+]
 
 MIB = 1024 * 1024
 
@@ -74,6 +82,52 @@ def split_internlm_wqkv(
     return q, k, v
 
 
+def split_concat_qkv(
+    y: torch.Tensor, n_q: int, n_kv: int, head_dim: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Phi-3 style fused ``qkv_proj``: ``[Q | K | V]`` blocks, in that order.
+
+    Not interchangeable with :func:`split_internlm_wqkv` -- that is the whole
+    reason the packer is chosen from the module's name and never from "the
+    matrix is fused, so it must be InternLM". Feeding one layout to the other
+    routine produces a model that decodes fluent nonsense.
+    """
+    n = int(y.shape[0])
+    q_dim, kv_dim = n_q * head_dim, n_kv * head_dim
+    q = y[:, :q_dim].reshape(n, n_q, head_dim)
+    k = y[:, q_dim : q_dim + kv_dim].reshape(n, n_kv, head_dim).contiguous()
+    v = y[:, q_dim + kv_dim : q_dim + 2 * kv_dim].reshape(n, n_kv, head_dim).contiguous()
+    return q, k, v
+
+
+def split_neox_qkv(
+    y: torch.Tensor, n_q: int, n_kv: int, head_dim: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """GPT-NeoX ``query_key_value``: per head ``[q, k, v]``, interleaved.
+
+    MHA only (``n_kv == n_q``), which is what the families using this name ship.
+    Present so the "no packer" refusal is honest about what is known; the NeoX
+    *glue* (LayerNorm, partial RoPE) is still a named refusal.
+    """
+    if n_kv != n_q:
+        raise ValueError(f"neox_interleaved is MHA only; got n_q={n_q}, n_kv={n_kv}")
+    n = int(y.shape[0])
+    packed = y.view(n, n_q, 3, head_dim)
+    q = packed[:, :, 0, :].contiguous()
+    k = packed[:, :, 1, :].contiguous()
+    v = packed[:, :, 2, :].contiguous()
+    return q, k, v
+
+
+#: Packer id -> function. The id comes from :mod:`gpu.graphs` (the fused
+#: matrix's own last component), so ``kind=qkv`` never implies InternLM.
+PACKERS = {
+    "internlm_gqa": split_internlm_wqkv,
+    "concat": split_concat_qkv,
+    "neox_interleaved": split_neox_qkv,
+}
+
+
 def _rope(t: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
     """``t`` is ``[N, heads, head_dim]``; ``cos``/``sin`` are ``[N, 1, head_dim]``.
 
@@ -86,7 +140,7 @@ def _rope(t: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor
 
 
 def _rope_tables(
-    model, max_seq: int, device: torch.device, dtype: torch.dtype
+    model, plan, max_seq: int, device: torch.device, dtype: torch.dtype
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """``cos``/``sin`` for positions ``0..max_seq-1``, computed once.
 
@@ -97,14 +151,19 @@ def _rope_tables(
     device, used here and nowhere else.
 
     Qwen keeps one ``model.rotary_emb``. InternLM2 keeps one per layer; they
-    share the same dim/base, so layer 0's module is the table.
+    share the same dim/base, so layer 0's module is the table. Which of the two
+    it is comes from the plan, not from an attribute guess.
     """
-    base = model.model
+    base = model.get_submodule(plan.backbone) if plan.backbone else model
     rot = getattr(base, "rotary_emb", None)
     if rot is None:
-        layer0 = base.layers[0]
-        attn = getattr(layer0, "self_attn", None) or layer0.attention
-        rot = attn.rotary_emb
+        rot = getattr(model.get_submodule(plan.layers[0].attn), "rotary_emb", None)
+    if rot is None:
+        raise RuntimeError(
+            f"attach: no rotary module on {plan.backbone or '<model>'} or on "
+            f"{plan.layers[0].attn}, and plan.rope is {plan.rope!r}. "
+            "The loop does not reimplement RoPE init."
+        )
     pos = torch.arange(max_seq, device=device, dtype=torch.long).unsqueeze(0)
     ref = torch.zeros((1, 1, 1), dtype=dtype, device=device)
     cos, sin = rot(ref, pos)
@@ -162,6 +221,12 @@ class TokenLoop:
     ``model`` must already be through ``load_chr_nf4`` -- the loop reads the NF4
     buffers out of the modules once (:class:`~gpu.loop.graph.Gemm`) and then never
     touches ``nn.Module`` attribute lookup on the token path again.
+
+    Which modules those are comes from a :class:`~gpu.host.attach.DriverPlan`.
+    ``load_model`` leaves one on the model; otherwise ``attach(model)`` walks the
+    tree here. There is no ``hasattr(layer0.attention, "wqkv")``: InternLM2 is a
+    *packer id* in :data:`PACKERS`, not a boolean, and a graph whose family is
+    not implemented never reaches this constructor.
     """
 
     def __init__(
@@ -172,34 +237,50 @@ class TokenLoop:
         norm: str = "exact",
         overlap: bool = True,
         device: torch.device | str | None = None,
+        plan=None,
     ) -> None:
+        from gpu.graphs import IMPLEMENTED_FAMILIES, refuse
+
         cfg = model.config
-        base = model.model
         self.model = model
+
+        if plan is None:
+            plan = getattr(model, "deepfold_plan", None)
+        if plan is None:
+            from gpu.host.attach import attach
+
+            plan = attach(model)
+        if plan.family not in IMPLEMENTED_FAMILIES:
+            raise RuntimeError(
+                refuse.family(
+                    plan.family, attn=plan.attn, mlp=plan.mlp, act=plan.act, norm=plan.norm
+                )
+            )
+        self.plan = plan
+
         self.max_seq = int(max_seq)
         self.n_layers = int(cfg.num_hidden_layers)
         self.hidden = int(cfg.hidden_size)
         self.n_q = int(cfg.num_attention_heads)
-        self.n_kv = int(cfg.num_key_value_heads)
+        # Missing num_key_value_heads is legal and means MHA (wave8-arch §2.4).
+        self.n_kv = int(getattr(cfg, "num_key_value_heads", None) or self.n_q)
         self.eps = float(cfg.rms_norm_eps)
         self.vocab = int(cfg.vocab_size)
+        if self.n_layers != plan.n_layers:
+            raise ValueError(
+                f"config says {self.n_layers} layers, the plan walked {plan.n_layers}"
+            )
 
-        layer0 = base.layers[0]
-        self._fused_qkv = hasattr(layer0, "attention") and hasattr(layer0.attention, "wqkv")
-        if self._fused_qkv:
-            attn0 = layer0.attention
-            self.embed = base.tok_embeddings
-            self._lm = model.output
-            self._norm1 = [layer.attention_norm.weight for layer in base.layers]
-            self._norm2 = [layer.ffn_norm.weight for layer in base.layers]
-        else:
-            attn0 = layer0.self_attn
-            self.embed = base.embed_tokens
-            self._lm = model.lm_head
-            self._norm1 = [layer.input_layernorm.weight for layer in base.layers]
-            self._norm2 = [layer.post_attention_layernorm.weight for layer in base.layers]
+        get = model.get_submodule
+        attn0 = get(plan.layers[0].attn)
+        self.embed = get(plan.embed)
+        self._lm = get(plan.lm_head)
+        self._norm1 = [get(p.norm1).weight for p in plan.layers]
+        self._norm2 = [get(p.norm2).weight for p in plan.layers]
+        #: None -> three GEMMs and a reshape; otherwise one GEMM and this packer.
+        self._pack = PACKERS[plan.qkv_pack] if plan.qkv_pack else None
 
-        self.head_dim = int(getattr(attn0, "head_dim", self.hidden // self.n_q))
+        self.head_dim = int(getattr(attn0, "head_dim", None) or self.hidden // self.n_q)
         self.scaling = float(getattr(attn0, "scaling", self.head_dim**-0.5))
         self.q_dim = self.n_q * self.head_dim
         self.n_rep = self.n_q // self.n_kv
@@ -207,9 +288,11 @@ class TokenLoop:
             raise ValueError(f"{self.n_q} q heads do not group into {self.n_kv} kv heads")
         self.qkv_dim = (self.n_q + 2 * self.n_kv) * self.head_dim
 
-        self.final_norm = base.norm.weight
+        self.final_norm = get(plan.final_norm).weight
         if self.final_norm.is_meta:
-            raise RuntimeError("model.norm.weight is still on meta: load the .chr first")
+            raise RuntimeError(
+                f"{plan.final_norm}.weight is still on meta: load the .chr first"
+            )
         self.device = torch.device(device) if device is not None else self.final_norm.device
 
         if norm not in ("exact", "fast"):
@@ -237,57 +320,57 @@ class TokenLoop:
             device=self.device,
             dtype=torch.bfloat16,
         )
-        self.cos, self.sin = _rope_tables(model, self.max_seq, self.device, torch.bfloat16)
+        self.cos, self.sin = _rope_tables(
+            model, plan, self.max_seq, self.device, torch.bfloat16
+        )
         self._tok = torch.zeros(1, dtype=torch.long, device=self.device)
         self._gqa = _sdpa_has_gqa()
         self.prefill_chunk = min(nf4_max_n(16), self.max_seq)
 
     # --- setup ------------------------------------------------------------
     def _build_groups(self) -> list[GemmGroup]:
-        """Contiguous runs of NF4 GEMMs, in execution order (see graph.py)."""
+        """Contiguous runs of NF4 GEMMs, in execution order (see graph.py).
+
+        Four groups per layer plus the head, exactly as before -- the only change
+        is that the modules come from ``plan.layers[i].gemms`` (qualified names)
+        instead of from two hardcoded attribute spellings.
+        """
         groups: list[GemmGroup] = []
         st = self._streams
-        for li, layer in enumerate(self.model.model.layers):
-            if self._fused_qkv:
-                sa, mlp = layer.attention, layer.feed_forward
-                groups.append(GemmGroup(f"L{li}.qkv", [Gemm.of(sa.wqkv, f"L{li}.wqkv")]))
-                groups.append(GemmGroup(f"L{li}.o", [Gemm.of(sa.wo, f"L{li}.o")]))
+        get = self.model.get_submodule
+        fused = self.plan.attn == "fused"
+        for lp in self.plan.layers:
+            li, slots = lp.index, lp.gemms
+            if fused:
                 groups.append(
-                    GemmGroup(
-                        f"L{li}.gateup",
-                        [
-                            Gemm.of(mlp.w1, f"L{li}.gate"),
-                            Gemm.of(mlp.w3, f"L{li}.up"),
-                        ],
-                        st[:1],
-                    )
+                    GemmGroup(f"L{li}.qkv", [Gemm.of(get(slots["qkv"]), f"L{li}.qkv")])
                 )
-                groups.append(GemmGroup(f"L{li}.down", [Gemm.of(mlp.w2, f"L{li}.down")]))
             else:
-                sa, mlp = layer.self_attn, layer.mlp
                 groups.append(
                     GemmGroup(
                         f"L{li}.qkv",
                         [
-                            Gemm.of(sa.q_proj, f"L{li}.q"),
-                            Gemm.of(sa.k_proj, f"L{li}.k"),
-                            Gemm.of(sa.v_proj, f"L{li}.v"),
+                            Gemm.of(get(slots["q"]), f"L{li}.q"),
+                            Gemm.of(get(slots["k"]), f"L{li}.k"),
+                            Gemm.of(get(slots["v"]), f"L{li}.v"),
                         ],
                         st,
                     )
                 )
-                groups.append(GemmGroup(f"L{li}.o", [Gemm.of(sa.o_proj, f"L{li}.o")]))
-                groups.append(
-                    GemmGroup(
-                        f"L{li}.gateup",
-                        [
-                            Gemm.of(mlp.gate_proj, f"L{li}.gate"),
-                            Gemm.of(mlp.up_proj, f"L{li}.up"),
-                        ],
-                        st[:1],
-                    )
+            groups.append(GemmGroup(f"L{li}.o", [Gemm.of(get(slots["o"]), f"L{li}.o")]))
+            groups.append(
+                GemmGroup(
+                    f"L{li}.gateup",
+                    [
+                        Gemm.of(get(slots["gate"]), f"L{li}.gate"),
+                        Gemm.of(get(slots["up"]), f"L{li}.up"),
+                    ],
+                    st[:1],
                 )
-                groups.append(GemmGroup(f"L{li}.down", [Gemm.of(mlp.down_proj, f"L{li}.down")]))
+            )
+            groups.append(
+                GemmGroup(f"L{li}.down", [Gemm.of(get(slots["down"]), f"L{li}.down")])
+            )
         groups.append(GemmGroup("lm_head", [Gemm.of(self._lm, "lm_head")]))
         return groups
 
@@ -359,15 +442,14 @@ class TokenLoop:
         mask = None if n == 1 else self._causal_mask(start_pos, seq)
         kv, eps = self.kv, self.eps
         rms, hd, n_kv = self.rms, self.head_dim, self.n_kv
+        pack = self._pack
 
         for li in range(self.n_layers):
             g_qkv, g_o, g_gu, g_down = self._layer[li]
 
             h = rms(x, self._norm1[li], eps)
-            if self._fused_qkv:
-                q, k, v = split_internlm_wqkv(
-                    g_qkv.run(h)[0], self.n_q, n_kv, hd
-                )
+            if pack is not None:
+                q, k, v = pack(g_qkv.run(h)[0], self.n_q, n_kv, hd)
             else:
                 q, k, v = g_qkv.run(h)
                 q = q.reshape(n, self.n_q, hd)
@@ -514,7 +596,8 @@ class TokenLoop:
 
     def __repr__(self) -> str:
         return (
-            f"TokenLoop(layers={self.n_layers}, hidden={self.hidden}, "
+            f"TokenLoop({self.plan.family}, pack={self.plan.qkv_pack}, "
+            f"layers={self.n_layers}, hidden={self.hidden}, "
             f"q/kv={self.n_q}/{self.n_kv}x{self.head_dim}, max_seq={self.max_seq}, "
             f"groups={len(self._groups)}, prefill_chunk={self.prefill_chunk}, "
             f"norm={self.norm_mode}, overlap={self.overlap}, graph={self.graph_mode})"

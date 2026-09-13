@@ -8,10 +8,10 @@ Decode tok/s is a different stack on each side (HuggingFace `generate` + dense
 GEMM vs `CompressedLinear` + `TokenLoop`). Report both. Do not rank them as a
 kernel benchmark. Method: [`lab.md`](lab.md).
 
-**20B is measured.** Numbers below come only from the committed CSVs. BF16
-decode / TTFT stay blank: HuggingFace generate did not succeed on this env
-(InternLM remote code vs transformers 5). Nothing is guessed from a catalog
-budget.
+**20B is measured.** 14B and 20B speed cells below come only from the committed
+CSVs. BF16 decode / TTFT stay blank on 20B: HuggingFace generate did not succeed
+on this env (InternLM remote code vs transformers 5). Nothing is guessed from
+a catalog budget.
 
 ## Sources
 
@@ -24,13 +24,20 @@ budget.
 Fields: `weight_mib`, `vram_after_load_smi_mib`, `vram_after_load_torch_mib`
 (CUDA working set), `mean_ttft_ms`, `mean_decode_tok_s`, `quality_all_ok`.
 Integers below are rounded from those columns the same way as the per-model
-tables in [`lab.md`](lab.md).
+tables in [`lab.md`](lab.md), **except 3B NF4 tok/s and TTFT**.
+
+**3B NF4 speed is not the committed CSV.** That file still has NF4 mean decode
+17.0 tok/s and TTFT 212 ms (the plate copied into git). After the occupancy fix
+(64-row tile + split-K), a live re-measure on 2026-09-13 was **31.6 tok/s**
+and **167 ms** TTFT, same harness (`gpu.lab.worker`). The BF16 row (23.1
+tok/s, 52 ms) is the committed CSV and was **not** re-run that day. Memory
+columns are still the committed CSV.
 
 ## Comparison
 
 | Model | Weight MiB (BF16 / NF4) | nvidia-smi after load (BF16 / NF4) | CUDA working set (BF16 / NF4) | Mean TTFT ms (BF16 / NF4) | Mean decode tok/s (BF16 / NF4) | Smoke |
 |---|---:|---:|---:|---:|---:|---|
-| Qwen2.5-3B-Instruct | 5,886 / 1,563 | 7,477 / 3,142 | 5,886 / 1,618 | 52 / 212 | 23.1 / 17.0 | pass / pass |
+| Qwen2.5-3B-Instruct | 5,886 / 1,563 | 7,477 / 3,142 | 5,886 / 1,618 | 52 / 167 | 23.1 / 31.6 | pass / pass |
 | Qwen2.5-14B-Instruct | 28,172 / 7,483 | 11,955† / 8,913 | 28,270 / 7,539 | 1,028 / 759 | 0.92 / 6.56 | pass / pass |
 | internlm2.5-20B-chat | 37,882 / 10,062 | 11,892‡ / 11,578‡ | 37,882 / 10,273 | — / 605 | — / 5.01 | not run / pass |
 
@@ -53,7 +60,7 @@ honest, and the working set is listed because the CSV has it.
 
 | Model | Dedicated 12 GB after load | Working set | Speed (TTFT + decode) | Compressed vs uncompressed |
 |---|---|---|---|---|
-| 3B | both fit | NF4 smaller, unused headroom | **BF16** (faster) | Dense is the efficient choice |
+| 3B | both fit | NF4 smaller, unused headroom | decode **NF4** 31.6 vs committed BF16 23.1 (not same-session); TTFT still **BF16** (52 vs 167 ms) | both fit; packing still pays when dense does not |
 | 14B | BF16 spilled; NF4 on-card | **NF4** (~28 GiB vs ~7.8 GiB) | **NF4** | Compressed wins on everything that matters |
 | 20B | both smi near 12288; BF16 spilled; NF4 on-card | **NF4** (~37.9 GiB vs ~10.3 GiB) | **NF4** 5.01 tok/s (no BF16 generate) | Compressed wins on working set; no dense speed baseline |
 
@@ -61,10 +68,13 @@ Weight packing itself is ~3.8× at all three sizes (5,886→1,563, 28,172→7,48
 and 37,882→10,062). That ratio does not decide the serving result. The crossover
 is whether dense BF16 still fits in dedicated VRAM.
 
-- **3B.** Both codecs live on the card. Mean decode **23.1 vs 17.0 tok/s**,
-  mean TTFT **52 vs 212 ms**. NF4 uses less memory (7,477 vs 3,142 MiB
-  `nvidia-smi`; working set 5,886 vs 1,618 MiB) but you do not need that saving
-  at this size.
+- **3B.** Both codecs live on the card. Mean decode **23.1 vs 31.6 tok/s**,
+  mean TTFT **52 vs 167 ms**. The BF16 speed cells are the committed
+  `qwen25-3b` CSV, not a same-day pair. NF4 uses less memory (7,477 vs 3,142
+  MiB `nvidia-smi`; working set 5,886 vs 1,618 MiB). Occupancy was the old
+  decode floor (16 CTAs on q/o, 2 on GQA k/v, 70 SMs); after split-K those
+  grids are 128 and 64. Prefill (TTFT) is still slower on the packed path.
+  Compression still pays when the uncompressed model does not fit.
 - **14B.** BF16’s working set is 28,270 MiB. Packed NF4 is 7,539 MiB and stays
   on the card. Decode **0.92 vs 6.56 tok/s**, TTFT **1,028 vs 759 ms**. The
   slow BF16 path is weights crossing into system RAM every token, not a

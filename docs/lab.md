@@ -13,8 +13,14 @@ quality. Hard eval (GSM8K-style / multi-step, quality **and** speed) is
 [`eval.md`](eval.md) and
 [`notebooks/06_hard_eval.ipynb`](../notebooks/06_hard_eval.ipynb).
 
-Harness: `python -m gpu.lab.run` (3B paths by default). Public contract of the
-package: `from gpu.lab import run_both, run_bf16, run_nf4, comparison_figure`.
+Generate without a notebook: `python -m gpu.cli doctor` then
+`python -m gpu.cli run --model DIR` (Ampere `sm_86` only; GGUF refused; a
+sibling `.chr` is used only when its CHR0 header matches this model). See
+[`ux.md`](ux.md).
+
+The comparison plate is `python -m gpu.lab.run` (3B paths by default). Public
+contract of the package: `from gpu.lab import run_both, run_bf16, run_nf4,
+comparison_figure`.
 
 Design notes under [`docs/`](.) are mostly Russian; this page and the origin
 [README](../README.md) are English.
@@ -106,6 +112,18 @@ CSVs. **`lab-test` is a synthetic fixture** and is not here.
 | Mean decode tok/s | 23.1 | 17.0 |
 | Smoke (Paris / Berlin / 323) | pass | pass |
 
+These cells are the committed CSVs in [`runs/qwen25-3b/`](runs/qwen25-3b/)
+(`summary.csv` NF4: 16.9953 tok/s, 212.422 ms). They were **not** overwritten.
+
+**2026-09-13 — 3B NF4 decode after split-K.** Occupancy was the old floor:
+one 128-row block per output tile, **16 CTAs** on `q`/`o` and **2** on GQA
+`k`/`v` against **70 SMs**. After the 64-row tile and split-K those launches
+are **128** and **64**. A live re-measure of the same 3B NF4 path
+(`gpu.lab.worker`, same three prompts) was **31.6 tok/s** decode and **167 ms**
+mean TTFT. The BF16 row (23.1 tok/s, 52 ms) was not re-run that day. Speed
+cells in [`size-efficiency.md`](size-efficiency.md) use that re-measure; this
+plate stays the git snapshot.
+
 ### Qwen2.5-14B-Instruct
 
 On 14B, `nvidia-smi` is **capped** at 12288 MiB. BF16’s CUDA working set after
@@ -151,13 +169,15 @@ and the CUDA-working-set caveat: [`size-efficiency.md`](size-efficiency.md).
 
 | Model | Weight MiB (BF16 / NF4) | nvidia-smi after load (BF16 / NF4) | CUDA working set (BF16 / NF4) | Mean TTFT ms (BF16 / NF4) | Mean decode tok/s (BF16 / NF4) | Smoke |
 |---|---:|---:|---:|---:|---:|---|
-| Qwen2.5-3B-Instruct | 5,886 / 1,563 | 7,477 / 3,142 | 5,886 / 1,618 | 52 / 212 | 23.1 / 17.0 | pass / pass |
+| Qwen2.5-3B-Instruct | 5,886 / 1,563 | 7,477 / 3,142 | 5,886 / 1,618 | 52 / 167 | 23.1 / 31.6 | pass / pass |
 | Qwen2.5-14B-Instruct | 28,172 / 7,483 | 11,955† / 8,913 | 28,270 / 7,539 | 1,028 / 759 | 0.92 / 6.56 | pass / pass |
 | internlm2.5-20B-chat | 37,882 / 10,062 | 11,892‡ / 11,578‡ | 37,882 / 10,273 | — / 605 | — / 5.01 | not run / pass |
 
 † 14B `nvidia-smi` is capped at 12288 MiB. The win is CUDA working set **~28 GiB
-vs ~7.8 GiB** (28,270 vs 7,539 MiB), not 11,955 vs 8,913. On 3B dense BF16 is
-faster; on 14B packed NF4 wins on working set, TTFT, and decode.
+vs ~7.8 GiB** (28,270 vs 7,539 MiB), not 11,955 vs 8,913. 3B NF4 decode/TTFT
+in this table is the 2026-09-13 split-K re-measure (31.6 tok/s, 167 ms); the
+committed plate CSVs still have 17.0 / 212. BF16 was not re-run that day.
+On 14B packed NF4 wins on working set, TTFT, and decode because BF16 spills.
 
 ‡ 20B both `nvidia-smi` sit near 12288 MiB. Do not quote 11,976 vs 11,828. The
 win is CUDA working set **~37.9 GiB vs ~10.3 GiB** (37,882 vs 10,273 MiB) and
@@ -189,8 +209,10 @@ English headers, comma, UTF-8. One directory per lab:
   10,273 MiB working set, not 11,976 vs 11,828.
 - Decode tok/s is **not** the same code path: HF `generate` + dense GEMM vs our
   fused NF4 loop. Report both. Do not claim “we are faster” unless the numbers
-  say so. Current floor is occupancy on small `M` (16 blocks / 70 SMs). On 20B
-  BF16 generate failed; those tok/s cells stay blank.
+  say so, and do not rank this against Marlin (not measured). Occupancy on
+  small `M` was the old 3B decode floor (16 / 2 CTAs vs 70 SMs); that launch
+  is landed as a 64-row tile plus split-K. Prefill (TTFT) is the next 3B floor.
+  On 20B BF16 generate failed; those tok/s cells stay blank.
 - TTFT is prefill. BF16 uses the HF prefill; NF4 uses `N≤16` chunks.
 - Display VRAM is inside `nvidia-smi`. It is real. Do not subtract it away.
 
@@ -199,8 +221,16 @@ archives (rotated SVG labels, two separate stories). Use `03_codec_lab.ipynb`.
 
 ## How to run
 
-Paths default to the author’s machine; override with `DEEPFOLD_MODEL`,
-`DEEPFOLD_CHR`, `DEEPFOLD_RUNS`.
+Generate (no notebook; `sm_86` only; GGUF refused; sibling `.chr` matched by
+CHR0 header):
+
+```powershell
+python -m gpu.cli doctor
+python -m gpu.cli run --model <HuggingFace-dir>
+```
+
+The comparison plate still uses `DEEPFOLD_MODEL`, `DEEPFOLD_CHR`,
+`DEEPFOLD_RUNS` (defaults are the author’s machine):
 
 ```powershell
 conda activate torch-gpu
@@ -241,6 +271,7 @@ instead. Then `from_pretrained(..., trust_remote_code=True)` can import.
 | Hard eval (not smoke) | [eval.md](eval.md) |
 | Hard eval appendix (full Q&A and times) | [eval-hard-qwen25.md](eval-hard-qwen25.md) |
 | Size vs efficiency (3B / 14B / 20B) | [size-efficiency.md](size-efficiency.md) |
+| CLI (`doctor` / `run`) | [ux.md](ux.md) |
 | Codec specs | [spec/](spec/) |
 | 3080 VRAM budget | [vram-3080.md](vram-3080.md) |
 | CPU roundtrip | [cpu-roundtrip.md](cpu-roundtrip.md) |

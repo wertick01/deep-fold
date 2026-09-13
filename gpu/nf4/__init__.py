@@ -156,3 +156,33 @@ def nf4_gemm(
             f"chr_nf4_gemm: N={n} not in 1..16 (host must chunk N>16)"
         )
     return _load_ext().nf4_gemm(packed, scale, x, int(M), int(K), int(K_pad))
+
+
+def nf4_plan(
+    M: int,  # noqa: N803
+    K: int,  # noqa: N803
+    N: int = 1,  # noqa: N803
+    *,
+    K_pad: int | None = None,  # noqa: N803
+    have_ws: bool = True,
+) -> dict:
+    """The grid ``chr_nf4_gemm`` would launch. No device memory, no launch.
+
+    Mirrored in pure Python by :mod:`gpu.nf4.plan` so the occupancy claim can be
+    asserted without a GPU; ``gpu/nf4/test_plan.py`` checks the two agree.
+    """
+    from .plan import k_pad as _k_pad
+
+    kp = _k_pad(K) if K_pad is None else int(K_pad)
+    return _load_ext().nf4_plan(int(M), int(K), int(kp), int(N), bool(have_ws))
+
+
+def nf4_set_tuning(path: int = 0, split_k: int = 0, one_wave: int = 0) -> None:
+    """Override the planner for one process (microbench / A-B).
+
+    Default (``path=0``, ``split_k=0``) is the occupancy fix: BM=64 decode tile
+    plus split-K. ``path`` 1 = wave-2 BM=128, 2 = BM=64. ``split_k`` 0 = auto,
+    >0 forced. ``one_wave`` 0 = 70 SMs on this card. Also ``CHR_NF4_PATH`` /
+    ``CHR_NF4_SPLIT_K`` / ``CHR_NF4_ONE_WAVE`` before import.
+    """
+    _load_ext().nf4_set_tuning(int(path), int(split_k), int(one_wave))

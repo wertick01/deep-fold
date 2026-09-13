@@ -1,0 +1,59 @@
+# Packaging for the `deepfold` CLI only (docs/tz/wave8-install.md §5).
+#
+# Deliberately pure Python: there is **no** CUDAExtension / BuildExtension
+# here, so `pip install -e .` never needs MSVC or nvcc. The NF4 kernel is
+# either a prebuilt `gpu/nf4/chr_nf4_ext*.pyd` / `*.so` or a one-time JIT that
+# `deepfold doctor` announces before `deepfold run` triggers it.
+#
+# torch is NOT a dependency. The default PyPI wheel is usually the CPU one,
+# which cannot run this kernel, so declaring it would install a lie:
+#
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+#
+# We do not install the NVIDIA driver, CUDA, Visual Studio Build Tools or Go.
+# `chr` is the Go compressor: `go build -o chr.exe ./cmd/chr`.
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "deepfold"
+version = "0.1.0"
+description = "NF4/CHR0 driver: packed weights stay packed in VRAM for the whole run (Ampere sm_86)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+keywords = ["nf4", "quantization", "cuda", "ampere", "llm-inference"]
+classifiers = [
+  "Environment :: GPU :: NVIDIA CUDA :: 12",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+  "transformers>=4.41",
+  "safetensors>=0.4",
+]
+
+[project.optional-dependencies]
+# internlm2 only. Qwen2.5 must install without either of these, and
+# sentencepiece 0.2.x rejects InternLM's <0x00> pieces.
+internlm = ["einops", "sentencepiece==0.1.99"]
+# Download a HuggingFace tree instead of placing it by hand.
+hub = ["huggingface_hub>=0.23"]
+
+[project.scripts]
+deepfold = "gpu.cli.main:main"
+
+[tool.setuptools.packages.find]
+include = ["gpu*"]
+exclude = ["gpu.*.build*", "gpu.lab.data*"]
+namespaces = true
+
+[tool.setuptools.package-data]
+# Kernel sources travel with the package so a box with nvcc + cl.exe/g++ can JIT.
+"gpu.nf4" = ["*.cu", "*.cpp"]
+"gpu.vq" = ["*.cu", "*.cpp"]
+"gpu.include" = ["*.h"]

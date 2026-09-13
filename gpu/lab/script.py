@@ -60,6 +60,8 @@ QWEN_ENDOFTEXT = 151643
 # Names of end-of-turn specials, resolved against whatever tokenizer we get.
 # InternLM2 keeps `<|im_end|>` at 92542 but leaves `eos_token` at `</s>` (2),
 # so a set built from `eos_token_id` alone never ends an assistant turn.
+# The list the driver actually uses is `gpu.loop.stop.END_OF_TURN_TOKENS`; this
+# name stays as a stable lab import and is the same first four entries.
 END_OF_TURN_TOKENS = ("<|im_end|>", "<|endoftext|>", "<|end_of_text|>", "<|eot_id|>")
 
 TURNS_NOTE = (
@@ -86,61 +88,39 @@ def quality_ok(message_id: int, response: str) -> bool:
 
 
 def _special_id(tokenizer, name: str) -> int | None:
-    """``name``'s id, or ``None`` when this tokenizer does not have that token.
+    """Re-export of the driver's round-trip check (:mod:`gpu.loop.stop`)."""
+    from gpu.loop.stop import special_id
 
-    ``convert_tokens_to_ids`` answers ``unk_token_id`` for anything it does not
-    know, so the id is only trusted when it decodes back to the same string.
-    """
-    convert = getattr(tokenizer, "convert_tokens_to_ids", None)
-    if not callable(convert):
-        return None
-    try:
-        token_id = convert(name)
-    except Exception:  # noqa: BLE001 -- a tokenizer with a different API
-        return None
-    if not isinstance(token_id, int) or token_id < 0:
-        return None
-    back = getattr(tokenizer, "convert_ids_to_tokens", None)
-    if callable(back):
-        try:
-            if back(token_id) != name:
-                return None
-        except Exception:  # noqa: BLE001
-            return None
-    elif token_id == getattr(tokenizer, "unk_token_id", None):
-        return None
-    return token_id
+    return special_id(tokenizer, name)
 
 
 def stop_token_ids(tokenizer=None) -> tuple[int, ...]:
-    """Greedy stop set: this tokenizer's EOS plus its end-of-turn specials.
+    """Lab wrapper around :func:`gpu.loop.stop.stop_token_ids`.
 
-    Asked of the tokenizer rather than hardcoded, because the two are not the
-    same model to model. Qwen2.5 ties them (``eos_token`` *is* ``<|im_end|>``,
-    151645) and resolves to the same pair this used to hardcode, so the 3B and
-    14B labs are unchanged. InternLM2 does not: ``eos_token`` is ``</s>`` (2)
-    while the chat template closes the assistant turn with ``<|im_end|>``
-    (92542). Missing 92542 is why a 20B reply ran to ``max_new_tokens`` and
-    then kept talking to itself.
+    With a tokenizer this *is* the product function: Qwen2.5 ties ``eos_token``
+    to ``<|im_end|>`` (151645) and still resolves to the pair the 3B and 14B labs
+    were measured with; InternLM2 does not tie them (``</s>`` = 2, turn close
+    92542), which is why hardcoding the Qwen pair once made a 20B reply run to
+    ``max_new_tokens`` and then keep talking to itself.
 
-    With no tokenizer the Qwen pair is the answer, matching
-    :func:`_qwen_fallback`.
+    The one difference is the ``None`` case. The product function **raises**
+    there. This wrapper keeps the Qwen pair, and only because the lab's fixtures
+    and :func:`_qwen_fallback` are a Qwen string on disk. Nothing on the
+    ``deepfold run`` path may use it.
     """
     if tokenizer is None:
         return (QWEN_ENDOFTEXT, QWEN_IM_END)
-    ids: set[int] = set()
-    eos = getattr(tokenizer, "eos_token_id", None)
-    if isinstance(eos, int):
-        ids.add(int(eos))
-    elif isinstance(eos, (list, tuple)):
-        ids.update(int(value) for value in eos if isinstance(value, int))
-    for name in END_OF_TURN_TOKENS:
-        token_id = _special_id(tokenizer, name)
-        if token_id is not None:
-            ids.add(token_id)
-    if not ids:
+    # Imported here, not at module scope: `gpu.loop` pulls torch in, and
+    # `gpu.lab.plot` / `fixture` read MESSAGES and NEEDLES out of this module on
+    # a box that only has plotly.
+    from gpu.loop.stop import stop_token_ids as product_stop_token_ids
+
+    try:
+        return product_stop_token_ids(tokenizer)
+    except ValueError:
+        # A fixture tokenizer that owns no end-of-turn id at all: the lab
+        # records the miss rather than dying inside a worker.
         return (QWEN_ENDOFTEXT, QWEN_IM_END)
-    return tuple(sorted(ids))
 
 
 def _qwen_fallback(

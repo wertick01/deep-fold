@@ -19,12 +19,15 @@ This work does not propose a new numerical code. The four-bit representation
 used here (NF4: sixteen reconstruction levels, groups of 64, one scale factor
 per group) belongs to the same family as bitsandbytes / QLoRA. Reconstructing
 values inside the matrix multiply is also known, for example in Marlin and in
-some AWQ kernels.
+some AWQ kernels. Keeping the packed form resident for a whole run is not new
+either: bitsandbytes' `Linear4bit` and the W4A16 kernels do that as well.
 
-What is new here is not the code, but **where the weights live for the entire
-run**. They are packed once, on the CPU, into a single `.chr` file. On the GPU
-the only stored form of a linear layer is that packed table: the module has no
-dense weight matrix, so nothing can silently recreate a full-precision layer.
+What this repository offers is not a first but a complete **stack**, organised
+around **where the weights live for the entire run** and measured end to end on
+one consumer card. The weights are packed once, on the CPU, into a single `.chr`
+file. On the GPU the only stored form of a linear layer is that packed table:
+the module has no dense weight matrix, so nothing can silently recreate a
+full-precision layer.
 During each multiply the processor reads a small tile of packed values,
 reconstructs them in registers (the smallest and fastest storage on the chip),
 multiplies, and discards the reconstructed numbers. In video memory the layer
@@ -35,8 +38,9 @@ exists on the device at any instant.
 Measured on one RTX 3080 12 GB: Qwen2.5-14B-Instruct (~28 GiB of 16-bit
 weights) generates at about 6.6 tokens per second; internlm2.5-20B (~38 GiB)
 at about 5.0. The same 14B model in sixteen bits, spilling off the card, is 0.92.
-When both copies fit (3B), the uncompressed path is faster. Compression pays when
-the uncompressed model does not fit.
+When both copies fit (3B), packed decode is now faster on this card; time to
+the first token is still slower. Compression pays when the uncompressed model
+does not fit.
 
 Русская версия: [README.ru.md](README.ru.md).
 
@@ -69,7 +73,8 @@ full-size copy of any layer is ever created on the card. It has four parts.
    **CHR0**. The weights are stored in **NF4**: each weight is replaced by one
    of 16 reconstruction levels, weights are handled in groups of 64, and each
    group keeps one scale factor of its own. Including the scale factors this
-   costs about 4.5 bits per weight instead of 16.
+   costs 4.25 bits per weight instead of 16 (4-bit codes plus one FP16 scale
+   per group of 64: 4 + 16/64).
 2. **A replacement for PyTorch's `torch.nn.Linear` that cannot hold a dense
    weight matrix.** `gpu.host.CompressedLinear` has no `[out, in]` weight tensor
    among its parameters or buffers at all; the packed codes and the group scale
@@ -100,8 +105,9 @@ materialized, the memory a model occupies on the card is set by the size of its
 14B model with 28,172 MiB of 16-bit weights and a 20B model with 37,882 MiB both
 load onto a 12 GiB card and generate text there, at 7,483 MiB and 10,062 MiB of
 packed weights respectively. Compression is not a free speedup: on a 3B model
-both forms fit on this card, and there the uncompressed path is the faster one
-(23.1 against 17.0 tokens per second). The result is about which models can run
+both forms fit on this card. Decode on the packed path is now ahead (about 31.6
+against the committed BF16 23.1 tokens per second); time to the first token is
+still slower (167 against 52 ms). The result is about which models can run
 at all on a given card, and at what rate once they do.
 
 ### The mental model to discard
@@ -124,11 +130,15 @@ Stating this precisely matters more than sounding novel.
 
 - **The number format.** NF4 as used here is the same family as the format in
   `bitsandbytes` and QLoRA: 16 reconstruction levels, groups of 64, one scale
-  factor per group, about 4.5 bits per weight. No new code was designed and no
+  factor per group, 4.25 bits per weight. No new code was designed and no
   information-theoretic claim is made about it.
 - **The idea of reconstructing weights inside the matrix multiply.** Marlin and
   several AWQ kernels do this too. No claim is made that this project is faster
   than those kernels; they were not benchmarked here.
+- **Keeping the weights packed for the whole run.** `bitsandbytes.Linear4bit`,
+  Marlin and AWQ W4A16 all hold packed weights in video memory and unpack
+  inside the GEMM. This project is **not** the first to keep weights packed and
+  does not claim to be.
 
 **Original in this repository:**
 
@@ -140,7 +150,9 @@ Stating this precisely matters more than sounding novel.
 
 The claim is the complete, working stack — container, host-side layer, GPU
 kernel, and end-to-end measurements on a single 12 GiB card — under which packed
-weights stay resident and packed. It is not a claim about the format.
+weights stay resident and packed, with a layer type that cannot grow a dense
+weight matrix. It is not a claim about the format, and not a claim of priority
+on packed residency.
 
 **Compression is lossy.** NF4 is a four-bit approximation of the original
 weights. The check below confirms that the compressed model still answers three
@@ -150,7 +162,7 @@ accuracy claim is derived from it.
 ## The same thing in implementation terms
 
 For readers who want the names. `.chr` (container `CHR0`) stores NF4-quantized
-weights: group size 64, one FP16 scale per group, 4.5 bits/weight effective.
+weights: group size 64, one FP16 scale per group, 4.25 bits/weight effective.
 `gpu.host.CompressedLinear` holds the packed code words and scales as its only
 buffers; by construction it has no `[out, in]` BF16 parameter, so no dense copy
 can be materialized by accident. `chr_nf4_gemm` is an `sm_86` kernel in which
@@ -183,7 +195,7 @@ decode tok/s** is the rate at which tokens are produced after that first one.
 Weights and `.chr` files are not in git. The lab's CSVs and figures are, under
 [`docs/runs/`](docs/runs/).
 
-### Qwen2.5-3B-Instruct — both codecs fit, and dense BF16 is faster
+### Qwen2.5-3B-Instruct — both codecs fit; decode NF4 is ahead, TTFT still BF16
 
 ![Qwen2.5-3B-Instruct: two video-memory graphs side by side, BF16 versus NF4, on the same 0–12288 MiB scale](docs/img/lab-qwen25-3b.png)
 
@@ -192,17 +204,26 @@ Weights and `.chr` files are not in git. The lab's CSVs and figures are, under
 | Weight MiB | 5,886 | 1,563 |
 | nvidia-smi after load (MiB) | 7,477 | 3,142 |
 | Peak nvidia-smi (MiB) | 7,535 | 3,286 |
-| Mean TTFT (ms) | 52 | 212 |
-| Mean decode tok/s | 23.1 | 17.0 |
+| Mean TTFT (ms) | 52 | 167 |
+| Mean decode tok/s | 23.1 | 31.6 |
 | Smoke (Paris / Berlin / 323) | pass | pass |
 
-Source: [`docs/runs/qwen25-3b/`](docs/runs/qwen25-3b/) — `summary.csv`,
-`messages.csv`, `timeline.csv`, and the interactive
-[`lab.html`](docs/runs/qwen25-3b/lab.html).
+Source: committed BF16 in [`docs/runs/qwen25-3b/`](docs/runs/qwen25-3b/) —
+`summary.csv`, `messages.csv`, `timeline.csv`, and the interactive
+[`lab.html`](docs/runs/qwen25-3b/lab.html); that BF16 row was not re-measured
+today. NF4 mean decode and TTFT from a live WAVE 2 re-measure (`gpu.lab.worker`,
+same harness as that folder); packed weights still 1,563 MiB.
 
-A 3B model fits either way on this card, and there dense BF16 wins on speed:
-**23.1 against 17.0 tokens per second**. Compression only pays for itself when
-the uncompressed model does not fit.
+A 3B model fits either way on this card. Occupancy was the bottleneck: decode
+used to launch one block per 128 output rows, **16 CTAs** for the query and
+output projections and **2** for grouped key/value, against **70 streaming
+multiprocessors**. After a 64-row tile and split-K those counts are **128**
+and **64**. NF4 decode is about **31.6 tok/s** against the committed BF16
+**23.1** (that BF16 row is from the plate above, not a same-session pair).
+Time to first token is still worse: **167 against 52 ms**, so prefill is the
+next floor. Compression still pays when the uncompressed model does not fit.
+The 14B figures further down are fit-versus-spill, not a kernel win, and they
+are not a comparison against Marlin.
 
 ### Qwen2.5-14B-Instruct — BF16 spills off the card, NF4 stays on it
 
@@ -223,12 +244,14 @@ Source: [`docs/runs/qwen25-14b/`](docs/runs/qwen25-14b/).
 Read this table carefully, because the obvious comparison is the wrong one.
 `nvidia-smi` reports only dedicated video memory and therefore **stops at
 12288 MiB**. So `11,955` for BF16 does not mean the model fit: it means the
-meter ran out of scale. What BF16 actually occupied after load is the CUDA
-working set torch reports, about **28,270 MiB**, some 16,300 MiB of which is
-Windows shared GPU memory — system RAM reached over the bus. NF4 stayed inside
-the card at about 7,539 MiB. **Do not quote 11,955 against 8,913 as the
-result.** The result is panel F of the figure: about 28,270 MiB against about
-7,539 MiB.
+meter ran out of scale. What BF16 actually asked for after load is the CUDA
+working set torch reports — `torch.cuda.memory_reserved()`, the caching
+allocator's reserved pool — about **28,270 MiB**, more than twice the card. A
+reservation that size on a 12 GiB card is oversubscribed by definition: the
+excess is served from system RAM over the bus, which is what Windows calls
+shared GPU memory. NF4 stayed inside the card at about 7,539 MiB. **Do not
+quote 11,955 against 8,913 as the result.** The result is panel F of the
+figure: about 28,270 MiB against about 7,539 MiB.
 
 The speed numbers flip here for the same reason. BF16 decodes at 0.92 tokens
 per second because most of every weight has to cross the bus for every token,
@@ -256,10 +279,11 @@ Source: [`docs/runs/internlm20b/`](docs/runs/internlm20b/).
 
 Read this table the same way as 14B. Both `nvidia-smi` traces sit near
 12288 MiB. **Do not quote 11,976 against 11,828 as the result.** The result
-is the CUDA working set after load: **37,882 MiB against 10,273 MiB**, that is
-roughly 37 GiB against roughly 10 GiB. 11,976 only means the dedicated-VRAM
-meter ran out of scale; the rest of BF16 sits in Windows shared GPU memory. NF4
-decode is 5.01 tok/s with a smoke pass.
+is the CUDA working set after load — again the allocator's reserved pool:
+**37,882 MiB against 10,273 MiB**, that is roughly 37 GiB against roughly
+10 GiB. 11,976 only means the dedicated-VRAM meter ran out of scale; the rest
+of BF16 is served from system RAM, which Windows reports as shared GPU memory.
+NF4 decode is 5.01 tok/s with a smoke pass.
 
 This is the first table here with a **`—` column instead of a baseline**, and
 the dashes are the honest part. Both halves need reading separately.
@@ -273,10 +297,11 @@ of headroom and nothing to spare. That headroom is why extra codecs were not
 started; it is not a comparison against BF16's capped meter.
 
 **BF16 has no decode numbers, and none are invented.** The load itself is a
-real measurement: torch reserved **37,882 MiB** for the dense weights, about
-26,000 MiB of that in Windows shared GPU memory, three times the card.
-Generation never ran. `internlm2_5-20b-chat` ships `trust_remote_code` modules
-written against transformers 4.41, and on transformers 5 its
+real measurement: torch's caching allocator reserved **37,882 MiB** for the
+dense weights, three times the card, so about 26,000 MiB of it could only have
+come from system RAM. Generation never ran. `internlm2_5-20b-chat` ships
+`trust_remote_code` modules written against transformers 4.41, and on
+transformers 5 its
 `prepare_inputs_for_generation` raises `TypeError: can only concatenate tuple
 (not "int") to tuple`. That is recorded in `summary.notes` as a miss.
 
@@ -336,18 +361,26 @@ quality benchmark, and no accuracy claim is made from it. Method:
 - **Memory after load is the product metric.** Packed NF4 must sit well below
   dense BF16 once the model is loaded. If it sits near the BF16 line, the
   driver materialized a layer somewhere — that is a bug, not a win.
-- **On 14B and 20B the `nvidia-smi` meter is capped** at the card's 12288 MiB.
-  The honest figure is the CUDA working set (`torch.cuda.memory_reserved`),
-  which counts dedicated video memory plus shared GPU memory. Panel F, not
-  panel A, is the claim. On 20B both codecs sit near that cap: do not quote
-  11,976 against 11,828. The 20B result is 37,882 MiB against 10,273 MiB, plus
-  NF4 at 5.01 tok/s with a smoke pass. There is no BF16 speed baseline.
+- **On 14B and 20B the `nvidia-smi` meter is capped** at the card's 12288 MiB,
+  and hitting that cap is not "the model fit". The figure plotted as the CUDA
+  working set is `torch.cuda.memory_reserved()`: the **reserved pool of
+  PyTorch's caching allocator**, not a driver field named "dedicated video
+  memory plus shared GPU memory". On this WDDM machine that pool reaches about
+  28 GiB on a 12 GiB card, which can only mean the allocation is
+  oversubscribed — weights served from system RAM over the bus, which
+  `nvidia-smi` cannot show. The conclusion stands; the counter is a PyTorch
+  counter. Panel F, not panel A, is the claim. On 20B both codecs sit near that
+  cap: do not quote 11,976 against 11,828. The 20B result is 37,882 MiB against
+  10,273 MiB, plus NF4 at 5.01 tok/s with a smoke pass. There is no BF16 speed
+  baseline.
 - **Decode tokens per second compare two different stacks:** HuggingFace
   `generate` with dense BF16 matrix multiplies on one side, our NF4 loop with
   reconstruction inside the multiply on the other. Both are reported, in both
-  directions. On 3B, dense BF16 is faster. On 14B, NF4 is far ahead, and the
-  reason is that BF16 has already spilled into system RAM. On 20B NF4 is
-  5.01 tok/s; there is no BF16 generate, so there is no speed comparison.
+  directions. On 3B, NF4 decode is now ahead on this card (about 31.6 tok/s
+  against the committed BF16 23.1; that BF16 row was not re-measured with this
+  kernel). TTFT is still BF16: 52 against 167 ms. On 14B, NF4 is far ahead, and
+  there the reason is that BF16 has already spilled into system RAM. On 20B NF4
+  is 5.01 tok/s; there is no BF16 generate, so there is no speed comparison.
 - **Time-to-first-token is prompt processing,** and the two sides do it
   differently: BF16 uses the HuggingFace path, NF4 uses chunks of at most 16
   positions.
@@ -380,7 +413,22 @@ they would flush to zero in float16 are encoded as a scale of `1`; see
 
 ## Run the lab
 
-Defaults point at the author's Windows layout and can be overridden:
+Generate from a packed `.chr` without a notebook. Ampere `sm_86` only; GGUF
+is refused; a sibling `.chr` is used only when its CHR0 header matches this
+model (`hidden_size`, `num_layers`, `vocab_size`):
+
+```powershell
+conda activate torch-gpu
+cd <this-repo>
+python -m gpu.cli doctor
+python -m gpu.cli run --model <HuggingFace-dir>
+```
+
+After `pip install -e .` those are `deepfold doctor` and
+`deepfold run --model DIR`. Details: [`docs/ux.md`](docs/ux.md).
+
+The BF16-vs-NF4 comparison plate is still the lab harness. Defaults point at
+the author's Windows layout and can be overridden:
 
 | Variable | Default on this machine |
 |---|---|
@@ -423,6 +471,7 @@ the lab writeup are in English.
 | | |
 |---|---|
 | Lab method and how to read the figure | [docs/lab.md](docs/lab.md) |
+| CLI (`doctor` / `run`) | [docs/ux.md](docs/ux.md) |
 | Hard eval (3B/14B questions, replies, times) | [docs/eval-hard-qwen25.md](docs/eval-hard-qwen25.md) |
 | Memory budget on a 3080 12 GB | [docs/vram-3080.md](docs/vram-3080.md) |
 | CPU compress and verify | [docs/cpu-roundtrip.md](docs/cpu-roundtrip.md) |

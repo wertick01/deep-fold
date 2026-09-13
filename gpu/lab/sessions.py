@@ -144,6 +144,7 @@ def _spawn_session(
     messages: Sequence[str] = MESSAGES,
     items_json: str | Path | None = None,
     conversation: str = "independent",
+    plate: str = "hard",
 ) -> LabSession:
     """Child process loads the model, records, exits; this process never holds it."""
     parent = Path(out_dir) if out_dir is not None else Path(tempfile.mkdtemp(prefix="lab-iso-"))
@@ -174,6 +175,9 @@ def _spawn_session(
     if script_path is not None:
         cmd.extend(["--items-json", str(script_path)])
         cmd.extend(["--conversation", conversation])
+        # A `quality` callable cannot cross a process boundary; the child rebuilds
+        # it from the script, and this says which scorer owns those kinds.
+        cmd.extend(["--plate", plate])
     if trust_remote_code:
         cmd.append("--trust-remote-code")
     if not graphs:
@@ -513,6 +517,7 @@ def run_bf16(
     quality: Callable[[int, str], bool] | None = None,
     conversation: str = "independent",
     items_json: str | Path | None = None,
+    plate: str = "hard",
 ) -> LabSession:
     """Uncompressed baseline: ``from_pretrained`` + greedy ``generate``.
 
@@ -525,7 +530,9 @@ def run_bf16(
 
     ``isolated=True`` runs the session in a child process so this process never
     holds the weights. Use that from the notebook: otherwise Windows keeps the
-    CUDA pool and the next codec's VRAM trace is unreadable.
+    CUDA pool and the next codec's VRAM trace is unreadable. ``plate`` only
+    matters then: ``quality`` cannot be pickled to a child, so the worker
+    rebuilds it from ``items_json`` with that plate's scorer.
     """
     if isolated:
         return _spawn_session(
@@ -539,6 +546,7 @@ def run_bf16(
             messages=messages,
             items_json=items_json,
             conversation=conversation,
+            plate=plate,
         )
     import torch
     from transformers import AutoModelForCausalLM, GenerationConfig
@@ -743,6 +751,7 @@ def run_nf4(
     quality: Callable[[int, str], bool] | None = None,
     conversation: str = "independent",
     items_json: str | Path | None = None,
+    plate: str = "hard",
 ) -> LabSession:
     """Our driver: ``load_model`` + ``TokenLoop``, greedy, one forward per token.
 
@@ -751,7 +760,8 @@ def run_nf4(
 
     ``isolated=True`` runs in a child process so this process never holds the
     weights. The notebook must use that, or the compressed VRAM trace starts
-    on top of the dense CUDA pool.
+    on top of the dense CUDA pool. ``plate`` picks the child's scorer for
+    ``items_json``; in-process runs get ``quality`` directly and ignore it.
     """
     if isolated:
         return _spawn_session(
@@ -768,6 +778,7 @@ def run_nf4(
             messages=messages,
             items_json=items_json,
             conversation=conversation,
+            plate=plate,
         )
     import torch
 
@@ -799,8 +810,10 @@ def run_nf4(
         sampler.mark("load_start", detail=f"load_model {Path(chr_path).name}")
         t_load = time.perf_counter()
         tokenizer = _load_tokenizer(model_dir, trust_remote_code)
+        # strict=False: the lab records an incomplete load in `report` and on the
+        # plate. `deepfold run` refuses it instead (wave8-arch §2.5).
         model, report = load_model(
-            model_dir, chr_path, trust_remote_code=trust_remote_code
+            model_dir, chr_path, trust_remote_code=trust_remote_code, strict=False
         )
         torch.cuda.synchronize()
         load_s = time.perf_counter() - t_load

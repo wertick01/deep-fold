@@ -23,13 +23,17 @@ implementation -- the graph is captured *from* the eager group. If capture fails
 :func:`capture` returns the eager groups unchanged and the loop still runs (the
 TZ requires eager to PASS on its own).
 
-Measured on a 3080 with 3B, plan A does **not** move tok/s: a decode token spends
+Against the wave-2 kernel, plan A did **not** move tok/s: a decode token spent
 ~58 ms inside the GEMMs and ~5 ms launching them, so the launch tax the graph
 removes was already hidden behind the kernel, and the 145 static-input copies it
-adds cost about as much (17.7 tok/s eager vs 16.8 captured). What did move tok/s
-is the stream fork in :class:`GemmGroup`, which the graph then captures for free.
-Plan A earns its keep on a faster kernel, or on 14B/32B where the Python cost per
-layer is the same but there are twice as many layers.
+adds cost about as much (17.7 tok/s eager vs 16.8 captured). What moved tok/s was
+the stream fork in :class:`GemmGroup`, which the graph then captures for free.
+
+The prediction in that paragraph -- "plan A earns its keep on a faster kernel" --
+is now measured. With the split-K decode tile the same 3B smoke run gives **23.3
+tok/s eager vs 31.0 captured**: the GEMMs no longer hide the launch tax, so the
+replay is worth more than the static copies it costs. 14B/32B should widen it
+further, since the Python cost per layer is unchanged and there are more layers.
 """
 
 from __future__ import annotations
@@ -128,12 +132,16 @@ class GemmGroup:
     ``N == 1`` -- every decode step -- both transposes are contiguous views and
     cost nothing.
 
-    **Why the streams.** The wave-2 GEMM tiles ``BM=128``, so a matrix gets
-    ``M/128`` blocks: 16 for ``q``/``o`` and **2** for ``k``/``v`` on 3B. On 70
-    SMs that leaves the card mostly idle, and measured on a 3080 the three QKV
-    GEMMs cost 445 us back to back but 162 us when each gets its own stream --
-    they are independent (same input, disjoint outputs), so the only thing
-    serializing them was the stream. Members ``1..n-1`` fork onto ``streams``,
+    **Why the streams.** The wave-2 GEMM tiled ``BM=128`` with ``split_k=1``, so
+    a matrix got ``M/128`` blocks: 16 for ``q``/``o`` and **2** for ``k``/``v``
+    on 3B. On 70 SMs that left the card mostly idle, and measured on a 3080 the
+    three QKV GEMMs cost 445 us back to back but 162 us when each got its own
+    stream -- they are independent (same input, disjoint outputs), so the only
+    thing serializing them was the stream. The kernel has since grown a 64-row
+    tile and ``grid.y = split_k`` (``gpu/nf4/plan.py``), which puts 64-160 CTAs
+    inside *one* of these GEMMs, so the fork now overlaps work that already
+    fills the card rather than hiding an empty one. It still helps, and it is
+    still free under capture. Members ``1..n-1`` fork onto ``streams``,
     member ``0`` runs on the caller's stream, and everything joins before
     ``run`` returns, so callers still see a plain sequential result. Bit-exact
     against the serial order: same kernel, same inputs.

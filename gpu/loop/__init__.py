@@ -11,11 +11,14 @@ seat are ``gpu/host``. This package is the driver on top of them --
 
     model, report = load_model(r"C:\\dev\\models\\Qwen2.5-3B-Instruct",
                                r"C:\\dev\\models\\qwen25-3b.nf4.chr")
-    loop = TokenLoop(model, max_seq=512)
+    loop = TokenLoop(model, max_seq=512)   # binds from load_model's DriverPlan
     loop.warmup()            # eager, before any capture
     loop.capture_graphs()    # plan A: NF4 GEMMs only; falls back to eager
-    out = loop.generate(prompt_ids, 64, stop=(151645,))
+    out = loop.generate(prompt_ids, 64, stop=stop_token_ids(tok))
     print(out.prefill_ms, out.decode_tok_s, out.graph)
+
+``stop`` is never a literal: :func:`gpu.loop.stop.stop_token_ids` asks the
+tokenizer, because Qwen closes a turn on 151645 and InternLM2 on 92542.
 
 Contracts: ``docs/token-loop.md`` §1-5.
 Acceptance: ``python gpu/loop/smoke.py``.
@@ -23,9 +26,18 @@ Acceptance: ``python gpu/loop/smoke.py``.
 
 from __future__ import annotations
 
-from .generate import Generation, TokenLoop, rms_norm_exact, split_internlm_wqkv
+from .generate import (
+    PACKERS,
+    Generation,
+    TokenLoop,
+    rms_norm_exact,
+    split_concat_qkv,
+    split_internlm_wqkv,
+    split_neox_qkv,
+)
 from .graph import Gemm, GemmGroup, GraphedGemmGroup, capture, nf4_max_n
 from .kv_cache import KVCache
+from .stop import stop_token_ids
 
 __all__ = [
     "TokenLoop",
@@ -34,8 +46,12 @@ __all__ = [
     "Gemm",
     "GemmGroup",
     "GraphedGemmGroup",
+    "PACKERS",
     "capture",
     "nf4_max_n",
     "rms_norm_exact",
+    "split_concat_qkv",
     "split_internlm_wqkv",
+    "split_neox_qkv",
+    "stop_token_ids",
 ]

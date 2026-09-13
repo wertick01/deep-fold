@@ -12,6 +12,7 @@ if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
 from gpu.loop import split_internlm_wqkv  # noqa: E402
+from gpu.tests.skips import Skip, requires_module  # noqa: E402
 
 
 def test_split_matches_internlm_rearrange() -> None:
@@ -21,6 +22,9 @@ def test_split_matches_internlm_rearrange() -> None:
     y = torch.arange(n * (n_q + 2 * n_kv) * hd, dtype=torch.float32).view(n, -1)
     q, k, v = split_internlm_wqkv(y, n_q, n_kv, hd)
 
+    # einops ships in the optional `internlm` extra, so a box without it must
+    # skip the reference comparison rather than report it as passed (D12).
+    requires_module("einops", extra="internlm")
     from einops import rearrange
 
     packed = rearrange(
@@ -41,5 +45,9 @@ def test_split_matches_internlm_rearrange() -> None:
 
 
 if __name__ == "__main__":
-    test_split_matches_internlm_rearrange()
-    print("PASS split_internlm_wqkv")
+    try:
+        test_split_matches_internlm_rearrange()
+    except Skip as exc:
+        print(f"SKIP split_internlm_wqkv: {exc}")
+    else:
+        print("PASS split_internlm_wqkv")

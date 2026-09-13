@@ -23,6 +23,8 @@ const char *gemm_err(int rc) {
     return "packed or x not 16-byte aligned";
   case -6:
     return "CUDA launch / func attribute failed";
+  case -7:
+    return "split-K workspace smaller than the plan asked for";
   default:
     return "unknown error";
   }
@@ -71,14 +73,69 @@ torch::Tensor nf4_gemm(torch::Tensor packed, torch::Tensor scale, torch::Tensor 
   w.packed = packed.data_ptr<uint8_t>();
   w.scale = reinterpret_cast<const uint16_t *>(scale.data_ptr<at::Half>());
 
+  // Ask the planner what grid it wants *before* launching, because split_k > 1
+  // needs FP32 partials and nothing inside the .cu is allowed to allocate.
+  // Torch's caching allocator hands these back for free after the first call,
+  // and under CUDA graph capture they come from the graph's private pool.
+  chr_nf4_plan_t plan{};
+  const int prc = chr_nf4_gemm_plan(&w, N, /*have_ws=*/1, &plan);
+  TORCH_CHECK(prc == 0, "chr_nf4_gemm_plan failed (", prc, "): ", gemm_err(prc));
+
+  torch::Tensor ws;
+  float *ws_ptr = nullptr;
+  if (plan.ws_floats > 0) {
+    ws = torch::empty({plan.ws_floats}, x.options().dtype(torch::kFloat32));
+    ws_ptr = ws.data_ptr<float>();
+  }
+
   cudaStream_t stream = c10::cuda::getCurrentCUDAStream();
-  const int rc =
-      chr_nf4_gemm(&w, x.data_ptr(), y.data_ptr(), N, stream);
+  const int rc = chr_nf4_gemm_ws(&w, x.data_ptr(), y.data_ptr(), N, ws_ptr,
+                                 plan.ws_floats, stream);
   TORCH_CHECK(rc == 0, "chr_nf4_gemm failed (", rc, "): ", gemm_err(rc));
   return y;
+}
+
+// Launch math with no device memory and no launch: the occupancy claim in
+// docs/tz/wave9-review.md §3 is a grid size, so it should be assertable.
+py::dict nf4_plan(int64_t M, int64_t K, int64_t K_pad, int64_t N,
+                  bool have_ws) {
+  chr_nf4_dev_t w{};
+  w.M = static_cast<int32_t>(M);
+  w.K = static_cast<int32_t>(K);
+  w.K_pad = static_cast<int32_t>(K_pad);
+  chr_nf4_plan_t p{};
+  const int rc = chr_nf4_gemm_plan(&w, static_cast<int32_t>(N),
+                                   have_ws ? 1 : 0, &p);
+  TORCH_CHECK(rc == 0, "chr_nf4_gemm_plan failed (", rc, "): ", gemm_err(rc));
+  py::dict d;
+  d["path"] = p.path;
+  d["grid_x"] = p.grid_x;
+  d["grid_y"] = p.grid_y;
+  d["block"] = p.block;
+  d["bm"] = p.bm;
+  d["bk"] = p.bk;
+  d["n_ktiles"] = p.n_ktiles;
+  d["tiles_per_split"] = p.tiles_per_split;
+  d["ctas"] = p.ctas;
+  d["smem_bytes"] = p.smem_bytes;
+  d["ws_floats"] = p.ws_floats;
+  return d;
+}
+
+void nf4_set_tuning(int64_t path, int64_t split_k, int64_t one_wave) {
+  chr_nf4_set_tuning(static_cast<int32_t>(path), static_cast<int32_t>(split_k),
+                     static_cast<int32_t>(one_wave));
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("nf4_gemm", &nf4_gemm,
         "chr_nf4_gemm: y[M,N] = dequant_nf4(packed,scale) @ x[K,N], N in 1..16");
+  m.def("nf4_plan", &nf4_plan,
+        "launch plan for (M, K, K_pad, N): grid, tile, CTAs, workspace floats",
+        py::arg("M"), py::arg("K"), py::arg("K_pad"), py::arg("N"),
+        py::arg("have_ws") = true);
+  m.def("nf4_set_tuning", &nf4_set_tuning,
+        "path (0 auto / 1 classic decode / 2 small decode), split_k (0 auto), "
+        "one_wave (0 default 70)",
+        py::arg("path") = 0, py::arg("split_k") = 0, py::arg("one_wave") = 0);
 }

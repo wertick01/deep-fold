@@ -15,4 +15,6 @@ __pycache__/
 *.pdb
 *.ilk
 gpu/*/build/
+/build/
+*.egg-info/
 docs/tz/

@@ -124,9 +124,18 @@ def replace_linears(
     model: nn.Module,
     *,
     skip: Iterable[str] = (),
+    slots: Iterable[str] | None = None,
     dtype: torch.dtype = torch.bfloat16,
 ) -> list[str]:
-    """Swap every ``nn.Linear`` for a ``CompressedLinear``, in place.
+    """Swap ``nn.Linear`` for ``CompressedLinear``, in place.
+
+    With ``slots`` (a :class:`~gpu.host.attach.DriverPlan`'s ``gemm_names``) only
+    those qualified names are swapped **and any other ``nn.Linear`` is an error**
+    listing every name: swapping a router or a vision projection and hoping
+    ``report.leftover_meta`` stays empty is the silence wave8-arch §2.5 forbids.
+
+    Without ``slots`` every ``nn.Linear`` is swapped, which is what the
+    lower-level verify scripts and notebooks have always done.
 
     Returns the qualified names that were replaced. ``nn.Embedding`` is not a
     ``Linear`` and is left alone (see ``load_chr_nf4``'s ``embed`` argument).
@@ -134,7 +143,9 @@ def replace_linears(
     the meta child -- its storage is never touched.
     """
     skip_set = {s for s in skip}
+    wanted = None if slots is None else {str(s) for s in slots}
     replaced: list[str] = []
+    leftover: list[str] = []
 
     def walk(module: nn.Module, prefix: str) -> None:
         for name, child in list(module.named_children()):
@@ -142,6 +153,9 @@ def replace_linears(
             if isinstance(child, CompressedLinear):
                 continue
             if isinstance(child, nn.Linear) and name not in skip_set and qualified not in skip_set:
+                if wanted is not None and qualified not in wanted:
+                    leftover.append(qualified)
+                    continue
                 setattr(
                     module,
                     name,
@@ -157,6 +171,17 @@ def replace_linears(
                 walk(child, f"{qualified}.")
 
     walk(model, "")
+    if leftover:
+        from gpu.graphs import refuse
+
+        raise RuntimeError(refuse.unclassified(sorted(leftover)))
+    if wanted is not None:
+        unseen = sorted(wanted - set(replaced) - skip_set)
+        if unseen:
+            raise RuntimeError(
+                "replace_linears: the plan named GEMM slots that are not "
+                f"nn.Linear in this tree: {', '.join(unseen)}"
+            )
     return replaced
 
 
@@ -425,11 +450,33 @@ def load_model(
     skip: Iterable[str] = (),
     verbose: bool = False,
     trust_remote_code: bool = False,
+    strict: bool = True,
 ):
-    """``build_skeleton`` + ``replace_linears`` + ``load_chr_nf4``, in that order."""
+    """``build_skeleton`` + ``attach`` + ``replace_linears`` + ``load_chr_nf4``.
+
+    ``attach`` runs on the meta skeleton, so a graph ``TokenLoop`` cannot drive
+    loses here -- before a single NF4 byte reaches the device. The resulting
+    :class:`~gpu.host.attach.DriverPlan` is left on the model as
+    ``deepfold_plan`` and is what ``TokenLoop`` binds against.
+
+    ``strict`` (the product default) turns a partial load into a refusal: a plan
+    slot that is missing from the ``.chr``, was skipped as ``kind=other``, or
+    stayed on ``meta`` means wrong answers, not slow ones. The lab passes
+    ``strict=False`` so it can *print* an incomplete report instead.
+    """
+    from .attach import attach_module, plan_violations
+
     model = build_skeleton(model_id, trust_remote_code=trust_remote_code)
-    replace_linears(model, skip=skip)
+    plan = attach_module(model, trust_remote_code=trust_remote_code)
+    replace_linears(model, skip=skip, slots=plan.gemm_names)
     report = load_chr_nf4(
         model, chr_path, device=device, embed=embed, layers=layers, verbose=verbose
     )
+    model.deepfold_plan = plan
+    if strict and layers is None:
+        violations = plan_violations(plan, report)
+        if violations:
+            from gpu.graphs import refuse
+
+            raise RuntimeError(refuse.load_violations(violations))
     return model, report

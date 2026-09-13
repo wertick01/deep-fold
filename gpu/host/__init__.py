@@ -28,6 +28,15 @@ Contracts: ``docs/spec/stitch-gpu.md`` (wins ties), ``docs/spec/gpu-abi.md``,
 
 from __future__ import annotations
 
+from .attach import (
+    AttachError,
+    DriverPlan,
+    LayerPlan,
+    attach,
+    attach_dir,
+    attach_module,
+    plan_violations,
+)
 from .blobs import iter_bf16, load_bf16, read_bf16_host
 from .embedding import NF4_LEVELS, Nf4Embedding, dequant_nf4_rows, dequant_table
 from .linear import CompressedLinear, k_pad, nf4_linear
@@ -44,6 +53,14 @@ from .vq_blobs import VqMatrix, iter_vq, k_pad_vq, materialize_vq, reconstruct_v
 from .vq_linear import CompressedVqLinear, load_chr_vq, vq_linear
 
 __all__ = [
+    # wave10 P1: one attach path (docs/tz/wave8-arch.md §2)
+    "attach",
+    "attach_dir",
+    "attach_module",
+    "plan_violations",
+    "AttachError",
+    "DriverPlan",
+    "LayerPlan",
     "CompressedLinear",
     "Nf4Embedding",
     "nf4_linear",

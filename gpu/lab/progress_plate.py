@@ -84,8 +84,10 @@ class ProgressPaths:
     committed_14b: Path
     committed_20b: Path
     hard: Path
+    hard_20b: Path
     gsm8k: Path
     ncu: Path
+    ncu_n32: Path
     competitor: Path
     bnb_e2e: Path
 
@@ -102,8 +104,10 @@ def default_paths(repo: str | Path | None = None) -> ProgressPaths:
         committed_14b=root / "docs" / "runs" / "qwen25-14b",
         committed_20b=root / "docs" / "runs" / "internlm20b",
         hard=root / "docs" / "runs" / "hard-qwen25",
+        hard_20b=runs / "hard-internlm20b-nf4-20260914",
         gsm8k=runs / "eval-qwen25-3b-gsm8k-200-20260913",
         ncu=root / "docs" / "runs" / "ncu",
+        ncu_n32=runs / "ncu-n32-vs-2xn16-20260913",
         competitor=root / "docs" / "runs" / "competitor-qwen25-3b",
         bnb_e2e=runs / "competitor-qwen25-3b-20260913-bnb-e2e",
     )
@@ -179,6 +183,22 @@ class NcuCase:
 
 
 @dataclass(frozen=True)
+class N32Gemm:
+    """True n32 vs two LIVE_MAX_N launches. One linear, not TTFT."""
+
+    present: bool
+    path: Path | None
+    one_n16_us: float | None = None
+    two_n16_us: float | None = None
+    true_n32_us: float | None = None
+    ratio: float | None = None
+    n32_kernel: str = ""
+    two_kernel: str = ""
+    n32_occ: float | None = None
+    two_occ: float | None = None
+
+
+@dataclass(frozen=True)
 class CompetitorSlice:
     present: bool
     path: Path | None
@@ -216,6 +236,8 @@ class ProgressStory:
     hard: tuple[HardSlice, ...]
     gsm8k: Gsm8kSlice
     ncu: tuple[NcuCase, ...]
+    n32: N32Gemm
+    internlm_hard: HardSlice | None
     competitor: CompetitorSlice
     occupancy: OccupancyGrid
 
@@ -434,6 +456,65 @@ def _load_ncu(path: Path) -> tuple[NcuCase, ...]:
     return tuple(cases)
 
 
+def _load_internlm_hard(path: Path) -> HardSlice | None:
+    scores = path / "hard_scores.csv"
+    if not scores.is_file():
+        return None
+    rows: list[dict[str, str]] = []
+    with scores.open("r", encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    if not rows:
+        return None
+    n_ok = sum(1 for raw in rows if str(raw.get("correct") or "").strip().lower() == "true")
+    n_items = len(rows)
+    return HardSlice(
+        label="internlm20b-nf4",
+        size="20B",
+        codec="nf4",
+        n_ok=n_ok,
+        n_items=n_items,
+        accuracy=n_ok / n_items,
+        plate=(
+            f"{path.name} · NF4 only, no BF16 pair, not on hard-eval-qwen25.png"
+        ),
+    )
+
+
+def _load_n32(path: Path) -> N32Gemm:
+    csv_path = path / "comparison.csv"
+    if not csv_path.is_file():
+        return N32Gemm(present=False, path=path)
+
+    def num(row: Mapping[str, Any], name: str) -> float | None:
+        text = str(row.get(name) or "").strip()
+        return float(text) if text else None
+
+    by_kind: dict[str, dict[str, str]] = {}
+    with csv_path.open("r", encoding="utf-8", newline="") as handle:
+        for raw in csv.DictReader(handle):
+            by_kind[str(raw.get("kind") or "")] = raw
+    two = by_kind.get("two_n16_chunked")
+    true = by_kind.get("true_n32")
+    one = by_kind.get("one_n16")
+    if two is None or true is None:
+        return N32Gemm(present=False, path=path)
+    two_us = num(two, "us")
+    n32_us = num(true, "us")
+    ratio = None if two_us is None or n32_us is None or n32_us == 0 else two_us / n32_us
+    return N32Gemm(
+        present=True,
+        path=path,
+        one_n16_us=None if one is None else num(one, "us"),
+        two_n16_us=two_us,
+        true_n32_us=n32_us,
+        ratio=ratio,
+        n32_kernel=str(true.get("kernel") or ""),
+        two_kernel=str(two.get("kernel") or ""),
+        n32_occ=num(true, "occ_pct"),
+        two_occ=num(two, "occ_pct"),
+    )
+
+
 def _load_competitor(committed: Path, bnb_e2e: Path) -> CompetitorSlice:
     csv_path = committed / "summary.csv"
     if not csv_path.is_file():
@@ -562,6 +643,8 @@ def load_progress(paths: ProgressPaths | None = None) -> ProgressStory:
         hard=_load_hard(loc.hard),
         gsm8k=_load_gsm8k(loc.gsm8k),
         ncu=_load_ncu(loc.ncu),
+        n32=_load_n32(loc.ncu_n32),
+        internlm_hard=_load_internlm_hard(loc.hard_20b),
         competitor=_load_competitor(loc.competitor, loc.bnb_e2e),
         occupancy=_occupancy_grid(),
     )
@@ -601,14 +684,14 @@ def _frac(ok: int | None, n: int) -> str:
 
 
 FIG_W = 16.2
-_M_LEFT, _M_RIGHT = 0.56, 0.30
-_HEADER_H = 1.92
+_M_LEFT, _M_RIGHT = 0.90, 0.30
+_HEADER_H = 1.50
 _ROW1_H = 3.55
 _ROW2_H = 2.95
 _ROW3_H = 2.72
 _FOOT_H = 1.82
 _CAPTION_H = 1.58
-_GAP = 0.92
+_GAP = 0.48
 _BOTTOM = 0.18
 _BAND = "#F2F4F5"
 _CHIP = "#F4F5F6"
@@ -668,8 +751,8 @@ def _letter(ax: Any, letter: str, heading: str, *, y: float = 0.99) -> None:
     )
 
 
-def _claim_note(ax: Any, note: str, *, y: float = 0.91, width: int = 72) -> None:
-    """Caveat under the claim. Callers must leave the top of ``ylim`` empty."""
+def _claim_note(ax: Any, note: str, *, y: float = 0.91, width: int = 70) -> None:
+    """Caveat under the claim, inside the axes (never data-coords past the spine)."""
     ax.text(
         0.0,
         y,
@@ -680,7 +763,7 @@ def _claim_note(ax: Any, note: str, *, y: float = 0.91, width: int = 72) -> None
         fontsize=SIZE_NOTE,
         color=INK_SOFT,
         linespacing=1.25,
-        clip_on=False,
+        clip_on=True,
     )
 
 
@@ -722,8 +805,8 @@ def _panel_a_decode(ax: Any, story: ProgressStory) -> None:
     _letter(ax, "A", "3B decode — three plates, not one comparison")
     _claim_note(
         ax,
-        "tok/s. Mixing 17.0 vs 31.6 vs 28.4 without these labels is the bug this plate retires. TTFT under each bar.",
-        width=78,
+        "Mixing 17.0 vs 31.6 vs 28.4 without these labels is the bug this plate retires. TTFT under each bar.",
+        width=70,
     )
 
     clusters = (
@@ -739,9 +822,11 @@ def _panel_a_decode(ax: Any, story: ProgressStory) -> None:
         if stats.tok_s is not None
     ]
     peak = max(present_vals + [1.0])
-    ceiling = peak * 1.78
+    ceiling = peak * 2.12
     ax.set_ylim(0, ceiling)
     ax.set_xlim(-1.05, 5.75)
+    top_tick = int(peak // 10) * 10
+    ax.set_yticks(list(range(0, max(top_tick, 10) + 1, 10)))
 
     for center, session in zip(centers, clusters):
         ax.axvspan(
@@ -753,7 +838,7 @@ def _panel_a_decode(ax: Any, story: ProgressStory) -> None:
         )
         ax.text(
             center,
-            peak * 1.22,
+            peak * 1.46,
             session.title,
             ha="center",
             va="bottom",
@@ -764,7 +849,7 @@ def _panel_a_decode(ax: Any, story: ProgressStory) -> None:
         )
         ax.text(
             center,
-            peak * 1.14,
+            peak * 1.31,
             textwrap.fill(session.plate.split(" · ")[0], width=34),
             ha="center",
             va="top",
@@ -845,7 +930,8 @@ def _panel_b_occupancy(ax: Any, grid: OccupancyGrid) -> None:
     _claim_note(
         ax,
         "Host planner (gpu/nf4/plan.py), not tok/s. Starved: one 128-row block. Fix: BM=64 + split-K.",
-        width=48,
+        width=58,
+        y=0.92,
     )
     labels = [
         "q/o starved",
@@ -856,15 +942,15 @@ def _panel_b_occupancy(ax: Any, grid: OccupancyGrid) -> None:
     values = [grid.starved_qo, grid.fix_qo, grid.starved_kv, grid.fix_kv]
     colors = [_STARVED_INK, CODEC_STYLE["nf4"].color, _STARVED_INK, CODEC_STYLE["nf4"].color]
     hatches = ["", "///", "", "///"]
-    ys = [2.85, 2.05, 0.85, 0.10]
-    ax.set_ylim(-0.55, 4.15)
+    ys = [2.08, 1.32, 0.58, 0.0]
+    ax.set_ylim(-0.42, 3.38)
     xmax = max(values + [grid.sms, 1]) * 1.22
     ax.set_xlim(0, xmax)
     for y, value, color, hatch in zip(ys, values, colors, hatches):
         ax.barh(
             y,
             value,
-            height=0.62,
+            height=0.56,
             color=color,
             edgecolor=color,
             linewidth=0.7,
@@ -927,7 +1013,7 @@ def _panel_c_working_set(ax: Any, story: ProgressStory) -> None:
     _claim_note(
         ax,
         "torch.cuda.memory_reserved() after load, MiB. Past the red rule is Windows shared GPU memory (system RAM).",
-        width=110,
+        width=140,
     )
     rows: list[tuple[str, str, SessionSlice, str]] = [
         ("14B", "bf16", story.fit_14b, "lab-qwen25-14b"),
@@ -935,29 +1021,21 @@ def _panel_c_working_set(ax: Any, story: ProgressStory) -> None:
         ("20B", "bf16", story.internlm_20b, "lab-internlm20b"),
         ("20B", "nf4", story.internlm_20b, "lab-internlm20b"),
     ]
-    ys = [3.55, 2.75, 1.55, 0.75]
+    ys = [2.18, 1.55, 0.78, 0.22]
     values: list[float] = []
-    ax.set_ylim(-1.05, 5.45)
+    ytick_labels: list[str] = []
+    ytick_colors: list[str] = []
+    ax.set_ylim(-0.78, 4.05)
     for y, (size, codec, session, _plate) in zip(ys, rows):
         stats = session.codecs.get(codec) if session.present else None
         value = None if stats is None else stats.working_set_mib
-        label = f"{size} {codec.upper()}"
+        ytick_labels.append(f"{size} {codec.upper()}")
+        ytick_colors.append(CODEC_STYLE[codec].color if value is not None else RULE)
         if value is None:
-            ax.text(200, y, f"{label}  —", va="center", fontsize=SIZE_SMALL, color=RULE)
+            ax.text(200, y, "—", va="center", fontsize=SIZE_SMALL, color=RULE)
             continue
         values.append(float(value))
-        _split_ws_bar(ax, y, float(value), codec)
-        ax.text(
-            -400,
-            y,
-            label,
-            va="center",
-            ha="right",
-            fontsize=SIZE_SMALL,
-            color=CODEC_STYLE[codec].color,
-            fontweight="bold",
-            clip_on=False,
-        )
+        _split_ws_bar(ax, y, float(value), codec, height=0.50)
         ax.text(
             float(value) + 400,
             y,
@@ -969,12 +1047,18 @@ def _panel_c_working_set(ax: Any, story: ProgressStory) -> None:
         )
     ceiling = max(values + [CARD_MIB, 1.0]) * 1.18
     ax.set_xlim(0, ceiling)
+    ax.set_yticks(ys)
+    ax.set_yticklabels(ytick_labels, fontsize=SIZE_SMALL, fontweight="bold")
+    for tick, color in zip(ax.get_yticklabels(), ytick_colors):
+        tick.set_color(color)
+    ax.tick_params(axis="y", length=0, pad=6)
     ax.axvline(CARD_MIB, color=LIMIT, linewidth=1.15, linestyle=(0, (2, 2)), zorder=4)
     ax.text(
         CARD_MIB,
-        3.90,
-        f"card {CARD_MIB:,.0f} MiB",
-        ha="center",
+        0.78,
+        f"  card {CARD_MIB:,.0f} MiB",
+        transform=ax.get_xaxis_transform(),
+        ha="left",
         va="bottom",
         fontsize=SIZE_SMALL,
         color=LIMIT,
@@ -1003,8 +1087,8 @@ def _panel_c_working_set(ax: Any, story: ProgressStory) -> None:
     )
     ax.text(
         200,
-        -0.15,
-        line_14,
+        -0.10,
+        textwrap.fill(line_14, width=128),
         ha="left",
         va="top",
         fontsize=SIZE_NOTE,
@@ -1012,25 +1096,33 @@ def _panel_c_working_set(ax: Any, story: ProgressStory) -> None:
     )
     ax.text(
         200,
-        -0.58,
-        line_20,
+        -0.46,
+        textwrap.fill(line_20, width=128),
         ha="left",
         va="top",
         fontsize=SIZE_NOTE,
         color=INK_SOFT,
     )
-    ax.set_yticks([])
     ax.set_xlabel("CUDA working set after load, MiB", fontsize=SIZE_SMALL, color=INK_SOFT)
 
 
-def _panel_d_hard(ax: Any, runs: Sequence[HardSlice]) -> None:
+def _panel_d_hard(
+    ax: Any,
+    runs: Sequence[HardSlice],
+    internlm: HardSlice | None = None,
+) -> None:
     _style(ax)
     _letter(ax, "D", "Hard eval 12 — regression, not a leaderboard")
-    _claim_note(
-        ax,
-        "docs/img/hard-eval-qwen25.png · auto-scored items. NF4 matching BF16 here is not “quantization is lossless”.",
-        width=62,
+    note = (
+        "docs/img/hard-eval-qwen25.png · auto-scored items. "
+        "NF4 matching BF16 here is not “quantization is lossless”."
     )
+    if internlm is not None and internlm.n_ok is not None:
+        note += (
+            f" Live 20B NF4 {_frac(internlm.n_ok, internlm.n_items)}, no BF16 pair — "
+            "not on that PNG, not a quality headline."
+        )
+    _claim_note(ax, note, width=62)
     if not runs:
         _empty(ax, "hard_matrix.csv not on this disk")
         return
@@ -1147,7 +1239,12 @@ def _panel_e_gsm8k(ax: Any, slice_: Gsm8kSlice) -> None:
     ax.set_ylabel("correct / 200", fontsize=SIZE_SMALL, color=INK_SOFT)
 
 
-def _footer_ncu(ax: Any, cases: Sequence[NcuCase], live_max_n: int) -> None:
+def _footer_ncu(
+    ax: Any,
+    cases: Sequence[NcuCase],
+    live_max_n: int,
+    n32: N32Gemm | None = None,
+) -> None:
     ax.set_axis_off()
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
@@ -1192,14 +1289,28 @@ def _footer_ncu(ax: Any, cases: Sequence[NcuCase], live_max_n: int) -> None:
             bits.append(f"occupancy {case.occupancy_pct:.0f}%")
         ax.text(0.0, y, "   ".join(bits), fontsize=SIZE_SMALL, color=INK, va="top")
         y -= 0.22
-    ax.text(
-        0.0,
-        0.08,
-        "Prefill occupancy ~29% is still this GEMM. TokenLoop still chunks at 16.",
-        fontsize=7.2,
-        color=INK_SOFT,
-        va="top",
-    )
+    if n32 is not None and n32.present and n32.true_n32_us is not None and n32.two_n16_us is not None:
+        ratio = f"{n32.ratio:.2f}×" if n32.ratio is not None else "—"
+        ax.text(
+            0.0,
+            0.08,
+            (
+                f"True n32 {n32.true_n32_us:.0f} µs vs two n16 {n32.two_n16_us:.0f} µs "
+                f"({ratio}). TokenLoop still chunks at {live_max_n}."
+            ),
+            fontsize=7.2,
+            color=INK_SOFT,
+            va="top",
+        )
+    else:
+        ax.text(
+            0.0,
+            0.08,
+            f"Prefill occupancy ~29% is still this GEMM. TokenLoop still chunks at {live_max_n}.",
+            fontsize=7.2,
+            color=INK_SOFT,
+            va="top",
+        )
 
 
 def _footer_competitor(
@@ -1299,7 +1410,9 @@ def _caption_paragraphs(story: ProgressStory) -> tuple[str, str]:
         "CSV still has the pre-split-K NF4 row). Occupancy-fix NF4-only: C:\\dev\\models\\runs\\wave2-streamA-3b-nf4. "
         "Honest pair: C:\\dev\\models\\runs\\qwen25-3b-paired-20260913. 14B: docs/runs/qwen25-14b plus lab-qwen25-14b.png "
         "panel F. 20B: docs/runs/internlm20b. Hard 12: docs/runs/hard-qwen25 and docs/img/hard-eval-qwen25.png. "
-        "GSM8K slice: C:\\dev\\models\\runs\\eval-qwen25-3b-gsm8k-200-20260913. Nsight: docs/runs/ncu. "
+        "GSM8K slice: C:\\dev\\models\\runs\\eval-qwen25-3b-gsm8k-200-20260913. "
+        "20B hard NF4-only: C:\\dev\\models\\runs\\hard-internlm20b-nf4-20260914 (not docs/runs/internlm20b). "
+        "Nsight n1/n16: docs/runs/ncu. True n32 vs 2×n16: C:\\dev\\models\\runs\\ncu-n32-vs-2xn16-20260913. "
         "Committed competitors: docs/runs/competitor-qwen25-3b (SKIP matrix). Live bitsandbytes-nf4 smoke: "
         "C:\\dev\\models\\runs\\competitor-qwen25-3b-20260913-bnb-e2e (not written into git)."
     )
@@ -1318,12 +1431,30 @@ def _caption_paragraphs(story: ProgressStory) -> tuple[str, str]:
         )
     else:
         both = "No live bitsandbytes tok/s on disk; the committed competitor matrix stays SKIP. "
+    internlm = story.internlm_hard
+    if internlm is not None and internlm.n_ok is not None:
+        internlm_txt = (
+            f" Live 20B NF4 {_frac(internlm.n_ok, internlm.n_items)} has no BF16 pair "
+            "and is not a quality headline."
+        )
+    else:
+        internlm_txt = ""
+    if story.n32.present and story.n32.ratio is not None:
+        n32_txt = (
+            f" True n32 vs two n16 is {story.n32.ratio:.2f}× on one q_proj GEMM, not TTFT; "
+            "TokenLoop still chunks at 16. "
+        )
+    else:
+        n32_txt = " TokenLoop still chunks at 16. "
     caveats = (
         "Do not mix 17.0, 31.6 and 28.4. 31.6 is unpaired NF4 after the occupancy fix; 28.4 is the same-session pair. "
         "Do not quote 14B nvidia-smi 11,955 vs 8,913. 20B BF16 generate is a recorded miss (unpatched). "
-        "Hard 12 is a regression fixture. GSM8K-200 is greedy, first 200 of 1,319, extractor-sensitive; "
+        "Hard 12 is a regression fixture."
+        + internlm_txt
+        + " GSM8K-200 is greedy, first 200 of 1,319, extractor-sensitive; "
         "quality_all_ok=false is expected; do not headline it as GSM8K quality. No WikiText PPL is published. "
-        "CTA counts are gpu/nf4/plan.py. Nsight is occupancy and pipes of chr_nf4_gemm, not tok/s. "
+        "CTA counts are gpu/nf4/plan.py. Nsight is occupancy and pipes of chr_nf4_gemm, not tok/s."
+        + n32_txt
         + both
     )
     return sources, caveats
@@ -1397,7 +1528,7 @@ def progress_plate(story: ProgressStory | None = None) -> Any:
         # --- header -------------------------------------------------------
         fig.text(
             x0,
-            1.0 - 0.28 / fig_h,
+            1.0 - 0.24 / fig_h,
             "What changed on this card — RTX 3080 12 GB, first lab graphs through now",
             ha="left",
             va="top",
@@ -1406,7 +1537,7 @@ def progress_plate(story: ProgressStory | None = None) -> Any:
         )
         fig.text(
             x0,
-            1.0 - 0.56 / fig_h,
+            1.0 - 0.50 / fig_h,
             "One stack, one consumer card. Every number names the plate it came from. "
             "Decode compares HuggingFace generate (BF16) against CompressedLinear + TokenLoop (NF4).",
             ha="left",
@@ -1415,7 +1546,7 @@ def progress_plate(story: ProgressStory | None = None) -> Any:
             color=INK_SOFT,
         )
         band_h = 0.28
-        band_bottom = fig_h - _HEADER_H + 0.74
+        band_bottom = fig_h - _HEADER_H + 0.40
         fig.add_artist(
             plt.Rectangle(
                 (x0, band_bottom / fig_h),
@@ -1438,7 +1569,7 @@ def progress_plate(story: ProgressStory | None = None) -> Any:
             fontsize=SIZE_NOTE,
             color=INK_SOFT,
         )
-        _ribbon(fig, x0, (fig_h - _HEADER_H + 0.16) / fig_h, plot_w / FIG_W, fig_h)
+        _ribbon(fig, x0, (fig_h - _HEADER_H + 0.08) / fig_h, plot_w / FIG_W, fig_h)
 
         # --- row 1: decode + occupancy --------------------------------------
         y_row1 = fig_h - _HEADER_H - _ROW1_H
@@ -1487,7 +1618,7 @@ def progress_plate(story: ProgressStory | None = None) -> Any:
                 (_ROW3_H - 0.14) / fig_h,
             ]
         )
-        _panel_d_hard(ax_d, story.hard)
+        _panel_d_hard(ax_d, story.hard, story.internlm_hard)
         ax_e = fig.add_axes(
             [
                 (_M_LEFT + half + gap_in) / FIG_W,
@@ -1525,7 +1656,7 @@ def progress_plate(story: ProgressStory | None = None) -> Any:
                 ]
             )
             if drawer is _footer_ncu:
-                drawer(ax, story.ncu, story.occupancy.live_max_n)
+                drawer(ax, story.ncu, story.occupancy.live_max_n, story.n32)
             elif drawer is _footer_competitor:
                 drawer(ax, story.competitor, story.paired_3b.codecs.get("nf4"))
             else:

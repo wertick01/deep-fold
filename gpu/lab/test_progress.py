@@ -299,6 +299,32 @@ def gate_optional_live() -> None:
         )
     else:
         check("GSM8K dir absent (gap, not a headline)", True, story.gsm8k.note[:80])
+    if story.internlm_hard is not None:
+        check(
+            "20B hard is live NF4 8/12, no BF16 pair",
+            story.internlm_hard.codec == "nf4"
+            and story.internlm_hard.n_ok == 8
+            and story.internlm_hard.n_items == 12
+            and story.internlm_hard.size == "20B",
+            f"{story.internlm_hard.n_ok}/{story.internlm_hard.n_items}",
+        )
+    else:
+        check("20B hard dir absent (gap, not a remembered 8/12)", True, "no internlm hard CSV")
+    if story.n32.present:
+        check(
+            "true n32 is ~1.63× faster than two n16 on q_proj",
+            story.n32.true_n32_us is not None
+            and story.n32.two_n16_us is not None
+            and story.n32.ratio is not None
+            and abs(story.n32.true_n32_us - 69.02) < 0.05
+            and abs(story.n32.two_n16_us - 112.66) < 0.05
+            and abs(story.n32.ratio - 1.632) < 0.01
+            and "prefill_n32" in story.n32.n32_kernel
+            and "prefill_n16" in story.n32.two_kernel,
+            f"{story.n32.true_n32_us}/{story.n32.two_n16_us}/{story.n32.ratio}",
+        )
+    else:
+        check("n32 comparison dir absent (gap)", True, "no comparison.csv")
 
 
 def gate_render() -> None:
@@ -335,6 +361,18 @@ def gate_render() -> None:
     check("card limit 12288 is drawn as text", "12,288" in text, "12288")
     check("hard 7/12 is on the plate", "7/12" in text, "7/12")
     check("hard plate is named", "hard-eval-qwen25" in text, "hard plate name")
+    if story.internlm_hard is not None:
+        check(
+            "20B NF4 8/12 is labeled as live, not a BF16 pair",
+            "20B NF4 8/12" in text and "no BF16" in text,
+            "20B hard",
+        )
+    if story.n32.present:
+        check(
+            "n32 vs two n16 is on footer F and TokenLoop stays 16",
+            "True n32" in text and "1.63" in text and "chunks at 16" in text,
+            "n32 footer",
+        )
     check(
         "occupancy labels sit outside the bars",
         "q/o starved" in text and "q/o after fix" in text and "k/v after fix" in text,

@@ -249,6 +249,16 @@ Set-Location C:\dev\deep-fold
 У hard флаг **`--codec`** (единственное число), не `--codecs`.
 `--codec both` не запускать на 20B в этом env.
 
+Прогон 2026-09-14 (карта была свободна, OOM не было, ~17.6 мин):
+
+`C:\dev\models\runs\hard-internlm20b-nf4-20260914`
+
+**8/12**, все 12 пунктов. Промахи: train `30` vs `240`, machines `6` vs
+`108`, sheep `8` vs `9`, bat-and-ball `0` vs `0.05`. Среднее TTFT **1318 ms**,
+**4.4 tok/s**, пик `nvidia-smi` **12067 MiB**, `max_seq=1024`. Это **не**
+дым 605 ms / 5.01 tok/s при `max_seq=512` и **не** `docs/runs/internlm20b`.
+Не заголовок качества. BF16 не патчили.
+
 ## 6. Что никогда не попадает в git
 
 - Весь `C:\dev\models\eval\` — Hub-клоны, `.git`, LFS, parquet.
@@ -292,17 +302,15 @@ Smoke Paris / Berlin / 323 по-прежнему не качество
 
 ## Next — порядок работ после этого eval
 
-1. **WikiText JSON + прогон.** Адаптер NLL уже в `gpu/lab/nll.py`. Дальше —
-   конвертировать **test** split в `kind=ppl` JSON (вне git), прогнать на
-   свободной карте, **потом** считать `exp(nll / n_tokens)`. До прогона
-   числа в README нет. Rolling windows, если статья длиннее `max_seq`.
-2. **InternLM 20B hard**, если GPU свободна: команда §5, новый out dir.
-   Не патчить BF16 remote code. Не затирать `docs/runs/internlm20b`.
-3. **Competitor isolated venvs** — рецепт [`competitor-venvs.md`](competitor-venvs.md).
-   Не `pip` в `torch-gpu`. Не воровать GPU, если там уже жирный python.
-4. **ncu: n32 vs 2×n16.** Prefill-оракул `--plan-n` уже есть;
-   `LIVE_MAX_N` всё ещё 16. Сначала замерить широкий тайл, **потом**
-   решать, размораживать ли TokenLoop. Pavel в этой задаче не размораживал.
+1. **WikiText PPL** — локальный срез уже гоняли; число **не** в README.
+2. **InternLM 20B hard** — сделано, §5 выше. Не затирать `docs/runs/internlm20b`.
+3. **Competitor isolated venvs** — bitsandbytes live smoke есть вне git;
+   остальные SKIP. Не `pip` в `torch-gpu`.
+4. **ncu: n32 vs 2×n16** — сделано:
+   `C:\dev\models\runs\ncu-n32-vs-2xn16-20260913`. True n32 на 3B `q_proj`
+   **69 µs** против двух n16 **113 µs** (**1.63×**). Occupancy не просел.
+   `LIVE_MAX_N` всё ещё 16. Размораживать TokenLoop только после e2e TTFT 3B
+   и numerics `--plan-n` на живых весах. n64 не мерили.
 5. **Не утверждать vs Marlin.** Occupancy / DRAM из `docs/runs/ncu/` —
    наше ядро, не tok/s против Marlin / AWQ / bitsandbytes / llama.cpp.
 )

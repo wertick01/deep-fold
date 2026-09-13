@@ -255,13 +255,16 @@ Committed 3B (`docs/runs/qwen25-3b/`, VRAM figure above) is the starved kernel:
 23.1 vs 17.0 tok/s — do not read decode speed off that picture. Occupancy-fix
 NF4-only was 31.6 tok/s / 167 ms, not a BF16 pair. The table above is the
 same-session pair, 24.3 vs 28.4 tok/s. 14B/20B working sets vs the 12,288 MiB
-card line; hard eval 7/12, 9/12, 8/12, 10/12 on a separate Q&A sheet. A local
-GSM8K slice of the first 200 of 1,319 main-test items (greedy,
-`max_new_tokens = 256`) is on this picture only — not a published GSM8K score.
-One live bitsandbytes NF4 smoke row (22.8 tok/s / 57 ms) is in the footer;
-that is a different stack, not a kernel ranking. This plate summarizes; it
-does not replace `lab-qwen25-14b.png` panel F or `hard-eval-qwen25.png`.
-Redraw: `python -m gpu.lab.progress_plate --redraw`.*
+card line; hard eval 7/12, 9/12, 8/12, 10/12 on a separate Q&A sheet. Live
+InternLM 20B NF4 hard is 8/12 with no BF16 pair — not that Q&A sheet, not a
+quality headline. A local GSM8K slice of the first 200 of 1,319 main-test
+items (greedy, `max_new_tokens = 256`) is on this picture only — not a
+published GSM8K score. Footer F has true n32 vs two n16 on one `q_proj`
+GEMM; TokenLoop still chunks at 16. One live bitsandbytes NF4 smoke row
+(22.8 tok/s / 57 ms) is in the footer; that is a different stack, not a kernel
+ranking. This plate summarizes; it does not replace `lab-qwen25-14b.png`
+panel F or `hard-eval-qwen25.png`. Redraw:
+`python -m gpu.lab.progress_plate --redraw`.*
 
 ### Qwen2.5-14B-Instruct — BF16 spills off the card, NF4 stays on it
 
@@ -323,6 +326,14 @@ is the CUDA working set after load — again the allocator's reserved pool:
 of BF16 is served from system RAM, which Windows reports as shared GPU memory.
 NF4 decode is 5.01 tok/s with a smoke pass.
 
+A later 12-item hard eval on the same NF4 weights, NF4 only, scored **8/12**
+(misses: train, machines, sheep, bat-and-ball). Mean TTFT **1318 ms**,
+**4.4 tok/s**, peak `nvidia-smi` **12067 MiB**, `max_seq=1024`. That is a
+different plate from the smoke 605 ms / 5.01 tok/s at `max_seq=512`. CSVs
+live in `C:\dev\models\runs\hard-internlm20b-nf4-20260914` — **not**
+[`docs/runs/internlm20b/`](docs/runs/internlm20b/). Twelve items are a
+regression, not WikiText / GSM8K / MMLU, and there is no BF16 pair.
+
 This is the first table here with a **`—` column instead of a baseline**, and
 the dashes are the honest part. Both halves need reading separately.
 
@@ -379,6 +390,11 @@ questions, gold answers, raw replies, what missed and why, and load / prefill
 [`docs/runs/hard-qwen25/`](docs/runs/hard-qwen25/). Twelve items are a
 regression, not WikiText / GSM8K / MMLU. NF4 matching or beating BF16 on
 this set does not mean quantization is lossless.*
+
+InternLM 20B was scored later, NF4 only: **8/12**, no BF16 pair, not drawn
+on `hard-eval-qwen25.png`. Live dir
+`C:\dev\models\runs\hard-internlm20b-nf4-20260914`. Same twelve prompts,
+same extractor; still a regression fixture.
 
 ### The chat script
 
@@ -437,7 +453,9 @@ quality benchmark, and no accuracy claim is made from it. Method:
   [`gpu/nf4/numerics.py`](gpu/nf4/numerics.py). Neither is a quality benchmark.
 - **Time-to-first-token is prompt processing,** and the two sides do it
   differently: BF16 uses the HuggingFace path, NF4 uses chunks of at most 16
-  positions.
+  positions. A true n32 GEMM on 3B `q_proj` is 1.63× faster than two n16
+  launches (69 µs vs 113 µs); occupancy held. `LIVE_MAX_N` is still 16
+  until an end-to-end 3B TTFT remeasure. That microbench is not 139 vs 45 ms.
 - **Display memory is inside the `nvidia-smi` reading.** It is real, it is on
   the same card, and it is not subtracted away here.
 - **Generate is Ampere `sm_86` only.** Ada / Hopper / Blackwell are a named

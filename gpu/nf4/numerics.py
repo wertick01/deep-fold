@@ -14,8 +14,11 @@ Two error legs, never added into one number:
 ``gpu/nf4/verify.py`` prints an extra ``vs bf16(W)`` figure that mixes both legs;
 this table does not. It never loads the 3B, never JIT-compiles the extension
 unless ``--cuda`` is set *and* nvidia-smi says the card is free (or
-``--cuda-force`` after the lab). Live ``N`` stays in 1..16. ``--plan-n``
-allows 17..64 for the kernel oracle only; TokenLoop still chunks at 16.
+``--cuda-force`` after the lab). Live ``N`` stays in 1..``LIVE_MAX_N``.
+``--plan-n`` allows up to 64 for the kernel oracle only; TokenLoop chunks
+above ``LIVE_MAX_N``. Kernel rows ``fail`` when any |Y_gpu−Y_cpu| exceeds
+max(0.05, half BF16 ULP).
+Kernel rows ``fail`` when any |Y_gpu−Y_cpu| exceeds max(0.05, half BF16 ULP).
 
 Table / CSV columns: ``leg, surface, kind, source, M, K, N, status,
 max_abs, mean_abs, rmse, cosine, rel, skip_reason``. ``leg=quant`` is BF16 vs
@@ -50,6 +53,7 @@ __all__ = [
     "BUSY_USED_MIB",
     "CHR_SLOT",
     "HF_WEIGHT",
+    "KERNEL_ABS_LIMIT",
     "LEG_KERNEL",
     "LEG_QUANT",
     "Metrics",
@@ -59,6 +63,7 @@ __all__ = [
     "cuda_nf4_gemm",
     "encode_nf4_chunked",
     "error_metrics",
+    "kernel_floor_ok",
     "format_table",
     "gpu_busy_reason",
     "load_chr_nf4_cpu",
@@ -71,6 +76,12 @@ __all__ = [
 
 LEG_QUANT = "quant"
 LEG_KERNEL = "kernel"
+
+#: Stitch floor 1 for |Y| ~ O(1). When |Y_cpu| sits in a wide BF16 binade the
+#: store is allowed a half-ULP of that value (0.0625 on [16, 32)). A flat
+#: 0.05 otherwise flags rounding of y≈17 as a kernel bug; n16 on the same x
+#: hits the same element.
+KERNEL_ABS_LIMIT = 0.05
 
 #: nvidia-smi used-MiB. Display is inside that meter (~2 GiB on this WDDM
 #: 3080) and is not a lab. A live 3B NF4 session sits near 3900 MiB after
@@ -168,6 +179,27 @@ def error_metrics(got: np.ndarray, ref: np.ndarray) -> Metrics:
     else:
         rel = float(np.linalg.norm(e64) / nr)
     return Metrics(max_abs=max_abs, mean_abs=mean_abs, rmse=rmse, cosine=cosine, rel=rel)
+
+
+def bf16_half_ulp(ref: np.ndarray) -> np.ndarray:
+    """Half ULP of BF16 at each |ref| (7 mantissa bits, same exponent as FP32)."""
+    ax = np.maximum(np.abs(np.asarray(ref, dtype=np.float32)), np.float32(2.0**-126))
+    exp = np.floor(np.log2(ax.astype(np.float64)))
+    return 0.5 * np.power(2.0, exp - 7.0)
+
+
+def kernel_floor_ok(got: np.ndarray, ref: np.ndarray) -> bool:
+    """Kernel vs CPU NF4 GEMM. Per element: |err| ≤ max(0.05, half BF16 ULP).
+
+    ``docs/spec/stitch-gpu.md``: 0.05 is the O(1) floor. BF16 ``y`` store of a
+    large logit is allowed its own half-ULP. 2026-09-14 live 3B ``q_proj`` N=32
+    was 0.05847 at y≈−17.44 (one element, bit-identical to 2×n16).
+    """
+    if got.shape != ref.shape:
+        raise ValueError(f"shape {got.shape} != {ref.shape}")
+    err = np.abs(np.asarray(got, dtype=np.float32) - np.asarray(ref, dtype=np.float32))
+    allow = np.maximum(KERNEL_ABS_LIMIT, bf16_half_ulp(ref))
+    return bool(np.all(err <= allow))
 
 
 def encode_nf4_chunked(
@@ -457,7 +489,27 @@ def run_kind(
             )
         )
         return rows
-    rows.append(_row(LEG_KERNEL, "y", kind, source, m, k, n, error_metrics(y_gpu, y_cpu)))
+    metrics = error_metrics(y_gpu, y_cpu)
+    if kernel_floor_ok(y_gpu, y_cpu):
+        rows.append(_row(LEG_KERNEL, "y", kind, source, m, k, n, metrics))
+        return rows
+    rows.append(
+        _row(
+            LEG_KERNEL,
+            "y",
+            kind,
+            source,
+            m,
+            k,
+            n,
+            metrics,
+            status="fail",
+            skip_reason=(
+                f"kernel floor: maxabs={metrics.max_abs:.5g} "
+                f"(0.05 or half BF16 ULP of |Y_cpu|)"
+            ),
+        )
+    )
     return rows
 
 
@@ -746,7 +798,8 @@ def format_table(rows: Sequence[Row]) -> str:
             f"{_fmt(None if m is None else m.rel):>10}"
         )
         if r.skip_reason:
-            lines.append(f"        skip: {r.skip_reason}")
+            tag = "skip" if r.status == "skip" else r.status
+            lines.append(f"        {tag}: {r.skip_reason}")
     return "\n".join(lines)
 
 
@@ -915,9 +968,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\nwrote {args.csv}")
     n_ok = sum(1 for r in rows if r.status == "ok")
     n_skip = sum(1 for r in rows if r.status == "skip")
-    print(f"\nok={n_ok} skip={n_skip}  golden SS9.4 mae/rmse still in gpu.tests.nf4_oracle")
-    # A skip-only kernel is not a failure. Empty output is.
-    return 0 if rows else 2
+    n_fail = sum(1 for r in rows if r.status == "fail")
+    print(
+        f"\nok={n_ok} skip={n_skip} fail={n_fail}  "
+        "golden SS9.4 mae/rmse still in gpu.tests.nf4_oracle"
+    )
+    if not rows:
+        return 2
+    return 1 if n_fail else 0
 
 
 if __name__ == "__main__":

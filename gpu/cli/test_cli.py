@@ -125,6 +125,39 @@ def _write_chr(path: Path, *, hidden: int, layers: int, vocab: int) -> Path:
     return path
 
 
+def _write_vq_chr(path: Path, *, hidden: int, layers: int, vocab: int) -> Path:
+    """Same as :func:`_write_chr` but the one tensor is ``codec=vq``."""
+    codebook_end = 4096 + 8192
+    index_end = codebook_end + 64 * (128 // 8) * 2
+    root = {
+        "magic": "CHR0",
+        "version": 1,
+        "arch": "qwen2",
+        "hidden_size": hidden,
+        "intermediate_size": hidden * 4,
+        "num_layers": layers,
+        "vocab_size": vocab,
+        "tile": {"row": 64, "col_group": 8},
+        "tensors": {
+            "model.layers.0.self_attn.q_proj": {
+                "kind": "q",
+                "codec": "vq",
+                "layer": 0,
+                "shape": [64, 128],
+                "group_size": 8,
+                "n_codebooks": 2,
+                "codebook_bits": 8,
+                "codebook": [4096, codebook_end],
+                "index": [codebook_end, index_end],
+            }
+        },
+    }
+    js = json.dumps(root, separators=(",", ":")).encode("utf-8")
+    body = struct.pack("<Q", len(js)) + js
+    path.write_bytes(body + b"\x00" * (index_end - len(body)))
+    return path
+
+
 def _config(model: Path, **fields) -> Path:
     model.mkdir(parents=True, exist_ok=True)
     (model / "config.json").write_text(json.dumps(fields), encoding="utf-8")
@@ -136,7 +169,8 @@ class _CompressArgs:
 
     def __init__(self, **over) -> None:
         self.__dict__.update(
-            inp=None, out=None, chr_bin=None, force=False, quiet=True
+            inp=None, out=None, chr_bin=None, force=False, quiet=True, codec="auto",
+            vram_mib=None,
         )
         self.__dict__.update(over)
 
@@ -192,6 +226,8 @@ class _RunArgs:
             no_compress=False,
             quiet=True,
             debug=False,
+            codec="auto",
+            max_resident_mib=None,
         )
         self.__dict__.update(over)
 
@@ -531,6 +567,99 @@ def test_run_compresses_once_when_no_chr_exists() -> None:
     assert resolved is not None and resolved.name.endswith(".nf4.chr")
 
 
+def test_run_auto_refuses_when_nf4_would_not_fit() -> None:
+    """H2-1: 32B-shaped config on 12 GB packs NF4 overflow, never VQ."""
+    qwen32 = dict(
+        hidden_size=5120,
+        intermediate_size=27648,
+        num_hidden_layers=64,
+        num_attention_heads=40,
+        num_key_value_heads=8,
+        vocab_size=152064,
+        tie_word_embeddings=False,
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        model = _fake_model(root, "qwen2", **qwen32)
+        home = root / "home"
+        spy = _Spy(0)
+        original = run_mod.compress_to
+        run_mod.compress_to = spy  # type: ignore[assignment]
+        os.environ["DEEPFOLD_HOME"] = str(home)
+        os.environ["DEEPFOLD_CHR_BIN"] = str(_REPO / "chr.exe")
+        err = io.StringIO()
+        try:
+            with redirect_stderr(err):
+                resolved, code = run_mod._resolve_weights(
+                    _RunArgs(), str(model), vram_mib=12288
+                )
+        finally:
+            run_mod.compress_to = original  # type: ignore[assignment]
+            os.environ.pop("DEEPFOLD_HOME", None)
+            os.environ.pop("DEEPFOLD_CHR_BIN", None)
+
+    text = err.getvalue()
+    assert code == 0 and resolved is not None
+    assert resolved.name.endswith(".nf4.chr"), resolved.name
+    assert len(spy.calls) == 1, "32B auto must pack NF4 overflow once"
+    assert spy.calls[0][1].get("codec") == "nf4"
+    assert "overflow" in text and "H2" in text
+    assert "vq" not in (spy.calls[0][1].get("codec") or "")
+
+
+def test_run_codec_vq_flag_packs_vq_on_a_small_model() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        model = _fake_model(root, "qwen2")
+        home = root / "home"
+        spy = _Spy(0)
+        original = run_mod.compress_to
+        run_mod.compress_to = spy
+        os.environ["DEEPFOLD_HOME"] = str(home)
+        os.environ["DEEPFOLD_CHR_BIN"] = str(_REPO / "chr.exe")
+        try:
+            resolved, code = run_mod._resolve_weights(
+                _RunArgs(codec="vq"), str(model), vram_mib=12288
+            )
+        finally:
+            run_mod.compress_to = original
+            os.environ.pop("DEEPFOLD_HOME", None)
+            os.environ.pop("DEEPFOLD_CHR_BIN", None)
+    assert code == 0 and resolved is not None and resolved.name.endswith(".vq2.chr")
+    assert spy.calls[0][1].get("codec") == "vq"
+
+
+def test_run_codec_vq_uses_existing_vq2_without_packing() -> None:
+    """``--codec vq`` may load a sibling ``.vq2.chr``; auto must not."""
+    qwen32 = dict(
+        hidden_size=5120,
+        intermediate_size=27648,
+        num_hidden_layers=64,
+        num_attention_heads=40,
+        num_key_value_heads=8,
+        vocab_size=152064,
+        tie_word_embeddings=False,
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        model = _fake_model(root, "qwen2", name="Qwen2.5-32B", **qwen32)
+        mine = _write_vq_chr(root / "qwen25-32b.vq2.chr", hidden=5120, layers=64, vocab=152064)
+        spy = _Spy(0)
+        original = run_mod.compress_to
+        run_mod.compress_to = spy  # type: ignore[assignment]
+        os.environ["DEEPFOLD_HOME"] = str(root / "home")
+        os.environ.pop("DEEPFOLD_CHR", None)
+        try:
+            resolved, code = run_mod._resolve_weights(
+                _RunArgs(codec="vq"), str(model), vram_mib=12288
+            )
+        finally:
+            run_mod.compress_to = original  # type: ignore[assignment]
+            os.environ.pop("DEEPFOLD_HOME", None)
+    assert code == 0 and resolved == mine, f"picked {resolved}"
+    assert spy.calls == [], "matching .vq2.chr was on disk; nothing should pack"
+
+
 def test_run_refuses_a_gguf_chr_flag() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         model = _fake_model(Path(tmp), "qwen2")
@@ -605,6 +734,79 @@ def test_parser_run_flags() -> None:
         "D:/m", "D:/m.chr", "hi", 16,
     )
     assert args.warmup is True and args.raw is False
+    assert args.codec == "auto"
+    assert args.max_resident_mib is None
+    vq = build_parser().parse_args(["run", "--model", "D:/m", "--codec", "vq"])
+    assert vq.codec == "vq"
+    cap = build_parser().parse_args(
+        ["run", "--model", "D:/m", "--max-resident-mib", "2048"]
+    )
+    assert cap.max_resident_mib == 2048
+    packed = build_parser().parse_args(["compress", "--in", "D:/m"])
+    assert packed.codec == "auto"
+
+
+_QWEN3B_FIT = dict(
+    hidden_size=2048,
+    intermediate_size=11008,
+    num_hidden_layers=36,
+    num_attention_heads=16,
+    num_key_value_heads=2,
+    vocab_size=151936,
+    tie_word_embeddings=True,
+)
+_QWEN32B_OVERFLOW = dict(
+    hidden_size=5120,
+    intermediate_size=27648,
+    num_hidden_layers=64,
+    num_attention_heads=40,
+    num_key_value_heads=8,
+    vocab_size=152064,
+    tie_word_embeddings=False,
+)
+
+
+def test_max_resident_mib_flag_is_bytes() -> None:
+    cap = run_mod._max_resident_bytes(
+        _RunArgs(max_resident_mib=512), "unused", Path("x.chr"), 12288
+    )
+    assert cap == 512 * 1024 * 1024
+
+
+def test_3b_auto_without_flag_does_not_pass_cap() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        model = _fake_model(Path(tmp), "qwen2", **_QWEN3B_FIT)
+        dummy = Path(tmp) / "unused.nf4.chr"
+        cap = run_mod._max_resident_bytes(
+            _RunArgs(codec="auto", max_seq=512), str(model), dummy, 12288
+        )
+    assert cap is None
+
+
+def test_codec_vq_no_auto_overflow_cap() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        model = _fake_model(Path(tmp), "qwen2", name="Qwen2.5-32B", **_QWEN32B_OVERFLOW)
+        cap = run_mod._max_resident_bytes(
+            _RunArgs(codec="vq", max_seq=2048), str(model), Path("x.vq2.chr"), 12288
+        )
+    assert cap is None
+
+
+def test_32b_auto_overflow_computes_cap() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        model = _fake_model(Path(tmp), "qwen2", name="Qwen2.5-32B", **_QWEN32B_OVERFLOW)
+        original = run_mod._overflow_cap_from_chr
+        run_mod._overflow_cap_from_chr = lambda *a, **k: 4242  # type: ignore[assignment]
+        try:
+            cap = run_mod._max_resident_bytes(
+                _RunArgs(codec="auto", max_seq=2048),
+                str(model),
+                Path("x.nf4.chr"),
+                12288,
+            )
+        finally:
+            run_mod._overflow_cap_from_chr = original  # type: ignore[assignment]
+    assert cap == 4242
 
 
 def test_parser_doctor_flags() -> None:
@@ -1121,6 +1323,42 @@ def test_compress_will_not_silently_overwrite_an_existing_chr() -> None:
         run_mod.compress_to = original  # type: ignore[assignment]
     assert code == 1 and "--force" in err.getvalue()
     assert spy.calls == [], "an existing .chr must not be repacked by accident"
+
+
+def test_compress_auto_refuses_vq_when_nf4_would_not_fit() -> None:
+    """H2-1: 32B compress --codec auto packs NF4 overflow, never VQ."""
+    qwen32 = dict(
+        hidden_size=5120,
+        intermediate_size=27648,
+        num_hidden_layers=64,
+        num_attention_heads=40,
+        num_key_value_heads=8,
+        vocab_size=152064,
+        tie_word_embeddings=False,
+    )
+    spy = _Spy(0)
+    original = run_mod.compress_to
+    run_mod.compress_to = spy  # type: ignore[assignment]
+    err = io.StringIO()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            model = _fake_model(Path(tmp), "qwen2", name="Qwen2.5-32B", **qwen32)
+            os.environ["DEEPFOLD_CHR_BIN"] = str(_REPO / "chr.exe")
+            os.environ["DEEPFOLD_HOME"] = str(Path(tmp) / "home")
+            try:
+                with redirect_stderr(err):
+                    code = run_mod.compress(
+                        _CompressArgs(inp=str(model), vram_mib=12288)
+                    )
+            finally:
+                os.environ.pop("DEEPFOLD_CHR_BIN", None)
+                os.environ.pop("DEEPFOLD_HOME", None)
+    finally:
+        run_mod.compress_to = original  # type: ignore[assignment]
+    text = err.getvalue()
+    assert code == 0
+    assert len(spy.calls) == 1 and spy.calls[0][1].get("codec") == "nf4"
+    assert "overflow" in text and "H2" in text
 
 
 # --------------------------------------------------------------------------- #

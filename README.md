@@ -7,13 +7,13 @@
 
 # deep-fold
 
-**Abstract.** The sixteen-bit weights of a 14- or 20-billion-parameter language
-model occupy about 28–38 GiB — two to three times a 12 GiB graphics card. Writing
-the same weights in fewer bits does not, by itself, solve the problem. If each
-layer is expanded back to sixteen bits before the matrix multiply, a full-size
-copy of that layer exists in video memory at the peak, and the card's occupancy
-is still governed by the original size. The overflow is served from system memory
-over the bus; generation then slows to a crawl.
+**Abstract.** The sixteen-bit weights of a 14-, 20-, or 32-billion-parameter
+language model occupy about 28–65 GiB — two to five times a 12 GiB graphics card.
+Writing the same weights in fewer bits does not, by itself, solve the problem. If
+each layer is expanded back to sixteen bits before the matrix multiply, a
+full-size copy of that layer exists in video memory at the peak, and the card's
+occupancy is still governed by the original size. The overflow is served from
+system memory over the bus; generation then slows to a crawl.
 
 This work does not propose a new numerical code. The four-bit representation
 used here (NF4: sixteen reconstruction levels, groups of 64, one scale factor
@@ -34,15 +34,18 @@ During each multiply the processor reads a small tile of packed values,
 reconstructs them in registers (the smallest and fastest storage on the chip),
 multiplies, and discards the reconstructed numbers. In video memory the layer
 remains packed from load to exit. The model's footprint on the card is
-therefore the compressed size, not the sixteen-bit size. A complete layer never
-exists on the device at any instant.
+therefore the compressed size, not the sixteen-bit size. When that compressed
+file is still larger than the card, only a resident subset plus two copy slots
+sit in HBM; the tail stays packed in pinned host RAM. A complete dense layer
+never exists on the device at any instant.
 
 Measured on one RTX 3080 12 GB: Qwen2.5-14B-Instruct (~28 GiB of 16-bit
 weights) generates at about 6.6 tokens per second; internlm2.5-20B (~38 GiB)
 at about 5.0. The same 14B model in sixteen bits, spilling off the card, is 0.92.
-When both copies fit (3B), packed decode is now faster on this card; time to
-the first token is still slower. Compression pays when the uncompressed model
-does not fit.
+Qwen2.5-32B packed NF4 is still ~16.6 GiB and does not fit; the overflow path
+streams a pinned host tail and generates at 2.31 tokens per second. When both
+copies fit (3B), packed decode is now faster on this card; time to the first
+token is still slower. Compression pays when the uncompressed model does not fit.
 
 ![deep-fold: persistent packed weights for LLM inference — CPU packs NF4 into a CHR0 file, CompressedLinear holds packed codes and group scales in VRAM, each GEMM reconstructs a tile in registers and discards it](scheme.png)
 
@@ -102,18 +105,24 @@ full-size copy of any layer is ever created on the card. It has four parts.
    compressed, not the text being processed.
 4. **A generation loop that uses those layers.** `gpu.loop.TokenLoop` drives the
    transformer's layer graph itself, processing the prompt in chunks of at most
-   16 positions. On the compressed path it does not call
-   `transformers.generate`.
+   32 positions. On the compressed path it does not call
+   `transformers.generate`. When the packed table fits (3B, 14B, 20B), those
+   weights stay on the card. When it does not (Qwen2.5-32B on 12 GB),
+   `CopyRing` copies overflow matrices from a pinned host image into two static
+   device slots; `chr_nf4_gemm` still reconstructs in registers. There is still
+   no dense `[M,K]` copy in video memory. `--codec auto` never picks VQ.
 
 **Why this matters.** Because no second, full-precision copy of a layer is ever
 materialized, the memory a model occupies on the card is set by the size of its
 *compressed* weights rather than by the size of its original 16-bit weights. A
 14B model with 28,172 MiB of 16-bit weights and a 20B model with 37,882 MiB both
 load onto a 12 GiB card and generate text there, at 7,483 MiB and 10,062 MiB of
-packed weights respectively. Compression is not a free speedup: on a 3B model
-both forms fit on this card. Decode on the packed path is now ahead (28.4
-against 24.3 tokens per second on a same-session pair); time to the first token is
-still slower (139 against 45 ms). The result is about which models can run
+packed weights respectively. A 32B model with ~16,599 MiB of packed NF4 still
+misses the card; 9,716 MiB stay resident and 6,885 MiB stream from pinned host
+memory, at 2.31 tokens per second. Compression is not a free speedup: on a 3B model
+both forms fit on this card. Decode on the packed path is now ahead (28.7
+against 24.8 tokens per second on a same-session pair); time to the first token is
+still slower (92 against 48 ms). The result is about which models can run
 at all on a given card, and at what rate once they do.
 
 ### The mental model to discard
@@ -125,8 +134,10 @@ fit. Reconstruction is local to the arithmetic of one tile of one matrix
 multiply, it takes place in registers rather than in video memory, and its
 results are thrown away when the tile is finished. The packed weights in video
 memory are read-only for the whole run, and there is no point in time at which a
-full-size copy of a layer exists on the card. There is also no swapping of
-layers in and out over the bus.
+full-size copy of a layer exists on the card. On the all-resident path (3B, 14B,
+20B) there is no swapping of layers over the bus. On 32B the packed table itself
+does not fit: whole **packed** matrices move H2D into two slots. That is not
+unpack-layer-into-VRAM. A dense layer is still never resident.
 
 ## What is adopted from earlier work, and what is original here
 
@@ -152,7 +163,8 @@ Stating this precisely matters more than sounding novel.
 - `CompressedLinear`, which is constructed so that a dense weight matrix is not
   representable in it.
 - The Ampere kernel itself.
-- `TokenLoop`, and the measurements below.
+- `TokenLoop`, the overflow `CopyRing` / pinned `HostImage`, and the
+  measurements below.
 
 The claim is the complete, working stack — container, host-side layer, GPU
 kernel, and end-to-end measurements on a single 12 GiB card — under which packed
@@ -181,8 +193,11 @@ registers for the lifetime of a tile and are never written back to global memory
 (the card's main video memory), so the resident weight footprint equals the
 packed footprint for the whole run. Activations, the KV cache, norms, and the LM
 head stay BF16. `gpu.loop.TokenLoop` drives the layer graph directly, with
-prefill in chunks of at most 16 positions; it does not call
-`transformers.generate`.
+prefill in chunks of at most 32 positions; it does not call
+`transformers.generate`. When packed NF4 exceeds the card,
+`gpu.host.HostImage` and `gpu.loop.CopyRing` stream HOST matrices into two
+static slots; the HBM weight number is then `report.device_mib` (9,716 on 32B),
+not the full packed file.
 
 ## Measured on an RTX 3080 12 GB
 
@@ -208,20 +223,20 @@ Weights and `.chr` files are not in git. The lab's CSVs and figures are, under
 *Figure. VRAM traces from the committed plate in `docs/runs/qwen25-3b/` (that
 CSV still has the pre-split-K NF4 row, 17.0 tok/s / 212 ms). Do not read decode
 speed off this picture. The markdown table below is a live same-session BF16+NF4
-pair from `C:\dev\models\runs\qwen25-3b-paired-20260913`, not that committed folder.*
+pair from `C:\dev\models\runs\qwen25-3b-paired-20260914`, not that committed folder.*
 
 | | BF16 (HF `generate`) | NF4 (`CompressedLinear` + `TokenLoop`) |
 |---|---:|---:|
 | Weight MiB | 5,886 | 1,563 |
-| nvidia-smi after load (MiB) | 8,237 | 3,897 |
-| Peak nvidia-smi (MiB) | 8,910 | 4,036 |
-| Mean TTFT (ms) | 45 | 139 |
-| Mean decode tok/s | 24.3 | 28.4 |
+| nvidia-smi after load (MiB) | 8,722 | 4,382 |
+| Peak nvidia-smi (MiB) | 8,781 | 4,525 |
+| Mean TTFT (ms) | 48 | 92 |
+| Mean decode tok/s | 24.8 | 28.7 |
 | Smoke (Paris / Berlin / 323) | pass | pass |
 
-Source: live paired wave in `C:\dev\models\runs\qwen25-3b-paired-20260913`
+Source: live paired wave in `C:\dev\models\runs\qwen25-3b-paired-20260914`
 (`summary.csv`, `messages.csv`; `gpu.lab.run --codec both`, isolated worker
-processes). That directory is outside git. The committed folder
+processes, NF4 `prefill_chunk=32`). That directory is outside git. The committed folder
 [`docs/runs/qwen25-3b/`](docs/runs/qwen25-3b/) is the older plate and was not
 overwritten. Packed weights still 1,563 MiB (4.25 bits/weight).
 
@@ -229,23 +244,22 @@ A 3B model fits either way on this card. Occupancy was the bottleneck: decode
 used to launch one block per 128 output rows, **16 CTAs** for the query and
 output projections and **2** for grouped key/value, against **70 streaming
 multiprocessors**. After a 64-row tile and split-K those counts are **128**
-and **64**. NF4 decode is **28.4 tok/s** against a same-session BF16 **24.3**.
+and **64**. NF4 decode is **28.7 tok/s** against a same-session BF16 **24.8**.
 A prior NF4-only WAVE 2 figure was 31.6 tok/s; this paired re-measure is lower,
 still ahead of the BF16 row taken in the same session. This is **not** a
 claim that the kernel is faster than Marlin, AWQ, bitsandbytes, or llama.cpp.
 A live bitsandbytes NF4 smoke on the same three prompts was **22.8 tok/s /
 57 ms** (`C:\dev\models\runs\competitor-qwen25-3b-20260913-bnb-e2e\`, isolated
-venv, `Linear4bit` over the HF tree). Our paired NF4 is **28.4 tok/s / 139 ms**.
+venv, `Linear4bit` over the HF tree). Our paired NF4 is **28.7 tok/s / 92 ms**.
 Report both; they are different stacks, not a kernel ranking. The committed
 folder [`docs/runs/competitor-qwen25-3b/`](docs/runs/competitor-qwen25-3b/)
 stays the SKIP matrix. Kernel µs on bitsandbytes are still 0/63 SKIP.
-Time to first token is still worse: **139 against 45 ms**, so prefill is the
-next floor. GEMM counters (Nsight, L2-rotated weights, not live tok/s): on
+Time to first token is still worse: **92 against 48 ms**, so prefill is still
+the next floor, less so than the n16 TokenLoop pair (139 against 45 ms). GEMM
+counters (Nsight, L2-rotated weights, not live tok/s): on
 3B `q_proj` decode, DRAM ~5%, tensor pipe ~1.4%, warp occupancy ~16%; prefill
-N=16 occupancy ~29% — [`docs/runs/ncu/`](docs/runs/ncu/). The next prefill
-floor is sequence **N≥17** (one wider GEMM instead of 16-column chunks):
-planned as BN=32 and BN=64 in `gpu/nf4/plan.py`, same BM/BK as the live n16
-tile. TokenLoop still chunks at 16 and is not raised in this wave. Compression still
+N=16 occupancy ~29% — [`docs/runs/ncu/`](docs/runs/ncu/). TokenLoop
+`LIVE_MAX_N` is **32**. n64 is plan-only. Compression still
 pays when the uncompressed model does not fit. The 14B figures further down
 are fit-versus-spill, not a kernel win, and they
 are not a comparison against Marlin.
@@ -258,13 +272,13 @@ are not a comparison against Marlin.
 Committed 3B (`docs/runs/qwen25-3b/`, VRAM figure above) is the starved kernel:
 23.1 vs 17.0 tok/s — do not read decode speed off that picture. Occupancy-fix
 NF4-only was 31.6 tok/s / 167 ms, not a BF16 pair. The table above is the
-same-session pair, 24.3 vs 28.4 tok/s. 14B/20B working sets vs the 12,288 MiB
+same-session pair, 24.8 vs 28.7 tok/s. 14B/20B working sets vs the 12,288 MiB
 card line; hard eval 7/12, 9/12, 8/12, 10/12 on a separate Q&A sheet. Live
 InternLM 20B NF4 hard is 8/12 with no BF16 pair — not that Q&A sheet, not a
 quality headline. A local GSM8K slice of the first 200 of 1,319 main-test
 items (greedy, `max_new_tokens = 256`) is on this picture only — not a
 published GSM8K score. Footer F has true n32 vs two n16 on one `q_proj`
-GEMM; TokenLoop still chunks at 16. One live bitsandbytes NF4 smoke row
+GEMM; TokenLoop now chunks at 32. One live bitsandbytes NF4 smoke row
 (22.8 tok/s / 57 ms) is in the footer; that is a different stack, not a kernel
 ranking. This plate summarizes; it does not replace `lab-qwen25-14b.png`
 panel F or `hard-eval-qwen25.png`. Redraw:
@@ -375,6 +389,60 @@ empty: recorded miss, not a crashed cell.
   `<|im_end|>` (92542). Missing 92542 is why an early run talked past the end
   of every answer.
 
+### Qwen2.5-32B-Instruct — packed NF4 does not fit; overflow speaks at 2.31 tok/s
+
+![Qwen2.5-32B-Instruct NF4 overflow on RTX 3080 12 GB: packed 16.6 GiB vs resident 9.7 GiB vs streamed 6.9 GiB, product decode 2.31 tok/s, policy D CopyRing](docs/img/h2-qwen25-32b.png)
+
+*Figure. Overflow plate, not a 14B/20B pair and not a kernel ranking.
+Packed NF4 (16,599 MiB) crosses the 12,288 MiB card line; resident HBM weights
+are 9,716 MiB. A pinned host tail of 6,885 MiB (96 matrices) is copied one
+matrix at a time into two 71.72 MiB slots. Product decode is **2.31 tok/s**.
+The pageable ~0.8 bar is a pin bug, not the design. Serial copy floor 3.6 tok/s
+is 277 ms if wall equalled copy — measured wall is ~432 ms/tok. Redraw:
+`python -m gpu.lab.h2_plate --redraw`.*
+
+| | BF16 (HF `generate`) | NF4 overflow (`CopyRing` + `TokenLoop`) |
+|---|---:|---:|
+| Packed weight MiB | — | 16,599 |
+| Resident HBM weights MiB | — | 9,716 |
+| Streamed host MiB | — | 6,885 |
+| nvidia-smi after load (MiB) | — | 11,268 |
+| Peak nvidia-smi (MiB) | — | 11,933 |
+| torch allocated after load (MiB) | — | 9,933 |
+| KV cache MiB (preallocated, `max_seq=2048`) | — | 512 |
+| Mean TTFT (ms) | — | 1,006 |
+| Mean decode tok/s | — | 2.31 |
+| Smoke (Paris / Berlin / 323) | not run | pass |
+
+Source: live `C:\dev\models\runs\h2-qwen25-32b-20260914-234048`
+(`python -m gpu.lab.h2_trace --no-timing`). A slim copy
+(`data_path.md`, `messages.json`, `gate.txt`) is in
+[`docs/runs/h2-qwen25-32b/`](docs/runs/h2-qwen25-32b/). The `.chr` is not in git.
+
+This table has the same honest dashes as 20B, for a different reason. BF16 32B
+was never loaded: ~65 GiB of sixteen-bit weights do not fit, and there is
+nothing to compare against. Packed NF4 at 16,599 MiB **also** misses a 12 GiB
+card. What ran is overflow: policy D keeps q/k/v/o, embed, and `lm_head` on
+the device, streams every `down_proj` and the tail `gate`/`up` pairs (layers
+48–63) from pinned host RAM, and still reconstructs only in `chr_nf4_gemm`
+registers. **Do not quote 11,933 against 12,288 as leftover headroom on an
+empty card.** Display memory is inside `nvidia-smi`. **Do not quote 16,599 as
+the HBM footprint** — that is `report.device_mib` = 9,716.
+
+**NF4 overflow ran.** Three independent turns answered
+`The capital of France is Paris.`, `The capital of Germany is Berlin.`, and
+`323` at 2.30–2.32 tok/s and ~1.0 s TTFT. `nvidia-smi` sat flat at
+11,926–11,933 MiB across decode. The serial copy floor of the 6,885 MiB tape
+is 277 ms/tok (~3.6 tok/s if wall were copy). Measured wall is ~432 ms/tok:
+the floor is beaten, the ~3 tok/s HBM ceiling is not. 10 tok/s is not a claim.
+
+**Hard-12 was not started.** Smoke 3/3 is not quality. A twelve-item hard eval
+on this path is a separate, slow plate (`docs/eval-32b.md`).
+
+Pageable H2D (~0.8 tok/s) was a footgun: `Tensor.is_pinned` is a method, so
+`bool(arena.is_pinned)` was always true and the host image stayed pageable.
+The product number is 2.31, not 0.8.
+
 ### Hard eval — 3B and 14B, twelve reasoning items
 
 Smoke (Paris / Berlin / 323) is not a quality score. The figure below is a
@@ -402,7 +470,7 @@ same extractor; still a regression fixture.
 
 ### The chat script
 
-Identical for both codecs, in all three models:
+Identical for both codecs, in all four models:
 
 ```
 Reply with one short sentence. What is the capital of France?
@@ -433,18 +501,26 @@ quality benchmark, and no accuracy claim is made from it. Method:
   cap: do not quote 11,976 against 11,828. The 20B result is 37,882 MiB against
   10,273 MiB, plus NF4 at 5.01 tok/s with a smoke pass. There is no BF16 speed
   baseline.
+- **On 32B packed NF4 still does not fit.** The product path is overflow, not
+  “all 16,599 MiB in HBM”. Resident weights are 9,716 MiB; 6,885 MiB stream
+  from pinned host RAM. Peak `nvidia-smi` 11,933 includes the desktop. Decode
+  **2.31 tok/s** is CopyRing + TokenLoop + `chr_nf4_gemm`, not vs Marlin /
+  llama.cpp / BF16 32B (never run). Smoke 3/3 is not quality; hard-12 is not
+  started. Do not quote pageable ~0.8 as the H2 design. Serial copy 277 ms is
+  not the measured 432 ms wall. `--codec auto` never picks VQ.
 - **Decode tokens per second compare two different stacks:** HuggingFace
   `generate` with dense BF16 matrix multiplies on one side, our NF4 loop with
   reconstruction inside the multiply on the other. Both are reported, in both
-  directions. On 3B, NF4 decode is now ahead on this card (28.4 tok/s against
-  24.3) on a same-session pair in `C:\dev\models\runs\qwen25-3b-paired-20260913`
+  directions. On 3B, NF4 decode is now ahead on this card (28.7 tok/s against
+  24.8) on a same-session pair in `C:\dev\models\runs\qwen25-3b-paired-20260914`
   (a prior NF4-only WAVE 2 figure was 31.6; that mixed 31.6-vs-23.1 claim is
-  retired). TTFT is still BF16: 45 against 139 ms. On 14B, NF4 is far ahead, and
+  retired). TTFT is still BF16: 48 against 92 ms. On 14B, NF4 is far ahead, and
   there the reason is that BF16 has already spilled into system RAM. On 20B NF4
   is 5.01 tok/s; there is no BF16 generate, so there is no speed comparison.
-  **Do not write that deep-fold is faster than existing 4-bit engines.** A live
+  On 32B NF4 overflow is 2.31 tok/s; there is no BF16 generate and no
+  all-resident NF4. **Do not write that deep-fold is faster than existing 4-bit engines.** A live
   bitsandbytes NF4 smoke (same three prompts, isolated venv) was 22.8 tok/s /
-  57 ms; our paired NF4 is 28.4 tok/s / 139 ms. Those are different stacks
+  57 ms; our paired NF4 is 28.7 tok/s / 92 ms. Those are different stacks
   (`Linear4bit` vs `CompressedLinear` + `TokenLoop`), not a kernel ranking.
   Marlin, AWQ, GPTQ/Marlin, ExLlamaV2, llama.cpp CUDA Q4, and vLLM were not
   timed. The committed folder
@@ -456,10 +532,14 @@ quality benchmark, and no accuracy claim is made from it. Method:
   [`gpu/nf4/verify.py`](gpu/nf4/verify.py); split quantization vs kernel error is
   [`gpu/nf4/numerics.py`](gpu/nf4/numerics.py). Neither is a quality benchmark.
 - **Time-to-first-token is prompt processing,** and the two sides do it
-  differently: BF16 uses the HuggingFace path, NF4 uses chunks of at most 16
+  differently: BF16 uses the HuggingFace path, NF4 uses chunks of at most 32
   positions. A true n32 GEMM on 3B `q_proj` is 1.63× faster than two n16
-  launches (69 µs vs 113 µs); occupancy held. `LIVE_MAX_N` is still 16
-  until an end-to-end 3B TTFT remeasure. That microbench is not 139 vs 45 ms.
+  launches (69 µs vs 113 µs); occupancy held. On live `q_proj` n32 matched
+  two n16 bit-for-bit; the 0.058 maxabs spike is one element and a BF16
+  half-ULP, not a tile bug. TokenLoop `LIVE_MAX_N=32`. Same-session pair
+  2026-09-14 (`qwen25-3b-paired-20260914`): mean TTFT **48 vs 92 ms**, decode
+  **24.8 vs 28.7 tok/s**. An NF4-only n32 plate the same day was 91 ms / 28.6
+  tok/s. The older n16 pair was 45 against 139 ms. n64 is not live.
 - **Display memory is inside the `nvidia-smi` reading.** It is real, it is on
   the same card, and it is not subtracted away here.
 - **Generate is Ampere `sm_86` only.** Ada / Hopper / Blackwell are a named
@@ -550,6 +630,13 @@ Or redraw a committed plate from its CSVs:
 ```powershell
 python -c "from gpu.lab import comparison_figure; comparison_figure(r'docs/runs/qwen25-3b')"
 python -m gpu.lab.progress_plate --redraw
+python -m gpu.lab.h2_plate --redraw
+```
+
+32B overflow smoke (Ampere, live weights outside git):
+
+```powershell
+python -m gpu.lab.h2_trace --no-timing
 ```
 
 ## Docs
@@ -560,9 +647,12 @@ the lab writeup are in English.
 | | |
 |---|---|
 | Progress plate (first graphs through now) | [docs/img/progress-3080.png](docs/img/progress-3080.png) |
+| 32B overflow plate | [docs/img/h2-qwen25-32b.png](docs/img/h2-qwen25-32b.png) |
 | Lab method and how to read the figure | [docs/lab.md](docs/lab.md) |
 | CLI (`doctor` / `run`) | [docs/ux.md](docs/ux.md) |
 | Hard eval (3B/14B questions, replies, times) | [docs/eval-hard-qwen25.md](docs/eval-hard-qwen25.md) |
+| 32B smoke + hard-12 sheet (hard not run) | [docs/eval-32b.md](docs/eval-32b.md) |
+| H2 overflow ring | [docs/plan-h2-ring.md](docs/plan-h2-ring.md) |
 | Nsight GEMM counters (not tok/s) | [docs/runs/ncu/](docs/runs/ncu/) |
 | 4-bit competitor matrix (all SKIP) | [docs/runs/competitor-qwen25-3b/](docs/runs/competitor-qwen25-3b/) |
 | Isolated competitor venvs (later) | [docs/competitor-venvs.md](docs/competitor-venvs.md) |

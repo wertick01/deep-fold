@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 
 from ._deps import ChrMatrix, nf4_gemm
+from .host_image import HostImage, cpu_is_pinned, maybe_pin
 from gpu.nf4.plan import LIVE_MAX_N
 
 __all__ = ["CompressedLinear", "nf4_linear", "k_pad"]
@@ -40,9 +41,8 @@ def nf4_linear(
 
     HuggingFace hands ``[..., K]``; the kernel wants ``[K, N]`` and returns
     ``[M, N]``. ``N = prod(lead)``: decode launch when ``N==1`` (a view, no
-    transpose copy); ``N<=LIVE_MAX_N`` (16) is one prefill GEMM; ``N>16`` is
-    chunked here because live ``chr_nf4_gemm`` returns -2 above 16. The host
-    does not pad tails to 16. Wide N=32/64 is plan-only (``gpu.nf4.plan``).
+    transpose copy); ``N<=LIVE_MAX_N`` (32) is one prefill GEMM; above that
+    the host chunks. The host does not pad tails to 16. n64 is plan-only.
     """
     if x.shape[-1] != K:
         raise ValueError(f"x has {x.shape[-1]} features, this linear takes K={K}")
@@ -119,6 +119,7 @@ class CompressedLinear(nn.Module):
         else:
             self.register_buffer("bias", None)
         self.chr_name: str | None = None
+        self.host_image: HostImage | None = None
 
     # --- the weight that is not there ------------------------------------
     @property
@@ -133,12 +134,21 @@ class CompressedLinear(nn.Module):
 
     @property
     def is_loaded(self) -> bool:
-        return self.packed.numel() > 0
+        return int(self.packed.numel()) > 0 or self.host_image is not None
 
     @property
     def nbytes(self) -> int:
-        """Device bytes held by this layer's weight."""
-        return self.packed.numel() + self.scale.numel() * 2
+        """Device bytes held by this layer's weight. HOST overflow is 0."""
+        return int(self.packed.numel()) + int(self.scale.numel()) * 2
+
+    @property
+    def home(self) -> str:
+        """``device`` if packed lives here, ``host`` if :attr:`host_image`, else ``empty``."""
+        if int(self.packed.numel()) > 0:
+            return "device"
+        if self.host_image is not None:
+            return "host"
+        return "empty"
 
     # --- loading ----------------------------------------------------------
     def attach(self, matrix: ChrMatrix) -> None:
@@ -163,6 +173,29 @@ class CompressedLinear(nn.Module):
         self.packed = matrix.packed
         self.scale = matrix.scale
         self.chr_name = matrix.name
+        self.host_image = None
+
+    def attach_host(self, image: HostImage) -> None:
+        """Keep packed/scale empty; the matrix lives on pinned host (CopyRing is H2-4).
+
+        No H2D. ``maybe_pin`` runs here if the arena is still pageable.
+        """
+        if (int(image.M), int(image.K)) != (self.M, self.K):
+            raise ValueError(
+                f"HostImage is [{image.M},{image.K}], this linear is [{self.M},{self.K}]"
+            )
+        if int(image.K_pad) != self.K_pad:
+            raise ValueError(f"HostImage K_pad {image.K_pad} != {self.K_pad}")
+        arena = image.arena
+        if arena.is_cpu and not cpu_is_pinned(arena):
+            pinned = maybe_pin(arena)
+            if pinned is not arena:
+                image = HostImage(pinned, image.M, image.K, image.K_pad)
+        if int(self.packed.numel()) != 0:
+            dev = self.packed.device
+            self.packed = torch.empty(0, dtype=torch.uint8, device=dev)
+            self.scale = torch.empty(0, dtype=torch.float16, device=dev)
+        self.host_image = image
 
     def set_bias(self, bias: torch.Tensor) -> None:
         if self.bias is None:
@@ -173,6 +206,12 @@ class CompressedLinear(nn.Module):
 
     # --- forward ----------------------------------------------------------
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.host_image is not None and int(self.packed.numel()) == 0:
+            raise RuntimeError(
+                f"CompressedLinear[{self.M},{self.K}] "
+                f"({self.chr_name or 'unnamed'}) is host-resident; "
+                "CopyRing (H2-4) is required, refuse silent H2D in forward"
+            )
         if not self.is_loaded:
             raise RuntimeError(
                 f"CompressedLinear[{self.M},{self.K}] "
@@ -184,5 +223,5 @@ class CompressedLinear(nn.Module):
         return (
             f"in_features={self.in_features}, out_features={self.out_features}, "
             f"bias={self.bias is not None}, codec=nf4-g{GROUP_SIZE}, "
-            f"K_pad={self.K_pad}, loaded={self.is_loaded}"
+            f"K_pad={self.K_pad}, home={self.home}, loaded={self.is_loaded}"
         )

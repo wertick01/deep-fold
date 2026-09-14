@@ -16,8 +16,8 @@ order of §2, with every long-lived tensor owned by Python:
 
 Activations are ``[N, hidden]``; the kernel's ``[K, N]`` is one ``.t()`` away
 (:class:`gpu.loop.graph.GemmGroup`). ``N == 1`` for decode, and also for prefill
-while the wave-2 GEMM is decode-only -- :func:`gpu.loop.graph.nf4_max_n` asks the
-kernel instead of assuming, and :attr:`TokenLoop.prefill_chunk` reports the
+while a GEMM is decode-only -- :func:`gpu.loop.graph.linear_max_n` asks the
+loaded codec instead of assuming, and :attr:`TokenLoop.prefill_chunk` reports the
 answer. Either way the prompt is walked *once*: the KV cache is filled slot by
 slot and never recomputed, which is the difference that matters for tok/s.
 """
@@ -31,8 +31,9 @@ from typing import Callable, Sequence
 import torch
 import torch.nn.functional as F
 
-from .graph import Gemm, GemmGroup, GraphedGemmGroup, capture, nf4_max_n
+from .graph import Gemm, GemmGroup, GraphedGemmGroup, capture, linear_max_n
 from .kv_cache import KVCache
+from .ring import CopyRing
 from gpu.nf4.plan import LIVE_MAX_N
 
 __all__ = [
@@ -78,8 +79,9 @@ def split_internlm_wqkv(
     n_rep = n_q // n_kv
     packed = y.view(n, n_kv, 2 + n_rep, head_dim)
     q = packed[:, :, :n_rep, :].reshape(n, n_q, head_dim)
-    k = packed[:, :, -2, :].contiguous()
-    v = packed[:, :, -1, :].contiguous()
+    # Views. KVCache.write copies into the slot; a contiguous here is a second copy.
+    k = packed[:, :, -2, :]
+    v = packed[:, :, -1, :]
     return q, k, v
 
 
@@ -96,8 +98,8 @@ def split_concat_qkv(
     n = int(y.shape[0])
     q_dim, kv_dim = n_q * head_dim, n_kv * head_dim
     q = y[:, :q_dim].reshape(n, n_q, head_dim)
-    k = y[:, q_dim : q_dim + kv_dim].reshape(n, n_kv, head_dim).contiguous()
-    v = y[:, q_dim + kv_dim : q_dim + 2 * kv_dim].reshape(n, n_kv, head_dim).contiguous()
+    k = y[:, q_dim : q_dim + kv_dim].reshape(n, n_kv, head_dim)
+    v = y[:, q_dim + kv_dim : q_dim + 2 * kv_dim].reshape(n, n_kv, head_dim)
     return q, k, v
 
 
@@ -114,9 +116,9 @@ def split_neox_qkv(
         raise ValueError(f"neox_interleaved is MHA only; got n_q={n_q}, n_kv={n_kv}")
     n = int(y.shape[0])
     packed = y.view(n, n_q, 3, head_dim)
-    q = packed[:, :, 0, :].contiguous()
-    k = packed[:, :, 1, :].contiguous()
-    v = packed[:, :, 2, :].contiguous()
+    q = packed[:, :, 0, :]
+    k = packed[:, :, 1, :]
+    v = packed[:, :, 2, :]
     return q, k, v
 
 
@@ -138,6 +140,55 @@ def _rope(t: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor
     d = t.shape[-1] // 2
     rot = torch.cat((-t[..., d:], t[..., :d]), dim=-1)
     return t * cos + rot * sin
+
+
+class _RopePairGraph:
+    """One CUDA graph for decode ``N==1`` RoPE of Q and K.
+
+    Eager RoPE is four ATen launches (cat, mul, mul, add) times two heads.
+    On WDDM that is milliseconds across 64 layers; a captured pair plus two
+    ``copy_`` into static buffers is the same math at one replay. Inputs are
+    device activations, never H2D or host packed. Prefill ``N!=1`` stays eager.
+    """
+
+    __slots__ = ("graph", "q", "k", "cos", "sin", "q_out", "k_out", "q_live", "k_live")
+
+    def __init__(self, n_q: int, n_kv: int, head_dim: int, device, dtype) -> None:
+        self.q = torch.empty((1, n_q, head_dim), device=device, dtype=dtype)
+        self.k = torch.empty((1, n_kv, head_dim), device=device, dtype=dtype)
+        self.cos = torch.empty((1, 1, head_dim), device=device, dtype=dtype)
+        self.sin = torch.empty((1, 1, head_dim), device=device, dtype=dtype)
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side):
+            for _ in range(3):
+                _rope(self.q, self.cos, self.sin)
+                _rope(self.k, self.cos, self.sin)
+            side.synchronize()
+            self.graph = torch.cuda.CUDAGraph()
+            self.graph.capture_begin()
+            try:
+                self.q_out = _rope(self.q, self.cos, self.sin)
+                self.k_out = _rope(self.k, self.cos, self.sin)
+            finally:
+                self.graph.capture_end()
+        torch.cuda.current_stream().wait_stream(side)
+        # Graph-pool tensors cannot be ``select``/``view``-sliced on the token
+        # path (resident 3B: Offset increment outside graph capture).
+        self.q_live = torch.empty_like(self.q)
+        self.k_live = torch.empty_like(self.k)
+
+    def load_pos(self, cos: torch.Tensor, sin: torch.Tensor) -> None:
+        self.cos.copy_(cos)
+        self.sin.copy_(sin)
+
+    def apply(self, q: torch.Tensor, k: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        self.q.copy_(q)
+        self.k.copy_(k)
+        self.graph.replay()
+        self.q_live.copy_(self.q_out)
+        self.k_live.copy_(self.k_out)
+        return self.q_live, self.k_live
 
 
 def _rope_tables(
@@ -201,6 +252,10 @@ class Generation:
     stop_token: int | None = None
     prefill_chunk: int = 1
     graph: str = "off"
+    h2d_bytes: int = 0
+    h2d_copies: int = 0
+    h2d_copy_ms: float = 0.0
+    h2d_forwards: int = 0
 
     @property
     def decode_tok_s(self) -> float:
@@ -219,7 +274,7 @@ class Generation:
 class TokenLoop:
     """Drives a loaded ``gpu.host`` skeleton. Allocates once, in ``__init__``.
 
-    ``model`` must already be through ``load_chr_nf4`` -- the loop reads the NF4
+    ``model`` must already be through ``load_model`` -- the loop reads the packed
     buffers out of the modules once (:class:`~gpu.loop.graph.Gemm`) and then never
     touches ``nn.Module`` attribute lookup on the token path again.
 
@@ -239,6 +294,8 @@ class TokenLoop:
         overlap: bool = True,
         device: torch.device | str | None = None,
         plan=None,
+        slots=None,
+        ring_timing: bool = False,
     ) -> None:
         from gpu.graphs import IMPLEMENTED_FAMILIES, refuse
 
@@ -300,6 +357,7 @@ class TokenLoop:
             raise ValueError(f"norm={norm!r}; expected 'exact' or 'fast'")
         self.norm_mode = norm
         self.rms = rms_norm_exact if norm == "exact" else _rms_norm_fast
+        self._rms_shape = (self.hidden,)
 
         # --- weights, flattened out of the module tree ----------------------
         # Two side streams, made once and shared by every group: q/k/v and
@@ -307,7 +365,25 @@ class TokenLoop:
         # own (see GemmGroup). Set overlap=False for the strictly serial loop.
         self.overlap = bool(overlap) and torch.cuda.is_available()
         self._streams = tuple(torch.cuda.Stream() for _ in range(2)) if self.overlap else ()
+        if slots is None:
+            slots = getattr(model, "deepfold_slots", None)
+        self.slots = slots
+        self._ring = CopyRing(slots, timing=ring_timing) if slots is not None else None
+        self._compute = None
+        if (
+            self._ring is not None
+            and torch.cuda.is_available()
+            and torch.device(slots.device).type == "cuda"
+        ):
+            # Overflow: compute on an explicit stream, not the legacy default.
+            self._compute = torch.cuda.Stream()
         self._groups = self._build_groups()
+        if self._ring is not None:
+            for grp in self._groups:
+                grp.ring = self._ring
+        self._host_tape = tuple(
+            g for grp in self._groups for g in grp.gemms if g.home == "host"
+        )
         self._apply(self._groups)
         self.graph_mode = "off"
         self.graph_error: str | None = None
@@ -324,11 +400,15 @@ class TokenLoop:
         self.cos, self.sin = _rope_tables(
             model, plan, self.max_seq, self.device, torch.bfloat16
         )
+        # [max_seq, 1, head_dim] so a token slice is already broadcast-ready.
+        self.cos = self.cos.unsqueeze(1)
+        self.sin = self.sin.unsqueeze(1)
         self._tok = torch.zeros(1, dtype=torch.long, device=self.device)
         self._gqa = _sdpa_has_gqa()
-        # WAVE freeze: LIVE_MAX_N is 16. Do not pass 32/64 until the wide
-        # kernels are measured; decode stays on the existing n8/n16 path.
-        self.prefill_chunk = min(nf4_max_n(LIVE_MAX_N), self.max_seq)
+        self._rope_pair: _RopePairGraph | None = None
+        self.prefill_chunk = min(
+            linear_max_n(self._groups[0].gemms[0].codec, LIVE_MAX_N), self.max_seq
+        )
 
     # --- setup ------------------------------------------------------------
     def _build_groups(self) -> list[GemmGroup]:
@@ -391,13 +471,25 @@ class TokenLoop:
         Qwen2.5-3B ties ``lm_head`` to ``embed_tokens``: one ``[151936, 2048]``
         blob serves both, and counting it twice would invent 156 MiB.
         """
-        seen = {m.packed.data_ptr(): m.nbytes for g in self._groups for m in g.gemms}
+        seen: dict[int, int] = {}
+        for g in self._groups:
+            for m in g.gemms:
+                if m.home == "host":
+                    continue
+                t = m.packed if m.codec != "vq" else m.index
+                if t is None or int(t.numel()) == 0:
+                    continue
+                seen[t.data_ptr()] = m.nbytes
         packed = getattr(self.embed, "packed", None)
-        if packed is not None:
+        index = getattr(self.embed, "index", None)
+        if packed is not None and packed.numel() > 0:
             seen[packed.data_ptr()] = self.embed.nbytes
+        elif index is not None and index.numel() > 0:
+            seen[index.data_ptr()] = self.embed.nbytes
         elif getattr(self.embed, "weight", None) is not None:
             w = self.embed.weight
-            seen[w.data_ptr()] = w.numel() * w.element_size()
+            if w.numel() > 0:
+                seen[w.data_ptr()] = w.numel() * w.element_size()
         return sum(seen.values())
 
     def reset(self) -> None:
@@ -406,17 +498,22 @@ class TokenLoop:
 
     @torch.no_grad()
     def capture_graphs(self) -> str:
-        """CUDA graph plan A. Idempotent; returns the resulting mode.
+        """CUDA graph plan A on all-DEVICE groups. Idempotent; returns the mode.
 
-        Must be called after :meth:`warmup`. On failure the loop keeps running
-        eager and :attr:`graph_error` says why -- eager is the contract, the graph
-        is the optimization.
+        Must be called after :meth:`warmup`. HOST overflow groups stay eager.
+        ``graph_mode`` is ``"linears"`` if at least one group is captured. On a
+        DEVICE capture failure the loop keeps running eager and
+        :attr:`graph_error` says why -- eager is the contract, the graph is
+        the optimization. Mixed sessions do not use ``graph_error="overflow"``.
         """
         if self.graph_mode == "linears":
             return self.graph_mode
+        # Mixed overflow: DEVICE groups graph, HOST groups stay eager. capture()
+        # skips HOST warmup (no CopyRing in that path). Not a full "overflow" off.
         runners, mode, err = capture(self._groups)
         self._apply(runners)
         self.graph_mode, self.graph_error = mode, err
+        self._capture_decode_glue()
         return mode
 
     def drop_graphs(self) -> str:
@@ -448,43 +545,182 @@ class TokenLoop:
         if seq > self.max_seq:
             raise ValueError(f"position {seq} past max_seq={self.max_seq}")
 
+        compute = self._compute
+        if compute is None:
+            return self._forward_body(ids, start_pos, n, seq, logits, all_positions)
+        outer = torch.cuda.current_stream()
+        compute.wait_stream(outer)
+        with torch.cuda.stream(compute):
+            out = self._forward_body(ids, start_pos, n, seq, logits, all_positions)
+        if out is not None:
+            out.record_stream(outer)
+        outer.wait_stream(compute)
+        return out
+
+    def _capture_decode_glue(self) -> None:
+        """Capture decode-N=1 RoPE. Idle GPU only; not on the token path.
+
+        GEMM plan A stays :func:`capture`. This graph is device activations
+        only -- no H2D, no host packed, no CopyRing.
+        """
+        if self._rope_pair is not None:
+            return
+        if self.device.type != "cuda" or not torch.cuda.is_available():
+            return
+        try:
+            torch.cuda.synchronize()
+            self._rope_pair = _RopePairGraph(
+                self.n_q, self.n_kv, self.head_dim, self.device, torch.bfloat16
+            )
+        except Exception:
+            self._rope_pair = None
+
+    def _forward_body(
+        self,
+        ids: torch.Tensor,
+        start_pos: int,
+        n: int,
+        seq: int,
+        logits: bool,
+        all_positions: bool,
+    ):
+        ring = self._ring
+        if ring is not None:
+            ring.arm(self._host_tape)
+            ring.prefetch()  # first overflow H2D overlaps embed
         x = self.embed(ids)  # [n, hidden] bf16
-        cos = self.cos[start_pos:seq].unsqueeze(1)  # [n, 1, head_dim]
-        sin = self.sin[start_pos:seq].unsqueeze(1)
-        mask = None if n == 1 else self._causal_mask(start_pos, seq)
+        cos = self.cos[start_pos:seq]  # [n, 1, head_dim]
+        sin = self.sin[start_pos:seq]
+        if n == 1:
+            x = self._decode_layers(x, start_pos, seq, cos, sin)
+        else:
+            x = self._prefill_layers(
+                x, start_pos, n, seq, cos, sin, self._causal_mask(start_pos, seq)
+            )
+
+        self.kv.seq_len = seq
+        if all_positions:
+            src = x
+        elif not logits:
+            return None
+        else:
+            src = x if n == 1 else x[-1:]
+        if n == 1:
+            hidden = F.rms_norm(src, self._rms_shape, self.final_norm, self.eps)
+        else:
+            hidden = self.rms(src, self.final_norm, self.eps)
+        self._prefetch_next_token(n)
+        y = self._head.run(hidden)[0]
+        if all_positions:
+            return y if y.dim() == 2 else y.view(1, -1)
+        return y.view(-1)
+
+    def _decode_layers(
+        self,
+        x: torch.Tensor,
+        pos: int,
+        seq: int,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+    ) -> torch.Tensor:
+        """Layer body for ``N == 1``. Locals, GQA view, fused RMS, optional RoPE graph.
+
+        ``norm="exact"`` stays the TokenLoop default and the prefill ``N!=1``
+        path. Decode uses :func:`torch.nn.functional.rms_norm` (same formula,
+        one fused kernel). CUDA bf16 can differ by ~1 ULP from
+        :func:`rms_norm_exact`; greedy needles are quality checks, not bitwise
+        logits. Do not ``torch.compile`` this method: it would break CUDA graphs
+        and CopyRing.
+        """
+        kv = self.kv
+        write, view = kv.write, kv.view
+        eps = self.eps
+        hd = self.head_dim
+        n_q, n_kv, n_rep = self.n_q, self.n_kv, self.n_rep
+        q_dim, scaling = self.q_dim, self.scaling
+        pack = self._pack
+        sdpa = F.scaled_dot_product_attention
+        silu = F.silu
+        pair = self._rope_pair
+        if pair is not None:
+            pair.load_pos(cos, sin)
+        shape = self._rms_shape
+        norm1, norm2, layers = self._norm1, self._norm2, self._layer
+
+        for li, (g_qkv, g_o, g_gu, g_down) in enumerate(layers):
+            h = F.rms_norm(x, shape, norm1[li], eps)
+            if pack is not None:
+                q, k, v = pack(g_qkv.run(h)[0], n_q, n_kv, hd)
+            else:
+                q, k, v = g_qkv.run(h)
+                q = q.view(1, n_q, hd)
+                k = k.view(1, n_kv, hd)
+                v = v.view(1, n_kv, hd)
+            if pair is not None:
+                q, k = pair.apply(q, k)
+            else:
+                q = _rope(q, cos, sin)
+                k = _rope(k, cos, sin)
+            write(li, pos, k, v)
+            k_all, v_all = view(li, seq)
+            a = sdpa(q.view(1, n_kv, n_rep, hd), k_all, v_all, scale=scaling)
+            x = x.add_(g_o.run(a.reshape(1, q_dim))[0])
+
+            h = F.rms_norm(x, shape, norm2[li], eps)
+            gate, up = g_gu.run(h)
+            x = x.add_(g_down.run(silu(gate) * up)[0])
+        return x
+
+    def _prefill_layers(
+        self,
+        x: torch.Tensor,
+        start_pos: int,
+        n: int,
+        seq: int,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> torch.Tensor:
         kv, eps = self.kv, self.eps
         rms, hd, n_kv = self.rms, self.head_dim, self.n_kv
         pack = self._pack
+        n_q = self.n_q
+        attend = self._attend
+        silu = F.silu
+        norm1, norm2, layers = self._norm1, self._norm2, self._layer
 
-        for li in range(self.n_layers):
-            g_qkv, g_o, g_gu, g_down = self._layer[li]
-
-            h = rms(x, self._norm1[li], eps)
+        for li, (g_qkv, g_o, g_gu, g_down) in enumerate(layers):
+            h = rms(x, norm1[li], eps)
             if pack is not None:
-                q, k, v = pack(g_qkv.run(h)[0], self.n_q, n_kv, hd)
+                q, k, v = pack(g_qkv.run(h)[0], n_q, n_kv, hd)
             else:
                 q, k, v = g_qkv.run(h)
-                q = q.reshape(n, self.n_q, hd)
+                q = q.reshape(n, n_q, hd)
                 k = k.reshape(n, n_kv, hd)
                 v = v.reshape(n, n_kv, hd)
             q = _rope(q, cos, sin)
             k = _rope(k, cos, sin)
             kv.write(li, start_pos, k, v)
             k_all, v_all = kv.view(li, seq)
-            x = x.add_(g_o.run(self._attend(q, k_all, v_all, n, mask))[0])
+            x = x.add_(g_o.run(attend(q, k_all, v_all, n, mask))[0])
 
-            h = rms(x, self._norm2[li], eps)
+            h = rms(x, norm2[li], eps)
             gate, up = g_gu.run(h)
-            x = x.add_(g_down.run(F.silu(gate) * up)[0])
+            x = x.add_(g_down.run(silu(gate) * up)[0])
+        return x
 
-        kv.seq_len = seq
-        if all_positions:
-            hidden = self.rms(x, self.final_norm, eps)
-            y = self._head.run(hidden)[0]
-            return y if y.dim() == 2 else y.view(1, -1)
-        if not logits:
-            return None
-        return self._head.run(self.rms(x[-1:], self.final_norm, eps))[0].view(-1)
+    def _prefetch_next_token(self, n: int) -> None:
+        """H2D the first overflow matrix of token t+1 during this token's lm_head.
+
+        Decode-only (``N == 1``). Prefill chunks with ``N != 1`` leave the copy
+        engine idle at the boundary so the next ``arm()`` issues as before.
+        H2D stays on ``copy_stream`` (Python, never inside a CUDA graph); it
+        overlaps DEVICE ``lm_head`` / graph replay. Bytes/token unchanged.
+        """
+        ring = self._ring
+        if ring is None or n != 1:
+            return
+        ring.prefetch_next()
 
     def _attend(
         self,
@@ -508,7 +744,7 @@ class TokenLoop:
             a = F.scaled_dot_product_attention(
                 q.view(1, self.n_kv, self.n_rep, self.head_dim), k, v, scale=self.scaling
             )
-            return a.reshape(1, self.q_dim)
+            return a.view(1, self.q_dim)
         if not self._gqa:
             raise RuntimeError("prefill with N>1 needs torch>=2.5 (enable_gqa) for GQA")
         a = F.scaled_dot_product_attention(
@@ -596,8 +832,59 @@ class TokenLoop:
         for _ in range(tokens):
             logits = self.step(int(logits.argmax()))
         torch.cuda.synchronize()
+        elapsed = (time.perf_counter() - t0) * 1000.0
         self.reset()
-        return (time.perf_counter() - t0) * 1000.0
+        self._capture_decode_glue()
+        return elapsed
+
+    def h2_snapshot(self) -> dict:
+        """DEVICE vs HOST topology and ring counters. Safe on CPU."""
+        from .graph import GraphedGemmGroup
+
+        runners = [g for row in self._layer for g in row] + [self._head]
+        groups = []
+        n_graph = n_eager = n_host = n_dev = 0
+        for g in runners:
+            graphed = isinstance(g, GraphedGemmGroup)
+            eager = g.eager if graphed else g
+            homes = [m.home for m in eager.gemms]
+            if graphed:
+                n_graph += 1
+            else:
+                n_eager += 1
+            n_host += sum(1 for h in homes if h == "host")
+            n_dev += sum(1 for h in homes if h != "host")
+            groups.append(
+                {
+                    "name": g.name,
+                    "graphed": graphed,
+                    "homes": homes,
+                    "nbytes": [int(m.nbytes) for m in eager.gemms],
+                    "gemms": [m.name for m in eager.gemms],
+                    "streams": len(getattr(eager, "streams", ())),
+                }
+            )
+        return {
+            "max_seq": self.max_seq,
+            "n_layers": self.n_layers,
+            "hidden": self.hidden,
+            "n_q": self.n_q,
+            "n_kv": self.n_kv,
+            "prefill_chunk": self.prefill_chunk,
+            "graph_mode": self.graph_mode,
+            "graph_error": self.graph_error,
+            "overlap": self.overlap,
+            "n_groups": len(runners),
+            "n_graphed_groups": n_graph,
+            "n_eager_groups": n_eager,
+            "n_host_gemms": n_host,
+            "n_device_gemms": n_dev,
+            "weight_bytes_device": int(self.weight_bytes),
+            "kv_mib": float(self.kv.mib),
+            "host_tape": [g.name for g in self._host_tape],
+            "ring": None if self._ring is None else self._ring.snapshot(),
+            "groups": groups,
+        }
 
     @torch.no_grad()
     def generate(
@@ -610,6 +897,7 @@ class TokenLoop:
     ) -> Generation:
         """Greedy. Prefill and decode are timed separately and never averaged."""
         self.reset()
+        self._capture_decode_glue()
         ids = prompt_ids.reshape(-1).to(self.device, torch.long)
         stop_set = frozenset(int(s) for s in stop)
         out = Generation(
@@ -617,6 +905,11 @@ class TokenLoop:
             prefill_chunk=self.prefill_chunk,
             graph=self.graph_mode,
         )
+        ring = self._ring
+        b0 = 0 if ring is None else ring.total_bytes
+        c0 = 0 if ring is None else ring.total_copies
+        ms0 = 0.0 if ring is None else ring.total_copy_ms
+        f0 = 0 if ring is None else ring.total_forwards
 
         torch.cuda.synchronize()
         t0 = time.perf_counter()
@@ -640,6 +933,11 @@ class TokenLoop:
             token = int(logits.argmax())
         torch.cuda.synchronize()
         out.decode_ms = (time.perf_counter() - t1) * 1000.0
+        if ring is not None:
+            out.h2d_bytes = int(ring.total_bytes - b0)
+            out.h2d_copies = int(ring.total_copies - c0)
+            out.h2d_copy_ms = float(ring.total_copy_ms - ms0)
+            out.h2d_forwards = int(ring.total_forwards - f0)
         return out
 
     def __repr__(self) -> str:

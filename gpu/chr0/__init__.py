@@ -37,11 +37,13 @@ from .header import (
     align64,
     iter_linears,
     load_header,
+    quantized_codec,
 )
 
 __all__ = [
     "load_header",
     "iter_linears",
+    "quantized_codec",
     "materialize_nf4",
     "ChrMatrix",
     "Header",

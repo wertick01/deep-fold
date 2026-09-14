@@ -39,6 +39,7 @@ if str(_REPO) not in sys.path:
 from gpu.host.attach import DriverPlan, attach_module  # noqa: E402
 from gpu.host.linear import CompressedLinear, k_pad  # noqa: E402
 from gpu.host.model import replace_linears  # noqa: E402
+from gpu.host.vq_linear import CompressedVqLinear, k_pad_vq  # noqa: E402
 from gpu.host.test_attach import (  # noqa: E402
     HEAD_DIM,
     internlm_model,
@@ -103,13 +104,13 @@ def _bound(model):
 
 
 def _loop(model, **over) -> TokenLoop:
-    """A CPU ``TokenLoop``. ``nf4_max_n`` is stubbed so no kernel is probed."""
-    original = generate_mod.nf4_max_n
-    generate_mod.nf4_max_n = lambda probe=16: 1
+    """A CPU ``TokenLoop``. ``linear_max_n`` is stubbed so no kernel is probed."""
+    original = generate_mod.linear_max_n
+    generate_mod.linear_max_n = lambda codec="nf4", probe=16: 1
     try:
         return TokenLoop(model, max_seq=8, overlap=False, **over)
     finally:
-        generate_mod.nf4_max_n = original
+        generate_mod.linear_max_n = original
 
 
 # --------------------------------------------------------------------------- #
@@ -133,6 +134,32 @@ def test_qwen2_names_bind_through_the_plan() -> None:
     assert [g.name for g in qkv.gemms] == ["L0.q", "L0.k", "L0.v"]
     assert [g.name for g in loop._groups[2].gemms] == ["L0.gate", "L0.up"]
     assert loop._groups[-1].gemms[0].name == "lm_head"
+
+
+def test_vq_seats_bind_as_codec_vq() -> None:
+    """H3: TokenLoop reads CompressedVqLinear the same way as NF4."""
+    model = qwen2_model()
+    plan = attach_module(model)
+    replace_linears(model, slots=plan.gemm_names, seat=CompressedVqLinear)
+    for name in plan.gemm_names:
+        seat = model.get_submodule(name)
+        g = seat.K_pad // 8
+        seat.attach(
+            SimpleNamespace(
+                name=name,
+                M=seat.M,
+                K=seat.K,
+                K_pad=k_pad_vq(seat.K),
+                index=torch.zeros(seat.M, g, 2, dtype=torch.uint8),
+                book=torch.zeros(2, 256, 8, dtype=torch.float16),
+            )
+        )
+    model.model.rotary_emb = _Rotary()
+    model.deepfold_plan = plan
+    loop = _loop(model)
+    assert loop._groups[0].gemms[0].codec == "vq"
+    assert loop._groups[0].gemms[0].index is not None
+    assert loop.prefill_chunk == 1, "VQ kernel is decode-only"
 
 
 def test_internlm2_names_bind_through_the_same_code() -> None:
@@ -197,6 +224,7 @@ def test_internlm_and_concat_disagree_on_the_same_y() -> None:
 
     assert q1.shape == q2.shape == (n, n_q, hd)
     assert k1.shape == k2.shape == (n, n_kv, hd)
+    assert not k1.is_contiguous(), "internlm K is a view into packed"
     assert not torch.equal(q1, q2), "fused does not imply InternLM"
     assert not torch.equal(k1, k2)
     assert not torch.equal(v1, v2)
@@ -209,6 +237,7 @@ def test_concat_is_the_plain_q_then_k_then_v_slice() -> None:
     assert torch.equal(q, y[:, : n_q * hd].reshape(n, n_q, hd))
     assert torch.equal(k, y[:, n_q * hd : (n_q + n_kv) * hd].reshape(n, n_kv, hd))
     assert torch.equal(v, y[:, (n_q + n_kv) * hd :].reshape(n, n_kv, hd))
+    assert not k.is_contiguous() and not v.is_contiguous(), "packer must not copy K/V"
 
 
 def test_neox_is_per_head_interleaved_and_mha_only() -> None:

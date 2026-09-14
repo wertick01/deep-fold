@@ -44,6 +44,8 @@ class KVCache:
         "seq_len",
         "_k",
         "_v",
+        "_k_attn",
+        "_v_attn",
     )
 
     def __init__(
@@ -77,6 +79,9 @@ class KVCache:
         # index on every layer of every token; these are the same 36 views.
         self._k = [self.k[i] for i in range(self.n_layers)]
         self._v = [self.v[i] for i in range(self.n_layers)]
+        # SDPA wants [1, n_kv, seq, hd]. Permute once; the token path only slices.
+        self._k_attn = [t.permute(1, 0, 2).unsqueeze(0) for t in self._k]
+        self._v_attn = [t.permute(1, 0, 2).unsqueeze(0) for t in self._v]
 
     # --- accounting --------------------------------------------------------
     @property
@@ -117,14 +122,14 @@ class KVCache:
             raise ValueError(
                 f"KV overflow: writing slots {start}..{end} into max_seq={self.max_seq}"
             )
+        # Slice copy, not ``k[0]``: K/V are often CUDA-graph outputs, and
+        # ``select`` on those is ``Offset increment outside graph capture``.
         self._k[layer][start:end] = k
         self._v[layer][start:end] = v
 
     def view(self, layer: int, seq: int) -> tuple[torch.Tensor, torch.Tensor]:
         """``[1, n_kv_heads, seq, head_dim]`` views for SDPA. No copy."""
-        k = self._k[layer][:seq].permute(1, 0, 2).unsqueeze(0)
-        v = self._v[layer][:seq].permute(1, 0, 2).unsqueeze(0)
-        return k, v
+        return self._k_attn[layer][:, :, :seq], self._v_attn[layer][:, :, :seq]
 
     def __repr__(self) -> str:
         return (

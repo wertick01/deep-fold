@@ -1,0 +1,12 @@
+Product H2 smoke (Paris / Berlin / 323) copied from
+C:\dev\models\runs\h2-qwen25-32b-20260914-234048
+on the author's RTX 3080 12 GB (WDDM). Not a synthetic fixture.
+
+Command: python -m gpu.lab.h2_trace --no-timing
+CHR: C:\dev\models\qwen25-32b.nf4.chr
+codec=nf4 overflow=True  policy D  max_seq=2048
+
+BF16 generate was not run (does not fit). Hard-12 was not started.
+Redraw the plate: python -m gpu.lab.h2_plate --redraw
+The full dump (timeline.json, summary.json, residency.json) stays
+outside git in the live directory above.

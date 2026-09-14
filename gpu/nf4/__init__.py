@@ -10,8 +10,8 @@ Compile (Windows, sm_86), from a VS x64 prompt or after vcvars64.bat,
     C:\\Users\\Professional\\anaconda3\\envs\\torch-gpu\\python.exe -m gpu.nf4.test_plan
     C:\\Users\\Professional\\anaconda3\\envs\\torch-gpu\\python.exe -m gpu.nf4.verify
 
-``test_plan`` is CPU. ``verify`` launches N<=16 only. Do not raise
-``LIVE_MAX_N`` / ``kLiveMaxN`` without an oracle at N=17/32/64.
+``test_plan`` is CPU. ``verify`` launches N<=``LIVE_MAX_N``. n64 stays
+plan-only until a later unfreeze.
 """
 
 from __future__ import annotations

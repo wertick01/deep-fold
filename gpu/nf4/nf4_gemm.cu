@@ -69,9 +69,10 @@ static_assert(sSmemBytes <= 48 * 1024, "small tile must not need opt-in smem");
 // walk only writes zeros.
 constexpr int kDefaultOneWave = 70;
 constexpr int kTargetCtas = 140;
-// Live chr_nf4_gemm_ws / TokenLoop ceiling. The planner may describe up to
-// kPlanMaxN; raising kLiveMaxN is the unfreeze, not this WAVE.
-constexpr int kLiveMaxN = 16;
+// Live chr_nf4_gemm_ws / TokenLoop ceiling. Planner describes up to
+// kPlanMaxN. n64 stays behind this cap. Dispatch is by tile width
+// (N<=8/16/32/64), not by kLiveMaxN.
+constexpr int kLiveMaxN = 32;
 constexpr int kPlanMaxN = 64;
 
 // Prefill tile (kernel-ampere.md §2 / §4). Scales stay in __ldg, not smem.
@@ -115,9 +116,9 @@ static_assert(pSmemBytes8 == 18432, "prefill ring BN=8");
 static_assert(pSmemBytes16 == 24576, "prefill ring BN=16");
 static_assert(pSmemBytes16 <= 99 * 1024, "must not blow the sm_86 99 KiB cap");
 
-// Planned N=17..64: same BM/BK/stages as n16 so 3B split-K occupancy (128/64
-// CTAs on q/k_proj) is unchanged. Only the x-stage grows. Not launched while
-// kLiveMaxN == 16: dispatch tables for N<=16 stay n8/n16.
+// N=17..64: same BM/BK/stages as n16 so 3B split-K occupancy (128/64
+// CTAs on q/k_proj) is unchanged. Only the x-stage grows. n32 is live
+// when kLiveMaxN >= 32. n64 stays plan-only.
 constexpr int pBN32 = 32;
 constexpr int pBN64 = 64;
 constexpr int pXStageElems32 = pBK * pBN32; // 4096 bf16
@@ -1566,7 +1567,9 @@ int plan_impl(const chr_nf4_dev_t &h, int32_t N, int32_t have_ws,
         p.ws_floats = static_cast<int64_t>(p.grid_y) * h.M;
       }
     }
-  } else if (N <= kLiveMaxN) {
+  } else if (N <= 16) {
+    // Tile width, not kLiveMaxN. Raising kLiveMaxN to 32 must still send
+    // N=17..32 to BN=32, not reuse the n16 smem ring with N=32.
     p.path = 2;
     p.bm = pBM;
     p.bk = pBK;
@@ -1579,8 +1582,7 @@ int plan_impl(const chr_nf4_dev_t &h, int32_t N, int32_t have_ws,
       p.ws_floats = static_cast<int64_t>(p.grid_y) * h.M * N;
     }
   } else {
-    // Planned BN=32 / BN=64. Same BM/BK as n16 (split-K counts stay 128/64
-    // on 3B q/k_proj). Live launch never reaches this: kLiveMaxN == 16.
+    // BN=32 / BN=64. Same BM/BK as n16. Live refuses N > kLiveMaxN.
     p.path = N <= 32 ? 3 : 4;
     p.bm = pBM;
     p.bk = pBK;
@@ -1603,9 +1605,9 @@ int check_args(const chr_nf4_dev_t *w, int32_t N, bool need_ptrs,
   if (!w) {
     return -1;
   }
-  // Launch (max_n = kLiveMaxN): N in [1, 16]. N=1 decode; N=2..8 pad-8;
-  // N=9..16 pad-16. Plan (max_n = kPlanMaxN) also describes N=17..64.
-  // TokenLoop chunks at kLiveMaxN; this entry does not slice.
+  // Launch (max_n = kLiveMaxN): N in [1, 32]. N=1 decode; N=2..8 pad-8;
+  // N=9..16 pad-16; N=17..32 pad-32. Plan (max_n = kPlanMaxN) also
+  // describes N=33..64. TokenLoop chunks at kLiveMaxN; this does not slice.
   if (N < 1 || N > max_n) {
     return -2;
   }
@@ -1704,7 +1706,7 @@ extern "C" int chr_nf4_gemm_ws_max(const chr_nf4_dev_t *w, const void *x, void *
     chr_nf4_gemm_prefill_n8<<<grid, block, pSmemBytes8, s>>>(
         h.packed, h.scale, x_bf, y_bf, partial, h.M, h.K, h.K_pad, N,
         p.n_ktiles, p.tiles_per_split);
-  } else if (N <= kLiveMaxN) {
+  } else if (N <= 16) {
     cudaError_t attr = cudaFuncSetAttribute(
         chr_nf4_gemm_prefill_n16, cudaFuncAttributeMaxDynamicSharedMemorySize,
         pSmemBytes16);
@@ -1715,8 +1717,8 @@ extern "C" int chr_nf4_gemm_ws_max(const chr_nf4_dev_t *w, const void *x, void *
         h.packed, h.scale, x_bf, y_bf, partial, h.M, h.K, h.K_pad, N,
         p.n_ktiles, p.tiles_per_split);
   } else if (N <= 32) {
-    // Unreachable while kLiveMaxN == 16. Present so the n32 kernel is
-    // referenced; unfreeze later is one constant, not a second dispatch table.
+    // Live when kLiveMaxN >= 32. Do not key this branch on kLiveMaxN:
+    // N<=kLiveMaxN with a cap of 32 would otherwise launch n16.
     cudaError_t attr = cudaFuncSetAttribute(
         chr_nf4_gemm_prefill_n32, cudaFuncAttributeMaxDynamicSharedMemorySize,
         pSmemBytes32);

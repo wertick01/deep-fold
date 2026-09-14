@@ -15,7 +15,7 @@ Set-Location C:\dev\deep-fold
 
 **Не** `pip install` в `torch-gpu`. **Не** коммитить `C:\dev\models\eval`.
 **Не** перезаписывать `docs/runs/qwen25-3b` и `docs/runs/internlm20b`.
-`LIVE_MAX_N` по-прежнему 16; TokenLoop в этой задаче не поднимать.
+`LIVE_MAX_N` по-прежнему 32; n64 в этой задаче не поднимать.
 
 Две разные тарелки:
 
@@ -309,8 +309,13 @@ Smoke Paris / Berlin / 323 по-прежнему не качество
 4. **ncu: n32 vs 2×n16** — сделано:
    `C:\dev\models\runs\ncu-n32-vs-2xn16-20260913`. True n32 на 3B `q_proj`
    **69 µs** против двух n16 **113 µs** (**1.63×**). Occupancy не просел.
-   `LIVE_MAX_N` всё ещё 16. Размораживать TokenLoop только после e2e TTFT 3B
-   и numerics `--plan-n` на живых весах. n64 не мерили.
+   **Numerics `--plan-n` на живом 3B (2026-09-14).** Layer-0 `q_proj` N=32:
+   maxabs **0.05847** на одном элементе (`y[383,1]` −17.5 vs −17.44153).
+   n32 **бит-в-бит** равен 2×n16 на том же `x`; n16 на `x[:,:16]` даёт тот
+   же пик. Это half-ULP BF16, не баг тайла. Этаж: max(0.05, ½ ULP).
+   e2e 3B 2026-09-14 пара: `C:\dev\models\runs\qwen25-3b-paired-20260914`,
+   `prefill_chunk=32`, TTFT **48 vs 92 ms**, decode **24.8 vs 28.7 tok/s**.
+   NF4-only n32 в тот же день: 91 ms / 28.6. `LIVE_MAX_N=32`. n64 не мерили.
 5. **Не утверждать vs Marlin.** Occupancy / DRAM из `docs/runs/ncu/` —
    наше ядро, не tok/s против Marlin / AWQ / bitsandbytes / llama.cpp.
 )

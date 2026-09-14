@@ -26,6 +26,7 @@ from gpu.chr0 import (  # noqa: E402
     iter_linears,
     load_header,
     materialize_nf4,
+    quantized_codec,
 )
 from gpu.chr0.loader import ChrMatrix  # noqa: E402
 
@@ -56,5 +57,6 @@ __all__ = [
     "iter_linears",
     "load_header",
     "materialize_nf4",
+    "quantized_codec",
     "nf4_gemm",
 ]

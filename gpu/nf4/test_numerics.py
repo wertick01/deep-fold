@@ -197,19 +197,43 @@ def test_n16_cpu_gemm() -> None:
     check(y.metrics is not None and y.metrics.cosine > 0.9, f"N=16 quant/y cosine {y.metrics}")
 
 
+def test_kernel_floor_bf16_ulp() -> None:
+    """The 2026-09-14 q_proj spike is BF16 store rounding, not a kernel miss."""
+    got = np.array([[-17.5]], dtype=np.float32)
+    ref = np.array([[-17.441530227661133]], dtype=np.float32)
+    check(
+        num.kernel_floor_ok(got, ref),
+        "0.058 at |y|~17 is half BF16 ULP (allow 0.0625)",
+    )
+    check(
+        not num.kernel_floor_ok(
+            np.array([[0.06]], dtype=np.float32),
+            np.array([[0.0]], dtype=np.float32),
+        ),
+        "0.06 vs 0 still fails the O(1) 0.05 floor",
+    )
+    check(
+        num.kernel_floor_ok(
+            np.array([[0.04]], dtype=np.float32),
+            np.array([[0.0]], dtype=np.float32),
+        ),
+        "0.04 vs 0 passes 0.05",
+    )
+
+
 def test_n_refused() -> None:
     try:
-        num.rms_norm_x(64, 17, seed=1)
+        num.rms_norm_x(64, 33, seed=1)
     except ValueError:
-        check(True, "N=17 refused (TokenLoop ceiling stays 16)")
+        check(True, "N=33 refused (TokenLoop ceiling stays 32)")
     else:
-        check(False, "N=17 should be refused")
+        check(False, "N=33 should be refused")
     try:
-        num._parse_ns("17")
+        num._parse_ns("33")
     except ValueError:
-        check(True, "CLI N=17 refused without --plan-n")
+        check(True, "CLI N=33 refused without --plan-n")
     else:
-        check(False, "CLI N=17 should be refused")
+        check(False, "CLI N=33 should be refused")
     got = num._parse_ns("17,32,64", max_n=num.PLAN_MAX_N)
     check(got == [17, 32, 64], f"--plan-n parses 17,32,64: {got}")
 
@@ -287,6 +311,7 @@ def main() -> int:
         test_legs_are_not_conflated,
         test_random_all_kinds_cpu,
         test_n16_cpu_gemm,
+        test_kernel_floor_bf16_ulp,
         test_n_refused,
         test_no_eager_kernel_import,
         test_cuda_default_is_skip,

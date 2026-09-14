@@ -838,16 +838,26 @@ def run_nf4(
         sampler.mark("load_start", detail=f"load_model {Path(chr_path).name}")
         t_load = time.perf_counter()
         tokenizer = _load_tokenizer(model_dir, trust_remote_code)
+        from gpu.lab.h2_metrics import auto_max_resident_bytes
+
+        cap, cap_info = auto_max_resident_bytes(model_dir, chr_path, max_seq)
         # strict=False: the lab records an incomplete load in `report` and on the
         # plate. `deepfold run` refuses it instead (wave8-arch §2.5).
         model, report = load_model(
-            model_dir, chr_path, trust_remote_code=trust_remote_code, strict=False
+            model_dir,
+            chr_path,
+            trust_remote_code=trust_remote_code,
+            strict=False,
+            max_resident_bytes=cap,
         )
         torch.cuda.synchronize()
         load_s = time.perf_counter() - t_load
         vram_after_smi = smi_used_mib()
         vram_after_torch = torch.cuda.memory_allocated() / MIB
-        sampler.mark("load_end", detail=f"load_s={load_s:.1f}, {report}")
+        sampler.mark(
+            "load_end",
+            detail=f"load_s={load_s:.1f}, cap_mib={cap_info.get('cap_mib')}, {report}",
+        )
 
         loop = TokenLoop(model, max_seq=max_seq, norm="exact", overlap=True)
         sampler.mark("warmup_start", detail=repr(loop))

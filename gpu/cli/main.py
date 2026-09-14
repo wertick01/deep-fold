@@ -29,8 +29,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog=PROG,
         description=(
-            "NF4 / CHR0 driver: packed weights stay packed in VRAM for the "
-            "whole run. Ampere sm_86 (RTX 3080 class) only."
+            "Packed CHR0 driver (NF4 or VQ 2-bit): weights stay packed in "
+            "VRAM for the whole run. Ampere sm_86 (RTX 3080 class) only."
         ),
     )
     sub = ap.add_subparsers(dest="command", metavar="<command>")
@@ -55,33 +55,64 @@ def build_parser() -> argparse.ArgumentParser:
 
     comp = sub.add_parser(
         "compress",
-        help="wrap chr compress --codec nf4",
-        description="Packs a HuggingFace BF16/FP16 tree into one .chr. CPU only.",
+        help="wrap chr compress (NF4 or VQ 2-bit)",
+        description=(
+            "Packs a HuggingFace BF16/FP16 tree into one .chr. CPU only. "
+            "Default --codec auto: NF4 if it fits the card, else NF4 overflow (H2). "
+            "VQ 2-bit is --codec vq only (3B greedy canary failed)."
+        ),
     )
     comp.add_argument("--in", dest="inp", required=True, help="HuggingFace directory")
     comp.add_argument("--out", help="output .chr (default: $DEEPFOLD_HOME/chr/<slug>)")
     comp.add_argument("--chr-bin", help="path to the Go chr binary")
+    comp.add_argument(
+        "--codec",
+        choices=("auto", "nf4", "vq"),
+        default="auto",
+        help="packed format; auto = NF4 if it fits, else NF4 overflow (H2); VQ is --codec vq only",
+    )
+    comp.add_argument(
+        "--vram-mib",
+        type=int,
+        default=None,
+        help="card size for --codec auto (default: this GPU, else 12288)",
+    )
     comp.add_argument("--force", action="store_true", help="repack over an existing .chr")
     comp.add_argument("--quiet", action="store_true", help="no chr progress output")
     comp.set_defaults(func=run_mod.compress)
 
     gen = sub.add_parser(
         "run",
-        help="load packed NF4 weights and generate",
+        help="load packed NF4 or VQ weights and generate",
         description=(
             "Needs two things: a HuggingFace directory (config.json, tokenizer) "
-            "and one .chr of packed weights. Compresses once if the .chr is "
-            "missing. Glue families: llama_swiglu (Qwen2, Llama, Mistral without "
-            "a sliding window) and internlm_gqa. Everything else is refused by "
-            "name."
+            "and one .chr of packed weights (NF4 or VQ 2-bit). Compresses once "
+            "if the .chr is missing. --codec auto (default) packs NF4 when it "
+            "fits this card, else NF4 overflow (H2). VQ 2-bit is --codec vq only."
         ),
     )
     gen.add_argument("--model", help="HuggingFace directory (or $DEEPFOLD_MODEL)")
     gen.add_argument("--chr", help="packed weights (or $DEEPFOLD_CHR, or a sibling)")
+    gen.add_argument(
+        "--codec",
+        choices=("auto", "nf4", "vq"),
+        default="auto",
+        help="when packing: NF4 if it fits, else NF4 overflow (H2); --codec vq is oracle-only",
+    )
     gen.add_argument("--chr-bin", help="path to the Go chr binary")
     gen.add_argument("--prompt", help="one-shot prompt instead of the stdin REPL")
     gen.add_argument("--max-new-tokens", type=int, default=64)
     gen.add_argument("--max-seq", type=int, default=512, help="preallocated KV length")
+    gen.add_argument(
+        "--max-resident-mib",
+        type=int,
+        default=None,
+        help=(
+            "HBM cap for NF4 weights in MiB; overflow streams the rest (H2). "
+            "Default: fully resident if NF4 fits, else auto from VRAM and --max-seq. "
+            "Canary: fake a small cap on 3B without a 32B file. --codec vq ignores this."
+        ),
+    )
     gen.add_argument(
         "--raw",
         action="store_true",

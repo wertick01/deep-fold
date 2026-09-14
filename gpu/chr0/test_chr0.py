@@ -38,6 +38,7 @@ if __package__ in (None, ""):  # standalone: put gpu/ on sys.path, import chr0
         iter_linears,
         load_header,
         materialize_nf4,
+        quantized_codec,
     )
     from chr0._fixtures import build_chr, nf4_blob_sizes, write_safetensors
 else:
@@ -53,6 +54,7 @@ else:
         iter_linears,
         load_header,
         materialize_nf4,
+        quantized_codec,
     )
     from ._fixtures import build_chr, nf4_blob_sizes, write_safetensors
 
@@ -217,6 +219,7 @@ def test_header_matches_fixture():
 
     assert hdr.tensor(NORM).codec == "bf16"
     assert hdr.tensor(NORM).layer is None
+    assert quantized_codec(hdr) == "nf4"
     _expect(TensorNotFoundError, hdr.tensor, "model.layers.0.mlp.up_proj")
 
 
@@ -380,6 +383,7 @@ def test_reject_vq_materialize_but_parse_header():
     )
     hdr = load_header(str(path))
     assert hdr.tensor(Q_PROJ).codec == "vq"
+    assert quantized_codec(hdr) == "vq"
     assert list(iter_linears(hdr)) == []
     _expect(CodecError, materialize_nf4, str(path), Q_PROJ, "cpu", header=hdr)
 

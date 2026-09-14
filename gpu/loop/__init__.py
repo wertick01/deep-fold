@@ -35,8 +35,9 @@ from .generate import (
     split_internlm_wqkv,
     split_neox_qkv,
 )
-from .graph import Gemm, GemmGroup, GraphedGemmGroup, capture, nf4_max_n
+from .graph import Gemm, GemmGroup, GraphedGemmGroup, capture, group_is_resident, linear_max_n, nf4_max_n
 from .kv_cache import KVCache
+from .ring import CopyRing
 from .stop import stop_token_ids
 
 __all__ = [
@@ -48,10 +49,13 @@ __all__ = [
     "GraphedGemmGroup",
     "PACKERS",
     "capture",
+    "group_is_resident",
     "nf4_max_n",
+    "linear_max_n",
     "rms_norm_exact",
     "split_concat_qkv",
     "split_internlm_wqkv",
     "split_neox_qkv",
     "stop_token_ids",
+    "CopyRing",
 ]

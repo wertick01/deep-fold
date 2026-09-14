@@ -502,6 +502,24 @@ def load_header(path: str) -> Header:
     )
 
 
+def quantized_codec(header: Header) -> str:
+    """The one file-wide packed codec (``nf4`` / ``vq`` / ``int4``).
+
+    ``load_header`` already rejects mixed quantized codecs. This is the host's
+    handle for ``load_model`` to pick a seat without walking every tensor.
+    """
+    quantized = {
+        info.codec
+        for info in header.tensors.values()
+        if info.kind in _QUANTIZABLE_KINDS and not info.name.endswith(".bias")
+    }
+    if len(quantized) != 1:
+        raise CodecError(
+            f"expected one quantized codec, got {sorted(quantized) or 'none'}"
+        )
+    return next(iter(quantized))
+
+
 def iter_linears(header: Header) -> Iterator[str]:
     """Yield CHR0 names whose ``codec`` is ``nf4``, in header key order.
 

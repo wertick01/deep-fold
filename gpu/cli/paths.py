@@ -90,9 +90,15 @@ def slug(model: str | os.PathLike[str]) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", name) or "model"
 
 
-def cached_chr(model_dir: str | os.PathLike[str]) -> Path:
-    """Where ``run`` writes a first-run compress (wave7-ux.md §6.2)."""
-    return deepfold_home() / "chr" / f"{slug(model_dir)}.nf4.chr"
+def cached_chr(model_dir: str | os.PathLike[str], codec: str = "nf4") -> Path:
+    """Where ``run`` writes a first-run compress (wave7-ux.md §6.2).
+
+    ``codec`` is ``nf4`` or ``vq``; the files are ``<slug>.nf4.chr`` and
+    ``<slug>.vq2.chr`` so both can sit in the cache without clobbering.
+    """
+    from .codec import suffix
+
+    return deepfold_home() / "chr" / f"{slug(model_dir)}.{suffix(codec)}"
 
 
 def chr_candidates(model_dir: Path, explicit: str | None = None) -> list[Path]:
@@ -115,14 +121,17 @@ def chr_candidates(model_dir: Path, explicit: str | None = None) -> list[Path]:
 
     for directory in (model_dir, model_dir.parent):
         try:
-            matches = sorted(directory.glob("*.nf4.chr"))
+            matches = sorted(directory.glob("*.nf4.chr")) + sorted(
+                directory.glob("*.vq2.chr")
+            )
         except OSError:
             matches = []
         out.extend(p for p in matches if p not in out)
 
-    cached = cached_chr(model_dir)
-    if cached.is_file() and cached not in out:
-        out.append(cached)
+    for codec in ("nf4", "vq"):
+        cached = cached_chr(model_dir, codec)
+        if cached.is_file() and cached not in out:
+            out.append(cached)
     return out
 
 

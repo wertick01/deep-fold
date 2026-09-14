@@ -32,6 +32,7 @@ __all__ = [
     "materialize_vq",
     "iter_vq",
     "reconstruct_vq",
+    "dequant_vq_rows",
 ]
 
 VQ_GROUP_SIZE = 8
@@ -202,3 +203,38 @@ def reconstruct_vq(
     g = b[0].index_select(0, idx[:, :, 0].reshape(-1))
     g = g + b[1].index_select(0, idx[:, :, 1].reshape(-1))
     return g.reshape(M, K_pad)[:, :K]
+
+
+def dequant_vq_rows(
+    index: torch.Tensor,
+    book: torch.Tensor,
+    ids: torch.Tensor,
+    K: int,  # noqa: N803
+    *,
+    dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    """Decode VQ rows ``ids`` to ``[len(ids), K]``. Never materializes the table.
+
+    Same reconstruct as :func:`reconstruct_vq`, gathered. Embeddings use this
+    on the token path; a Linear must not.
+    """
+    if index.dim() != 3 or index.dtype is not torch.uint8:
+        raise TypeError(
+            f"index must be uint8 [M, G, 2], got {index.dtype} {tuple(index.shape)}"
+        )
+    if book.dtype is not torch.float16 or tuple(book.shape) != (
+        N_CODEBOOKS,
+        CODEBOOK_SIZE,
+        VQ_GROUP_SIZE,
+    ):
+        raise TypeError(f"book must be float16 {N_CODEBOOKS, CODEBOOK_SIZE, VQ_GROUP_SIZE}")
+    g_count = int(index.shape[1])
+    flat = ids.reshape(-1).to(index.device, torch.long)
+    rows = index.index_select(0, flat)
+    b = book.to(torch.float32)
+    n = int(flat.numel())
+    i1 = rows[:, :, 0].reshape(-1).long()
+    i2 = rows[:, :, 1].reshape(-1).long()
+    g = b[0].index_select(0, i1) + b[1].index_select(0, i2)
+    w = g.reshape(n, g_count * VQ_GROUP_SIZE)[:, :K]
+    return w.to(dtype)

@@ -9,14 +9,12 @@ GPU; if they diverge, the kernel is the truth.
 Kernel families (sequence ``N``; some notes call this M):
 
 * ``N==1`` decode: ``SMALL`` BM=64 auto, ``CLASSIC`` BM=128 force only (wave-2).
-* ``N=2..8`` / ``N=9..16``: live prefill (BN=8 / BN=16). TokenLoop chunks here.
-* ``N=17..32`` planned BN=32; ``N=33..64`` planned BN=64 (prefill-oriented GEMM).
+* ``N=2..8`` / ``N=9..16``: BN=8 / BN=16. ``N=17..32`` BN=32 (live if
+  ``LIVE_MAX_N>=32``). ``N=33..64`` planned BN=64.
 
-``LIVE_MAX_N == 16`` is the WAVE freeze: do not raise TokenLoop / ``chr_nf4_gemm``
-past 16 until the wide kernels are wired and measured. Decode ~31.6 tok/s is
-the default path. N>=17 is the next TTFT floor (167 vs 52 ms); ncu already
-showed the current GEMM is not HBM-bound (~5% DRAM on 3B ``q_proj``), so the
-wide tile is more MMA per dequant, not a bandwidth play.
+``LIVE_MAX_N == 32`` is the TokenLoop / live ``chr_nf4_gemm`` ceiling. Tile
+family is 8/16/32/64 by ``N``, not by this cap. n64 stays plan-only. Decode
+N=1 is unchanged.
 """
 
 from __future__ import annotations
@@ -54,7 +52,7 @@ ONE_WAVE = 70
 TARGET_CTAS = 140
 
 #: Live ``chr_nf4_gemm`` / TokenLoop ceiling. Raising this is the unfreeze.
-LIVE_MAX_N = 16
+LIVE_MAX_N = 32
 #: Planner can describe N=17..64 (BN=32 / BN=64). Launch still returns -2.
 PLAN_MAX_N = 64
 
@@ -129,8 +127,14 @@ class Plan:
 
     @property
     def live(self) -> bool:
-        """True for the TokenLoop dispatch (decode + n8/n16). False = plan-only."""
-        return self.path in (CLASSIC, SMALL, PREFILL)
+        """True for a tile TokenLoop may launch. n64 stays plan-only."""
+        if self.path in (CLASSIC, SMALL, PREFILL):
+            return True
+        if LIVE_MAX_N >= 32 and self.path == PREFILL_N32:
+            return True
+        if LIVE_MAX_N >= 64 and self.path == PREFILL_N64:
+            return True
+        return False
 
 
 def _pick_split(grid_x: int, n_ktiles: int, have_ws: bool, force_split: int,
@@ -167,9 +171,8 @@ def plan(
     Auto decode (``N==1``) is BM=64 plus split-K (occupancy fix).
     ``have_ws=False`` pins ``split_k`` to 1 (plain ``chr_nf4_gemm``).
 
-    ``N=2..16`` is the live prefill tile (BN=8 or 16). ``N=17..64`` is the
-    planned wide family: same BM/BK as n16 so 3B decode split-K counts stay
-    128/64, but TokenLoop does not launch these (host still chunks at 16).
+    ``N=2..16`` is n8/n16. ``N=17..32`` is n32 when ``LIVE_MAX_N>=32``.
+    ``N=33..64`` is planned n64 (host still chunks above ``LIVE_MAX_N``).
     """
     M, K, N = int(M), int(K), int(N)
     if M < 1 or K < 1:
@@ -190,9 +193,10 @@ def plan(
         path = SMALL if force_path is None else (
             SMALL if force_path == SMALL else CLASSIC
         )
-    elif N <= LIVE_MAX_N:
-        # WAVE freeze: N<=16 never selects the n32/n64 tiles, even if someone
-        # passes force_path=PREFILL_N32. TokenLoop and nf4_linear stay on n8/n16.
+    elif N <= 16:
+        # BN=8 / BN=16 tile width. LIVE_MAX_N is the TokenLoop launch cap, not
+        # this cut: if it were LIVE_MAX_N, raising the cap to 32 would plan
+        # N=32 as n16 (BN=16 smem, N=32) and overflow the x stage.
         path = PREFILL
     elif N <= 32:
         path = PREFILL_N32

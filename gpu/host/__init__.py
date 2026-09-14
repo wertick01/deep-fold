@@ -46,11 +46,13 @@ from .model import (
     build_skeleton,
     linear_modules,
     load_chr_nf4,
+    load_chr_vq_model,
     load_model,
     replace_linears,
 )
-from .vq_blobs import VqMatrix, iter_vq, k_pad_vq, materialize_vq, reconstruct_vq
-from .vq_linear import CompressedVqLinear, load_chr_vq, vq_linear
+from .slots import SlotPair
+from .vq_blobs import VqMatrix, dequant_vq_rows, iter_vq, k_pad_vq, materialize_vq, reconstruct_vq
+from .vq_linear import CompressedVqLinear, VqEmbedding, load_chr_vq, vq_linear
 
 __all__ = [
     # wave10 P1: one attach path (docs/tz/wave8-arch.md §2)
@@ -68,9 +70,11 @@ __all__ = [
     "build_skeleton",
     "replace_linears",
     "load_chr_nf4",
+    "load_chr_vq_model",
     "load_model",
     "linear_modules",
     "LoadReport",
+    "SlotPair",
     "LINEAR_KINDS",
     "load_bf16",
     "read_bf16_host",
@@ -80,10 +84,12 @@ __all__ = [
     "NF4_LEVELS",
     # wave 3, codec=vq (docs/spec/vq.md)
     "CompressedVqLinear",
+    "VqEmbedding",
     "vq_linear",
     "load_chr_vq",
     "materialize_vq",
     "reconstruct_vq",
+    "dequant_vq_rows",
     "iter_vq",
     "VqMatrix",
     "k_pad_vq",

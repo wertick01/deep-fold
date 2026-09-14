@@ -246,8 +246,8 @@ def test_decode_cta_freeze() -> None:
 
 
 def test_wide_family_is_plan_only() -> None:
-    """N=17..64 is a planned tile; N<=16 stays n8/n16. Same BM/BK as n16."""
-    check(LIVE_MAX_N == 16, "WAVE freeze: live N is 16")
+    """N<=32 is live n8/n16/n32. N=33..64 is planned n64. Same BM/BK as n16."""
+    check(LIVE_MAX_N == 32, "live N is 32")
     p16 = plan(2048, 2048, 16)
     p17 = plan(2048, 2048, 17)
     p32 = plan(2048, 2048, 32)
@@ -258,11 +258,11 @@ def test_wide_family_is_plan_only() -> None:
         f"N=16 stays live n16 (path={p16.path_name} smem={p16.smem_bytes})",
     )
     check(
-        p17.path == PREFILL_N32 and not p17.live and p17.smem_bytes == 36864,
-        f"N=17 is planned n32 (path={p17.path_name} smem={p17.smem_bytes})",
+        p17.path == PREFILL_N32 and p17.live and p17.smem_bytes == 36864,
+        f"N=17 is live n32 (path={p17.path_name} smem={p17.smem_bytes})",
     )
     check(
-        p32.path == PREFILL_N32 and p32.smem_bytes == 36864
+        p32.path == PREFILL_N32 and p32.live and p32.smem_bytes == 36864
         and p32.bm == p16.bm and p32.bk == p16.bk
         and p32.grid_x == p16.grid_x and p32.grid_y == p16.grid_y
         and p32.ctas == p16.ctas,
@@ -270,7 +270,7 @@ def test_wide_family_is_plan_only() -> None:
         f"ctas={p32.ctas}",
     )
     check(
-        p33.path == PREFILL_N64 and p64.path == PREFILL_N64
+        p33.path == PREFILL_N64 and not p33.live and p64.path == PREFILL_N64
         and p64.smem_bytes == 61440
         and p64.smem_bytes < 99 * 1024
         and p32.smem_bytes < 99 * 1024,
@@ -285,7 +285,7 @@ def test_wide_family_is_plan_only() -> None:
     text = src.read_text(encoding="utf-8")
     check(
         "nf4_max_n(LIVE_MAX_N)" in text,
-        "TokenLoop.prefill_chunk still probes LIVE_MAX_N (not 32/64)",
+        "TokenLoop.prefill_chunk still probes LIVE_MAX_N (not 64)",
     )
 
     wide_ok = True

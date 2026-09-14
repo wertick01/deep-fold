@@ -22,11 +22,12 @@ from .vq_blobs import (
     N_CODEBOOKS,
     VQ_GROUP_SIZE,
     VqMatrix,
+    dequant_vq_rows,
     k_pad_vq,
     materialize_vq,
 )
 
-__all__ = ["CompressedVqLinear", "vq_linear", "load_chr_vq", "k_pad_vq"]
+__all__ = ["CompressedVqLinear", "VqEmbedding", "vq_linear", "load_chr_vq", "k_pad_vq"]
 
 _gemm = None
 
@@ -197,6 +198,66 @@ class CompressedVqLinear(nn.Module):
             f"in_features={self.in_features}, out_features={self.out_features}, "
             f"bias={self.bias is not None}, codec=vq2x8-g{VQ_GROUP_SIZE}, "
             f"K_pad={self.K_pad}, loaded={self.is_loaded}"
+        )
+
+
+class VqEmbedding(nn.Module):
+    """``nn.Embedding`` that reconstructs VQ rows on the fly. No dense table."""
+
+    def __init__(
+        self,
+        num_embeddings: int,
+        embedding_dim: int,
+        *,
+        padding_idx: int | None = None,
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device | str | None = None,
+    ) -> None:
+        super().__init__()
+        self.num_embeddings = int(num_embeddings)
+        self.embedding_dim = int(embedding_dim)
+        self.padding_idx = padding_idx
+        self.compute_dtype = dtype
+        self.K_pad = k_pad_vq(self.embedding_dim)
+        dev = torch.device(device) if device is not None else torch.device("cpu")
+        self.register_buffer("index", torch.empty(0, dtype=torch.uint8, device=dev), persistent=False)
+        self.register_buffer("book", torch.empty(0, dtype=torch.float16, device=dev), persistent=False)
+        self.chr_name: str | None = None
+
+    @property
+    def weight(self) -> torch.Tensor:
+        return torch.empty(0, dtype=self.compute_dtype, device=self.index.device)
+
+    @property
+    def is_loaded(self) -> bool:
+        return self.index.numel() > 0
+
+    @property
+    def nbytes(self) -> int:
+        return self.index.numel() + self.book.numel() * 2
+
+    def attach(self, matrix: VqMatrix) -> None:
+        if (int(matrix.M), int(matrix.K)) != (self.num_embeddings, self.embedding_dim):
+            raise ValueError(
+                f"{matrix.name}: matrix is [{matrix.M},{matrix.K}], embedding is "
+                f"[{self.num_embeddings},{self.embedding_dim}]"
+            )
+        self.index = matrix.index
+        self.book = matrix.book
+        self.chr_name = matrix.name
+
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        if not self.is_loaded:
+            raise RuntimeError("VqEmbedding has no weights: call load_chr_vq first")
+        rows = dequant_vq_rows(
+            self.index, self.book, input_ids, self.embedding_dim, dtype=self.compute_dtype
+        )
+        return rows.view(*input_ids.shape, self.embedding_dim)
+
+    def extra_repr(self) -> str:
+        return (
+            f"{self.num_embeddings}, {self.embedding_dim}, codec=vq2x8-g{VQ_GROUP_SIZE}, "
+            f"loaded={self.is_loaded}"
         )
 
 

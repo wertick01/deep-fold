@@ -20,10 +20,15 @@ from typing import Iterable, Sequence
 import torch
 import torch.nn as nn
 
-from ._deps import Header, load_header, materialize_nf4
+from ._deps import Header, load_header, materialize_nf4, quantized_codec
 from .blobs import iter_bf16, load_bf16
 from .embedding import Nf4Embedding, dequant_table
+from .host_image import HostImage
 from .linear import CompressedLinear
+from .residency import descs_from_header, plan_residency
+from .slots import SlotPair
+from .vq_blobs import materialize_vq, reconstruct_vq
+from .vq_linear import CompressedVqLinear, VqEmbedding
 
 __all__ = [
     "LINEAR_KINDS",
@@ -31,6 +36,7 @@ __all__ = [
     "build_skeleton",
     "replace_linears",
     "load_chr_nf4",
+    "load_chr_vq_model",
     "load_model",
     "linear_modules",
 ]
@@ -58,18 +64,35 @@ class LoadReport:
     skipped: list[str] = field(default_factory=list)
     missing: list[str] = field(default_factory=list)
     leftover_meta: list[str] = field(default_factory=list)
+    codec: str = "nf4"
+    overflow: bool = False
+    streamed: int = 0
+    streamed_bytes: int = 0
+    resident_bytes: int = 0
+    streamed_tape: tuple[str, ...] = ()
+    slot_nbytes: int = 0
+    slots: SlotPair | None = None
 
     @property
     def device_mib(self) -> float:
         return (self.linear_bytes + self.bf16_bytes + self.embed_bytes) / MIB
 
     def __str__(self) -> str:
+        overflow = ""
+        if self.overflow:
+            overflow = (
+                f", overflow streamed={self.streamed} "
+                f"({self.streamed_bytes / MIB:.1f} MiB host) "
+                f"resident_plan={self.resident_bytes / MIB:.1f} MiB "
+                f"slot={self.slot_nbytes / MIB:.2f} MiB"
+            )
         return (
-            f"{self.linears} nf4 linears ({self.linear_bytes / MIB:.1f} MiB), "
+            f"{self.linears} {self.codec} linears ({self.linear_bytes / MIB:.1f} MiB), "
             f"{self.bf16_tensors} bf16 tensors ({self.bf16_bytes / MIB:.2f} MiB), "
             f"embed={self.embed_mode} ({self.embed_bytes / MIB:.1f} MiB), "
             f"tied_lm_head={self.tied_lm_head}, total={self.device_mib:.1f} MiB, "
             f"{self.seconds:.1f}s"
+            + overflow
             + (f", missing={self.missing}" if self.missing else "")
             + (f", leftover_meta={self.leftover_meta}" if self.leftover_meta else "")
         )
@@ -126,8 +149,9 @@ def replace_linears(
     skip: Iterable[str] = (),
     slots: Iterable[str] | None = None,
     dtype: torch.dtype = torch.bfloat16,
+    seat: type = CompressedLinear,
 ) -> list[str]:
-    """Swap ``nn.Linear`` for ``CompressedLinear``, in place.
+    """Swap ``nn.Linear`` for ``seat`` (NF4 or VQ), in place.
 
     With ``slots`` (a :class:`~gpu.host.attach.DriverPlan`'s ``gemm_names``) only
     those qualified names are swapped **and any other ``nn.Linear`` is an error**
@@ -150,7 +174,7 @@ def replace_linears(
     def walk(module: nn.Module, prefix: str) -> None:
         for name, child in list(module.named_children()):
             qualified = f"{prefix}{name}"
-            if isinstance(child, CompressedLinear):
+            if isinstance(child, (CompressedLinear, CompressedVqLinear)):
                 continue
             if isinstance(child, nn.Linear) and name not in skip_set and qualified not in skip_set:
                 if wanted is not None and qualified not in wanted:
@@ -159,7 +183,7 @@ def replace_linears(
                 setattr(
                     module,
                     name,
-                    CompressedLinear(
+                    seat(
                         in_features=child.in_features,
                         out_features=child.out_features,
                         bias=child.bias is not None,
@@ -185,9 +209,13 @@ def replace_linears(
     return replaced
 
 
-def linear_modules(model: nn.Module) -> dict[str, CompressedLinear]:
-    """Qualified name -> ``CompressedLinear``, in module order."""
-    return {n: m for n, m in model.named_modules() if isinstance(m, CompressedLinear)}
+def linear_modules(model: nn.Module) -> dict[str, CompressedLinear | CompressedVqLinear]:
+    """Qualified name -> packed linear seat, in module order."""
+    return {
+        n: m
+        for n, m in model.named_modules()
+        if isinstance(m, (CompressedLinear, CompressedVqLinear))
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -197,7 +225,7 @@ def linear_modules(model: nn.Module) -> dict[str, CompressedLinear]:
 
 def _embedding_name(model: nn.Module) -> str | None:
     for name, mod in model.named_modules():
-        if isinstance(mod, (nn.Embedding, Nf4Embedding)):
+        if isinstance(mod, (nn.Embedding, Nf4Embedding, VqEmbedding)):
             return name
     return None
 
@@ -286,6 +314,7 @@ def load_chr_nf4(
     embed: str = "rows",
     layers: Sequence[int] | None = None,
     verbose: bool = False,
+    max_resident_bytes: int | None = None,
 ) -> LoadReport:
     """Fill a replaced skeleton from ``path``. The ``.chr`` is the only file read.
 
@@ -300,6 +329,11 @@ def load_chr_nf4(
     ``layers`` restricts loading to those decoder layers (for a cheap
     layer-0-only session); ``None`` loads everything.
 
+    ``max_resident_bytes``: ``None`` keeps every NF4 matrix on ``device`` (the
+    3B/14B/20B path). An ``int`` runs policy D: allocate :class:`SlotPair`
+    first, materialize resident NF4 on ``device``, streamed linears as
+    :class:`~gpu.host.host_image.HostImage` on CPU. Embed stays DEVICE.
+
     The header is parsed once and passed down, so 300+ matrices do not reparse
     65 KiB of JSON each (gpu-abi.md §2).
     """
@@ -307,8 +341,28 @@ def load_chr_nf4(
     path = str(path)
     hdr = header if header is not None else load_header(path)
     dev = torch.device(device)
-    report = LoadReport()
+    report = LoadReport(codec="nf4")
     layer_set = None if layers is None else sorted({int(v) for v in layers})
+    host_names: set[str] = set()
+
+    if max_resident_bytes is not None:
+        descs = descs_from_header(hdr)
+        plan = plan_residency(descs, max_resident_bytes)
+        # Slots first: addresses must not move when resident matrices scatter.
+        report.slots = SlotPair(plan.slot_nbytes, dev)
+        report.slot_nbytes = plan.slot_nbytes
+        report.streamed = len(plan.streamed)
+        report.streamed_bytes = plan.streamed_bytes
+        report.resident_bytes = plan.resident_bytes
+        report.streamed_tape = plan.streamed
+        report.overflow = bool(plan.streamed)
+        model.deepfold_residency = plan
+        host_names = set(plan.streamed)
+        embed_host = [d.name for d in descs if d.kind == "embed" and d.name in host_names]
+        if embed_host:
+            raise RuntimeError(
+                f"policy D: embed must stay DEVICE, plan streamed {embed_host}"
+            )
 
     modules = dict(model.named_modules())
     tied = bool(getattr(getattr(model, "config", None), "tie_word_embeddings", False))
@@ -354,6 +408,17 @@ def load_chr_nf4(
         if not _in_scope(info.layer, layer_set):
             report.skipped.append(f"{name} (layer {info.layer} out of scope)")
             continue
+        if name in host_names:
+            if not isinstance(mod, CompressedLinear):
+                raise TypeError(f"{name}: HOST overflow requires CompressedLinear")
+            cpu_mat = materialize_nf4(path, name, torch.device("cpu"), header=hdr)
+            image = HostImage.from_blobs(cpu_mat.packed, cpu_mat.scale, cpu_mat.K)
+            mod.attach_host(image)
+            mod.chr_name = name
+            report.linears += 1
+            if verbose:
+                print(f"  {name}: HOST [{cpu_mat.M},{cpu_mat.K}] {cpu_mat.nbytes / MIB:.2f} MiB")
+            continue
         matrix = materialize_nf4(path, name, dev, header=hdr)
         mod.attach(matrix)
         report.linears += 1
@@ -375,7 +440,7 @@ def load_chr_nf4(
             report.skipped.append(f"{name} (no module)")
             continue
         tensor = load_bf16(path, name, dev, header=hdr)
-        if isinstance(target, CompressedLinear) and attr == "bias":
+        if isinstance(target, (CompressedLinear, CompressedVqLinear)) and attr == "bias":
             target.set_bias(tensor)
         else:
             _assign_weight(target, attr, tensor)
@@ -393,6 +458,7 @@ def load_chr_nf4(
     _rebuild_rotary(model, dev)
     report.leftover_meta = _leftover_meta(model, layer_set)
     report.seconds = time.perf_counter() - t0
+    model.deepfold_slots = report.slots
     return report
 
 
@@ -420,6 +486,30 @@ def _load_embedding(
     if embed == "skip":
         return "skip (left on meta)"
 
+    if embed_info.codec == "vq":
+        if embed == "rows":
+            module = VqEmbedding(
+                embed_matrix.M,
+                embed_matrix.K,
+                padding_idx=getattr(current, "padding_idx", None),
+            )
+            module.attach(embed_matrix)
+            setattr(parent, child, module)
+            report.embed_bytes += embed_matrix.nbytes
+            return "vq-rows"
+        if embed == "bf16":
+            table = reconstruct_vq(
+                embed_matrix.index,
+                embed_matrix.book,
+                embed_matrix.M,
+                embed_matrix.K,
+                embed_matrix.K_pad,
+            ).to(torch.bfloat16)
+            _assign_weight(current, "weight", table)
+            report.embed_bytes += table.numel() * table.element_size()
+            return "vq-dequant-table"
+        raise ValueError(f"embed={embed!r}; expected 'rows', 'bf16' or 'skip'")
+
     if embed == "rows":
         module = Nf4Embedding(
             embed_matrix.M,
@@ -440,6 +530,103 @@ def _load_embedding(
     raise ValueError(f"embed={embed!r}; expected 'rows', 'bf16' or 'skip'")
 
 
+def load_chr_vq_model(
+    model: nn.Module,
+    path: str,
+    *,
+    device: str | torch.device = "cuda",
+    header: Header | None = None,
+    embed: str = "rows",
+    layers: Sequence[int] | None = None,
+    verbose: bool = False,
+) -> LoadReport:
+    """Fill a VQ-replaced skeleton from ``path``. Twin of :func:`load_chr_nf4`."""
+    t0 = time.perf_counter()
+    path = str(path)
+    hdr = header if header is not None else load_header(path)
+    dev = torch.device(device)
+    report = LoadReport(codec="vq")
+    layer_set = None if layers is None else sorted({int(v) for v in layers})
+
+    modules = dict(model.named_modules())
+    tied = bool(getattr(getattr(model, "config", None), "tie_word_embeddings", False))
+
+    embed_name = _embedding_name(model)
+    embed_info = hdr.tensors.get(embed_name) if embed_name else None
+    embed_matrix = None
+    lm_head_names = [
+        n
+        for n in linear_modules(model)
+        if n.rsplit(".", 1)[-1] in ("lm_head", "output")
+    ]
+    need_embed_bytes = embed_info is not None and embed_info.codec == "vq" and (
+        embed != "skip" or (tied and any(n not in hdr.tensors for n in lm_head_names))
+    )
+    if need_embed_bytes:
+        embed_matrix = materialize_vq(path, embed_name, dev, header=hdr)
+
+    for name, mod in linear_modules(model).items():
+        info = hdr.tensors.get(name)
+        if info is None:
+            if (
+                name in lm_head_names
+                and tied
+                and embed_matrix is not None
+                and (embed_matrix.M, embed_matrix.K) == (mod.M, mod.K)
+            ):
+                mod.attach(embed_matrix)
+                report.tied_lm_head = True
+                if verbose:
+                    print(f"  {name}: tied to {embed_name} (shared packed)")
+            else:
+                report.missing.append(name)
+            continue
+        if info.codec != "vq" or info.kind not in LINEAR_KINDS:
+            report.skipped.append(f"{name} (kind={info.kind}, codec={info.codec})")
+            continue
+        if not _in_scope(info.layer, layer_set):
+            report.skipped.append(f"{name} (layer {info.layer} out of scope)")
+            continue
+        matrix = materialize_vq(path, name, dev, header=hdr)
+        mod.attach(matrix)
+        report.linears += 1
+        report.linear_bytes += matrix.nbytes
+        if verbose:
+            print(f"  {name}: [{matrix.M},{matrix.K}] {matrix.nbytes / MIB:.2f} MiB")
+
+    for name in iter_bf16(hdr):
+        info = hdr.tensors[name]
+        if not _in_scope(info.layer, layer_set):
+            continue
+        target, attr = None, None
+        if name in modules:
+            target, attr = modules[name], "weight"
+        elif name.endswith(".bias") and name[: -len(".bias")] in modules:
+            target, attr = modules[name[: -len(".bias")]], "bias"
+        if target is None:
+            report.skipped.append(f"{name} (no module)")
+            continue
+        tensor = load_bf16(path, name, dev, header=hdr)
+        if isinstance(target, (CompressedLinear, CompressedVqLinear)) and attr == "bias":
+            target.set_bias(tensor)
+        else:
+            _assign_weight(target, attr, tensor)
+        report.bf16_tensors += 1
+        report.bf16_bytes += tensor.numel() * tensor.element_size()
+
+    if embed_name is not None and embed_info is not None:
+        report.embed_mode = _load_embedding(
+            model, embed_name, embed_info, embed_matrix, embed, path, hdr, dev, report
+        )
+    elif embed_name is not None:
+        report.missing.append(embed_name)
+
+    _rebuild_rotary(model, dev)
+    report.leftover_meta = _leftover_meta(model, layer_set)
+    report.seconds = time.perf_counter() - t0
+    return report
+
+
 def load_model(
     model_id: str,
     chr_path: str,
@@ -451,27 +638,42 @@ def load_model(
     verbose: bool = False,
     trust_remote_code: bool = False,
     strict: bool = True,
+    max_resident_bytes: int | None = None,
 ):
-    """``build_skeleton`` + ``attach`` + ``replace_linears`` + ``load_chr_nf4``.
+    """``build_skeleton`` + ``attach`` + packed seats + load from the ``.chr``.
 
-    ``attach`` runs on the meta skeleton, so a graph ``TokenLoop`` cannot drive
-    loses here -- before a single NF4 byte reaches the device. The resulting
-    :class:`~gpu.host.attach.DriverPlan` is left on the model as
-    ``deepfold_plan`` and is what ``TokenLoop`` binds against.
+    The file's quantized codec picks the seat: ``nf4`` → ``CompressedLinear``,
+    ``vq`` → ``CompressedVqLinear``. ``attach`` still runs on the meta skeleton
+    before any packed byte reaches the device.
 
     ``strict`` (the product default) turns a partial load into a refusal: a plan
     slot that is missing from the ``.chr``, was skipped as ``kind=other``, or
     stayed on ``meta`` means wrong answers, not slow ones. The lab passes
     ``strict=False`` so it can *print* an incomplete report instead.
+
+    ``max_resident_bytes`` is NF4 overflow (policy D). ``None`` keeps every
+    matrix on ``device``. Ignored for VQ.
     """
     from .attach import attach_module, plan_violations
 
+    hdr = load_header(chr_path)
+    codec = quantized_codec(hdr)
+    if codec not in ("nf4", "vq"):
+        raise RuntimeError(
+            f"{chr_path}: quantized codec {codec!r}; load_model drives nf4 or vq"
+        )
+    seat = CompressedVqLinear if codec == "vq" else CompressedLinear
+    filler = load_chr_vq_model if codec == "vq" else load_chr_nf4
+
     model = build_skeleton(model_id, trust_remote_code=trust_remote_code)
     plan = attach_module(model, trust_remote_code=trust_remote_code)
-    replace_linears(model, skip=skip, slots=plan.gemm_names)
-    report = load_chr_nf4(
-        model, chr_path, device=device, embed=embed, layers=layers, verbose=verbose
+    replace_linears(model, skip=skip, slots=plan.gemm_names, seat=seat)
+    fill_kw = dict(
+        device=device, embed=embed, layers=layers, verbose=verbose, header=hdr
     )
+    if codec == "nf4":
+        fill_kw["max_resident_bytes"] = max_resident_bytes
+    report = filler(model, chr_path, **fill_kw)
     model.deepfold_plan = plan
     if strict and layers is None:
         violations = plan_violations(plan, report)

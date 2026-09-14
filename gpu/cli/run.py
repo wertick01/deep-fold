@@ -19,8 +19,16 @@ from pathlib import Path
 
 from . import messages
 from .arch import gate, missing_internlm_extras
+from .codec import CodecFitError, decide, detect_vram_mib, load_config
 from .doctor import probe, verdict
-from .paths import ENV_MODEL, cached_chr, find_chr_bin, find_chr_file, looks_like_gguf
+from .paths import (
+    ENV_MODEL,
+    cached_chr,
+    chr_candidates,
+    find_chr_bin,
+    find_chr_file,
+    looks_like_gguf,
+)
 
 MIB = 1024 * 1024
 # 4.25 bits/weight (4 + 16/64) against 16: what a BF16 copy of the same model
@@ -40,8 +48,11 @@ def compress_to(
     chr_bin: Path,
     *,
     quiet: bool = False,
+    codec: str = "nf4",
 ) -> int:
     """Shell out to the Go compressor. Deepfold does not pack weights in Python."""
+    if codec not in ("nf4", "vq"):
+        raise ValueError(f"compress_to: codec={codec!r}, expected nf4 or vq")
     out.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         str(chr_bin),
@@ -51,13 +62,14 @@ def compress_to(
         "--out",
         str(out),
         "--codec",
-        "nf4",
+        codec,
     ]
     if quiet:
         cmd.append("--quiet")
+    bits = "VQ 2-bit" if codec == "vq" else "NF4"
     _err(
-        f"first run: packing {model_dir} with chr (CPU, minutes; 14B/20B longer).\n"
-        "This is NF4 compression of HuggingFace BF16 safetensors, "
+        f"first run: packing {model_dir} with chr (CPU, minutes; 14B/20B/32B longer).\n"
+        f"This is {bits} compression of HuggingFace BF16 safetensors, "
         "not loading a GGUF.\n"
         f"  {' '.join(cmd[1:])}"
     )
@@ -74,7 +86,7 @@ def compress_to(
 
 
 def compress(args) -> int:
-    """``deepfold compress --in DIR [--out FILE]``. NF4 only."""
+    """``deepfold compress --in DIR [--out FILE] [--codec auto|nf4|vq]``."""
     if looks_like_gguf(args.inp):
         _err(messages.GGUF)
         return 1
@@ -90,11 +102,29 @@ def compress(args) -> int:
         _err(messages.missing_chr())
         return 1
 
-    out = Path(args.out) if args.out else cached_chr(args.inp)
+    requested = getattr(args, "codec", None) or "auto"
+    vram = int(getattr(args, "vram_mib", None) or detect_vram_mib())
+    decision = None
+    try:
+        decision = decide(load_config(args.inp), vram, requested=requested)
+    except CodecFitError as exc:
+        _err(str(exc))
+        return 1
+    except (OSError, KeyError, TypeError, ValueError):
+        if requested not in ("auto", "nf4", "vq"):
+            _err(f"cannot pick a codec from {args.inp}")
+            return 1
+    codec = decision.codec if decision is not None else ("vq" if requested == "vq" else "nf4")
+    if decision is not None:
+        _err(decision.reason)
+
+    out = Path(args.out) if args.out else cached_chr(args.inp, codec)
     if out.is_file() and not args.force:
         _err(f"{out} already exists; pass --force to repack.")
         return 1
-    code = compress_to(args.inp, out, chr_bin, quiet=args.quiet)
+    code = compress_to(
+        args.inp, out, chr_bin, quiet=args.quiet, codec=codec
+    )
     if code == 0:
         print(out)
     return code
@@ -133,7 +163,22 @@ def _header_matcher(model_dir: Path):
     return accept
 
 
-def _resolve_weights(args, model: str) -> tuple[Path | None, int]:
+def _file_codec(path: Path) -> str | None:
+    """``nf4`` / ``vq`` from the CHR0 header, else from the filename suffix."""
+    try:
+        from gpu.chr0 import load_header, quantized_codec
+
+        return quantized_codec(load_header(str(path)))
+    except Exception:  # noqa: BLE001 - a truncated file is just "not this codec"
+        name = path.name.lower()
+        if name.endswith(".vq2.chr"):
+            return "vq"
+        if name.endswith(".nf4.chr"):
+            return "nf4"
+        return None
+
+
+def _resolve_weights(args, model: str, *, vram_mib: int | None = None) -> tuple[Path | None, int]:
     """The ``.chr``, compressing once if there is none. ``(path, exit_code)``."""
     if args.chr and looks_like_gguf(args.chr):
         _err(messages.GGUF)
@@ -142,13 +187,70 @@ def _resolve_weights(args, model: str) -> tuple[Path | None, int]:
     found = find_chr_file(
         Path(model), args.chr, accept=_header_matcher(Path(model))
     )
-    if found is not None:
-        return found, 0
     if args.chr:
+        if found is not None:
+            return found, 0
         _err(f"--chr {args.chr} does not exist.")
         return None, 1
+
+    requested = getattr(args, "codec", None) or "auto"
+    vram = int(vram_mib or detect_vram_mib())
+    accept = _header_matcher(Path(model))
+    hits: dict[str, Path | None] = {"nf4": None, "vq": None}
+    if accept is None:
+        unique = find_chr_file(Path(model), None)
+        if unique is not None:
+            return unique, 0
+    else:
+        for path in chr_candidates(Path(model)):
+            if not accept(path):
+                continue
+            codec = _file_codec(path)
+            if codec in hits and hits[codec] is None:
+                hits[codec] = path
+
+    decision = None
+    try:
+        decision = decide(load_config(model), vram, requested=requested)
+    except CodecFitError as exc:
+        _err(str(exc))
+        return None, 1
+    except (OSError, KeyError, TypeError, ValueError):
+        decision = None
+
+    if decision is not None:
+        preferred = decision.codec
+        if hits[preferred] is not None:
+            return hits[preferred], 0
+        other = "vq" if preferred == "nf4" else "nf4"
+        # Never auto-fall-back onto a VQ file: the 3B canary failed chat.
+        if requested == "auto" and other == "nf4" and hits["nf4"] is not None:
+            leftover = decision.budget.leftover_nf4
+            if leftover >= 0:
+                _err(
+                    f"using existing {hits['nf4'].name} (nf4); "
+                    f"preferred {preferred} was not on disk"
+                )
+                return hits["nf4"], 0
+    elif hits["nf4"] or hits["vq"]:
+        if requested == "vq" and hits["vq"] is not None:
+            return hits["vq"], 0
+        if hits["nf4"] is not None:
+            return hits["nf4"], 0
+
+    if not any(hits.values()):
+        unique = find_chr_file(Path(model), None)
+        if unique is not None:
+            return unique, 0
+
+    preferred = (
+        decision.codec
+        if decision is not None
+        else ("vq" if requested == "vq" else "nf4")
+    )
+
     if args.no_compress:
-        _err(f"No .chr for {model} and --no-compress was given.")
+        _err(f"No .{preferred} .chr for {model} and --no-compress was given.")
         return None, 1
 
     chr_bin = find_chr_bin(args.chr_bin)
@@ -156,8 +258,10 @@ def _resolve_weights(args, model: str) -> tuple[Path | None, int]:
         _err(messages.missing_chr())
         return None, 1
 
-    out = cached_chr(model)
-    code = compress_to(model, out, chr_bin, quiet=args.quiet)
+    out = cached_chr(model, preferred)
+    if decision is not None:
+        _err(decision.reason)
+    code = compress_to(model, out, chr_bin, quiet=args.quiet, codec=preferred)
     if code != 0:
         return None, code
     return out, 0
@@ -234,7 +338,44 @@ def _prompts(args):
         yield line
 
 
-def _generate(args, model: str, chr_file: Path, trust_remote_code: bool) -> int:
+def _overflow_cap_from_chr(chr_file: Path, vram_mib: int, max_seq: int) -> int:
+    """HBM cap from the loaded ``.chr`` header (slot = max gate/up/down)."""
+    from gpu.host.residency import overflow_cap_from_chr
+
+    return overflow_cap_from_chr(str(chr_file), int(vram_mib), int(max_seq))
+
+
+def _max_resident_bytes(
+    args,
+    model_dir: str,
+    chr_file: Path,
+    vram_mib: int | None,
+) -> int | None:
+    """``load_model(..., max_resident_bytes=)`` or None (3B/14B/20B resident).
+
+    Explicit ``--max-resident-mib`` always wins. ``--codec vq`` never auto-
+    overflows. Otherwise ``decide(...).overflow`` computes a cap from the
+    ``.chr`` header; a full NF4 fit leaves the cap unset.
+    """
+    flag = getattr(args, "max_resident_mib", None)
+    if flag is not None:
+        return int(flag) * MIB
+    requested = getattr(args, "codec", None) or "auto"
+    if requested == "vq":
+        return None
+    vram = int(vram_mib or detect_vram_mib())
+    try:
+        decision = decide(load_config(model_dir), vram, requested=requested)
+    except (CodecFitError, OSError, KeyError, TypeError, ValueError):
+        return None
+    if not decision.overflow:
+        return None
+    return _overflow_cap_from_chr(chr_file, vram, int(args.max_seq))
+
+
+def _generate(
+    args, model: str, chr_file: Path, trust_remote_code: bool, *, vram_mib: int | None = None
+) -> int:
     """Load packed weights once, then drive TokenLoop until stdin is done."""
     import torch
     from transformers import AutoTokenizer
@@ -248,27 +389,55 @@ def _generate(args, model: str, chr_file: Path, trust_remote_code: bool) -> int:
         model, local_files_only=True, trust_remote_code=trust_remote_code
     )
 
+    cap = _max_resident_bytes(args, model, chr_file, vram_mib)
     _err(f"loading {chr_file} (the only weight file opened)")
     loaded, report = load_model(
-        model, str(chr_file), trust_remote_code=trust_remote_code
+        model,
+        str(chr_file),
+        trust_remote_code=trust_remote_code,
+        max_resident_bytes=cap,
     )
     weight_mib = report.device_mib
     smi = _smi_used_mib()
+    codec = getattr(report, "codec", "nf4")
+    if codec == "vq":
+        _err(
+            "WARNING: VQ 2×8 failed greedy smoke on Qwen2.5-3B (gate_proj alone "
+            "collapses chat). This codec is for the kernel oracle, not a talking model."
+        )
+    extra = ""
+    if report.overflow:
+        extra = (
+            f", overflow streamed={report.streamed} "
+            f"({report.streamed_bytes / MIB:.1f} MiB) "
+            f"slot={report.slot_nbytes / MIB:.2f} MiB"
+        )
     _err(
-        f"packed weights {weight_mib:.0f} MiB"
+        f"packed {codec} weights {weight_mib:.0f} MiB"
+        + extra
         + (f", nvidia-smi {smi} MiB" if smi is not None else "")
         + f", load {report.seconds:.1f} s"
     )
 
     loop = TokenLoop(loaded, max_seq=args.max_seq)
     _err(f"graph family: {loop.plan.family} (qkv pack: {loop.plan.qkv_pack or 'split'})")
+    if codec == "vq" and loop.prefill_chunk == 1:
+        _err(
+            "VQ GEMM is decode-only: the prompt is walked one token at a time "
+            "(slow first token; decode stays on-card)"
+        )
     if args.warmup:
         loop.warmup(prompt=8, tokens=8)
+    loop.capture_graphs()
+    if loop.graph_error:
+        _err(f"graph={loop.graph_mode} ({loop.graph_error})")
+    else:
+        _err(f"graph={loop.graph_mode}")
     stop = _stop_ids(tok, model)
     _err(f"stop ids from tokenizer: {stop}")
 
     total = torch.cuda.get_device_properties(0).total_memory // MIB
-    if _both_fit(weight_mib, total):
+    if not report.overflow and _both_fit(weight_mib, total):
         _err(messages.THREE_B_SPEED)
 
     for text in _prompts(args):
@@ -313,12 +482,14 @@ def run(args) -> int:
             _err(messages.INTERNLM_EXTRAS)
             return 1
 
-    chr_file, code = _resolve_weights(args, model)
+    chr_file, code = _resolve_weights(args, model, vram_mib=m.vram_total_mib)
     if chr_file is None:
         return code
 
     try:
-        return _generate(args, model, chr_file, checked.trust_remote_code)
+        return _generate(
+            args, model, chr_file, checked.trust_remote_code, vram_mib=m.vram_total_mib
+        )
     except RuntimeError as exc:
         if "out of memory" not in str(exc).lower():
             raise

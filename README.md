@@ -44,6 +44,10 @@ When both copies fit (3B), packed decode is now faster on this card; time to
 the first token is still slower. Compression pays when the uncompressed model
 does not fit.
 
+![deep-fold: persistent packed weights for LLM inference — CPU packs NF4 into a CHR0 file, CompressedLinear holds packed codes and group scales in VRAM, each GEMM reconstructs a tile in registers and discards it](scheme.png)
+
+*Figure. Weights are packed once on the CPU into a `.chr` file. On the GPU a linear layer holds only packed codes and group scales; each multiply reconstructs a tile in registers and discards it. A dense layer is never resident in video memory.*
+
 Русская версия: [README.ru.md](README.ru.md).
 
 ## The problem

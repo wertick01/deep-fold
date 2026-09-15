@@ -23,6 +23,7 @@ from gpu.loop.speculate import (  # noqa: E402
     accept_greedy,
     lookup_draft,
     measure_verify,
+    oracle_draft,
     verify_block,
 )
 
@@ -248,6 +249,36 @@ def test_lookup_draft_deterministic() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# oracle_draft
+# --------------------------------------------------------------------------- #
+
+
+def test_oracle_draft_copies_teacher() -> None:
+    prompt = [1, 2, 3]
+    greedy = [21, 22, 23, 24]
+    teacher = prompt + greedy
+    d = oracle_draft(prompt, 4, teacher)
+    assert d.tolist() == greedy
+    d2 = oracle_draft(prompt + [21, 22], 2, teacher)
+    assert d2.tolist() == [23, 24]
+
+
+def test_oracle_draft_pads_short_tail() -> None:
+    teacher = [1, 2, 9]
+    d = oracle_draft([1, 2], 4, teacher)
+    assert d.tolist() == [9, 9, 9, 9]
+
+
+def test_oracle_draft_k0_raises() -> None:
+    try:
+        oracle_draft([1], 0, [1, 2])
+    except ValueError as exc:
+        assert "k=0" in str(exc)
+    else:
+        raise AssertionError("k=0 must raise")
+
+
+# --------------------------------------------------------------------------- #
 # measure_verify
 # --------------------------------------------------------------------------- #
 
@@ -401,8 +432,86 @@ def test_generate_unknown_draft_raises() -> None:
             loop.generate(torch.tensor([0]), max_new_tokens=1, draft="hf")
         except ValueError as exc:
             assert "lookup" in str(exc)
+            assert "oracle" in str(exc)
+            assert "cpu" in str(exc)
         else:
             raise AssertionError("unknown draft must raise")
+        try:
+            loop.generate(
+                torch.tensor([0]), max_new_tokens=1, speculate=4, draft="oracle"
+            )
+        except ValueError as exc:
+            assert "oracle_ids" in str(exc)
+        else:
+            raise AssertionError("oracle without teacher must raise")
+        try:
+            loop.generate(
+                torch.tensor([0]), max_new_tokens=1, speculate=4, draft="cpu"
+            )
+        except ValueError as exc:
+            assert "drafter" in str(exc)
+        else:
+            raise AssertionError("cpu without drafter must raise")
+    finally:
+        torch.cuda.synchronize = orig
+
+
+def test_generate_oracle_full_accept() -> None:
+    orig = _silence_cuda_sync()
+    try:
+        greedy = [21, 22, 23, 24]
+        prompt = torch.tensor([1, 2, 3], dtype=torch.long)
+        teacher = [1, 2, 3] + greedy
+        loop = FakeLoop(greedy, prompt_len=3)
+        out = loop.generate(
+            prompt,
+            max_new_tokens=4,
+            speculate=4,
+            draft="oracle",
+            oracle_ids=teacher,
+        )
+        assert out.tokens == greedy, out.tokens
+        assert out.spec_verifies == 1, out.spec_verifies
+        assert out.spec_skips == 0, out.spec_skips
+        assert out.spec_draft_accepted == 4, out.spec_draft_accepted
+        assert any(flag for _, _, flag in loop.forwards), loop.forwards
+        assert loop.forwards[0] == ((21, 22, 23, 24), 3, True), loop.forwards
+    finally:
+        torch.cuda.synchronize = orig
+
+
+class _TeacherDraft:
+    def __init__(self, teacher) -> None:
+        self.teacher = list(teacher)
+        self.resets = 0
+
+    def reset(self) -> None:
+        self.resets += 1
+
+    def __call__(self, known, k: int):
+        return oracle_draft(known, k, self.teacher)
+
+
+def test_generate_cpu_full_accept() -> None:
+    orig = _silence_cuda_sync()
+    try:
+        greedy = [21, 22, 23, 24]
+        prompt = torch.tensor([1, 2, 3], dtype=torch.long)
+        teacher = [1, 2, 3] + greedy
+        loop = FakeLoop(greedy, prompt_len=3)
+        drafter = _TeacherDraft(teacher)
+        out = loop.generate(
+            prompt,
+            max_new_tokens=4,
+            speculate=4,
+            draft="cpu",
+            drafter=drafter,
+        )
+        assert out.tokens == greedy, out.tokens
+        assert drafter.resets == 1
+        assert out.spec_verifies == 1, out.spec_verifies
+        assert out.spec_draft_accepted == 4, out.spec_draft_accepted
+        assert any(flag for _, _, flag in loop.forwards), loop.forwards
     finally:
         torch.cuda.synchronize = orig
 

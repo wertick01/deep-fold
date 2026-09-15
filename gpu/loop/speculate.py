@@ -1,17 +1,20 @@
-"""Greedy speculative verify for TokenLoop. No second model, no sampling.
+"""Greedy speculative verify for TokenLoop. No second GPU model, no sampling.
 
-Lab path (``verify-k`` / ``spec-lookup`` in ``docs/plan-h2-accel.md``):
+Lab path (``verify-k`` / ``spec-lookup`` / ``spec-oracle``):
 
 - :func:`verify_block` is one ``forward(..., all_positions=True)`` with
   ``k`` in ``1..LIVE_MAX_N``. ``k>32`` is two tapes; this file refuses to hide
   that.
 - :func:`lookup_draft` is an n-gram (length 2 or 3) copy from the known
   prompt+prefix. A miss still returns ``k`` ids so verify can reject them.
+- :func:`oracle_draft` is lab-only: copy the next ``k`` teacher tokens
+  (prompt + greedy). Measures T_verify-bound tok/s when α=1.
 - :func:`accept_greedy` is Leviathan greedy: leftover checks ``draft[0]``,
   ``block_logits[i]`` checks ``draft[i+1]``. KV rewind is the caller's job.
 
 ``TokenLoop.generate(..., speculate=1, draft="none")`` stays the ``step()``
-loop. ``draft="lookup"`` with ``speculate>=2`` calls these helpers.
+loop. ``draft="lookup"`` / ``draft="oracle"`` with ``speculate>=2`` call
+:func:`spec_generate`. Product default stays ``draft="none"``.
 """
 
 from __future__ import annotations
@@ -27,7 +30,9 @@ __all__ = [
     "verify_block",
     "measure_verify",
     "lookup_draft",
+    "oracle_draft",
     "accept_greedy",
+    "spec_generate",
     "spec_lookup_generate",
 ]
 
@@ -210,6 +215,25 @@ def lookup_draft(ids, k: int) -> torch.Tensor:
     return torch.tensor(drafted, dtype=torch.long)
 
 
+def oracle_draft(ids, k: int, teacher) -> torch.Tensor:
+    """Propose the next ``k`` teacher tokens after ``ids``.
+
+    ``teacher`` is the full sequence (prompt + greedy decode). Lab-only:
+    this is α=1 when the teacher is the target's own greedy trajectory.
+    Short remainder is padded by repeating the last teacher token (same
+    contract as :func:`lookup_draft`).
+    """
+    k = int(k)
+    if k < 1:
+        raise ValueError(f"oracle_draft k={k}; expected k>=1")
+    known = _id_list(ids)
+    seq = _id_list(teacher)
+    rest = seq[len(known) :]
+    if not rest:
+        rest = [seq[-1]] if seq else [known[-1]] if known else [0]
+    return torch.tensor(_pad_k(rest, k), dtype=torch.long)
+
+
 def accept_greedy(
     leftover_logits: torch.Tensor,
     draft_ids,
@@ -261,7 +285,7 @@ def accept_greedy(
     return k, leftover, emitted
 
 
-def spec_lookup_generate(
+def spec_generate(
     loop,
     out,
     prompt_ids: torch.Tensor,
@@ -270,11 +294,13 @@ def spec_lookup_generate(
     stop_set: frozenset,
     on_token,
     speculate: int,
+    draft_fn,
     should_stop=None,
 ) -> None:
-    """Fill ``out`` with n-gram draft + greedy verify. Mutates ``loop.kv.seq_len``.
+    """Fill ``out`` with ``draft_fn`` + greedy verify. Mutates ``loop.kv.seq_len``.
 
-    Used by :meth:`TokenLoop.generate` when ``draft=="lookup"`` and
+    ``draft_fn(known_ids, k) -> LongTensor[k]``. Used by
+    :meth:`TokenLoop.generate` when ``draft`` is ``lookup`` or ``oracle`` and
     ``speculate>=2``. Sets ``kv.seq_len`` to the accepted draft length (bonus
     token is consumed with :meth:`TokenLoop.step` only if generation continues).
     """
@@ -316,9 +342,12 @@ def spec_lookup_generate(
             leftover = loop.step(token)
             continue
 
-        draft_ids = lookup_draft(known + out.tokens, k)
+        t_draft = time.perf_counter()
+        draft_ids = draft_fn(known + out.tokens, k)
+        out.spec_draft_ms += (time.perf_counter() - t_draft) * 1000.0
         # Leftover already rejects draft[0]: do not pay a full overflow tape.
         if _argmax_id(leftover) != int(draft_ids.reshape(-1)[0]):
+            out.spec_skips += 1
             token = _argmax_id(leftover)
             if not emit(token):
                 break
@@ -330,6 +359,8 @@ def spec_lookup_generate(
         start = int(loop.kv.seq_len)
         block_logits = verify_block(loop, draft_ids, start)
         n_acc, leftover, emitted = accept_greedy(leftover, draft_ids, block_logits)
+        out.spec_verifies += 1
+        out.spec_draft_accepted += int(n_acc)
 
         stopped = False
         n_emitted = 0
@@ -347,3 +378,29 @@ def spec_lookup_generate(
             if int(loop.kv.seq_len) >= int(loop.max_seq):
                 break
             leftover = loop.step(int(out.tokens[-1]))
+
+
+def spec_lookup_generate(
+    loop,
+    out,
+    prompt_ids: torch.Tensor,
+    leftover: torch.Tensor,
+    max_new_tokens: int,
+    stop_set: frozenset,
+    on_token,
+    speculate: int,
+    should_stop=None,
+) -> None:
+    """n-gram draft + greedy verify. Thin wrapper over :func:`spec_generate`."""
+    spec_generate(
+        loop,
+        out,
+        prompt_ids,
+        leftover,
+        max_new_tokens,
+        stop_set,
+        on_token,
+        speculate,
+        lookup_draft,
+        should_stop,
+    )

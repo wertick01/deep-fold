@@ -260,6 +260,10 @@ class Generation:
     h2d_copies: int = 0
     h2d_copy_ms: float = 0.0
     h2d_forwards: int = 0
+    spec_verifies: int = 0
+    spec_skips: int = 0
+    spec_draft_accepted: int = 0
+    spec_draft_ms: float = 0.0
 
     @property
     def decode_tok_s(self) -> float:
@@ -1029,19 +1033,33 @@ class TokenLoop:
         should_stop: Callable[[], bool] | None = None,
         speculate: int = 1,
         draft: str = "none",
+        oracle_ids: torch.Tensor | Sequence[int] | None = None,
+        drafter=None,
     ) -> Generation:
         """Greedy. Prefill and decode are timed separately and never averaged.
 
         ``speculate <= 1`` or ``draft == "none"`` is the ``step()`` loop.
         ``draft == "lookup"`` and ``speculate >= 2`` is n-gram draft + greedy
         verify (:mod:`gpu.loop.speculate`); no second model.
+        ``draft == "oracle"`` is lab-only: the teacher sequence (prompt +
+        greedy tokens) is proposed as the draft so T_verify-bound tok/s can
+        be measured.
+        ``draft == "cpu"`` is lab-only: ``drafter(known_ids, k)`` proposes
+        tokens from a CPU model (RAM, not VRAM). Same-GPU draft stays
+        forbidden. Not a product default; CLI does not grow ``--draft``.
 
         ``should_stop`` is polled between decode tokens, not inside a CUDA
         kernel. When it returns true, :attr:`Generation.interrupted` is set and
         already emitted tokens are kept.
         """
-        if draft not in ("none", "lookup"):
-            raise ValueError(f"draft={draft!r}; expected 'none' or 'lookup'")
+        if draft not in ("none", "lookup", "oracle", "cpu"):
+            raise ValueError(
+                f"draft={draft!r}; expected 'none', 'lookup', 'oracle', or 'cpu'"
+            )
+        if draft == "oracle" and oracle_ids is None:
+            raise ValueError("draft='oracle' requires oracle_ids (prompt + greedy)")
+        if draft == "cpu" and drafter is None:
+            raise ValueError("draft='cpu' requires drafter (CPU model, not VRAM)")
         self.reset()
         self._capture_decode_glue()
         ids = prompt_ids.reshape(-1).to(self.device, torch.long)
@@ -1082,9 +1100,23 @@ class TokenLoop:
                 out.decode_steps += 1
                 token = int(logits.argmax())
         else:
-            from .speculate import spec_lookup_generate
+            from .speculate import lookup_draft, oracle_draft, spec_generate
 
-            spec_lookup_generate(
+            if draft == "lookup":
+                draft_fn = lookup_draft
+            elif draft == "oracle":
+                teacher = oracle_ids
+
+                def draft_fn(known, k, _teacher=teacher):
+                    return oracle_draft(known, k, _teacher)
+
+            else:
+                reset = getattr(drafter, "reset", None)
+                if callable(reset):
+                    reset()
+                draft_fn = drafter
+
+            spec_generate(
                 self,
                 out,
                 ids,
@@ -1093,6 +1125,7 @@ class TokenLoop:
                 stop_set,
                 on_token,
                 int(speculate),
+                draft_fn,
                 should_stop,
             )
         torch.cuda.synchronize()

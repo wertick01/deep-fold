@@ -21,6 +21,7 @@ if str(_REPO) not in sys.path:
 from gpu.chr0._fixtures import build_chr, nf4_blob_sizes  # noqa: E402
 from gpu.chr0.header import align64, load_header  # noqa: E402
 from gpu.host import LoadReport, SlotPair  # noqa: E402
+from gpu.host.slots import OVERFLOW_SLOT_COUNT  # noqa: E402
 from gpu.host.host_image import HostImage  # noqa: E402
 from gpu.host.linear import CompressedLinear  # noqa: E402
 from gpu.host.model import (  # noqa: E402
@@ -128,6 +129,34 @@ def test_slotpair_two_ptrs_and_view_roundtrip() -> None:
         int(slots.arena[0].numel()) > packed_n,
         f"{int(slots.arena[0].numel())} vs packed {packed_n}",
     )
+    check("default count is 2", slots.count == 2 and len(slots.arena) == 2, f"{slots.count}")
+
+
+def test_slotpair_three_arenas() -> None:
+    img = _host_image(5, 70)
+    raised = False
+    try:
+        SlotPair(img.nbytes, "cpu", count=1)
+    except ValueError:
+        raised = True
+    check("count=1 refused", raised, "")
+    slots = SlotPair(img.nbytes, "cpu", count=3)
+    check(
+        "three arenas",
+        slots.count == 3 and len(slots.arena) == 3,
+        f"count={slots.count} n={len(slots.arena)}",
+    )
+    ptrs = [int(a.data_ptr()) for a in slots.arena]
+    check("three distinct ptrs", len(set(ptrs)) == 3, str(ptrs))
+    check("arena2 16-align", ptrs[2] % 16 == 0, hex(ptrs[2]))
+    packed, _ = slots.view(2, img.M, img.K, img.K_pad)
+    check("view(2) is arena2", packed.data_ptr() == slots.arena[2].data_ptr(), "")
+    bad = False
+    try:
+        slots.view(3, img.M, img.K, img.K_pad)
+    except IndexError:
+        bad = True
+    check("view(3) IndexError", bad, "")
 
 
 def test_attach_host_empty_packed_forward_raises() -> None:
@@ -238,6 +267,11 @@ def test_load_chr_nf4_toy_q_device_down_host() -> None:
                 report2.slots.arena[0].data_ptr() != report2.slots.arena[1].data_ptr(),
                 "",
             )
+            check(
+                "product overflow slot count",
+                report2.slots.count == OVERFLOW_SLOT_COUNT,
+                f"{report2.slots.count}",
+            )
 
 
 def test_gpu_3b_overflow_canary() -> None:
@@ -317,6 +351,11 @@ def test_gpu_3b_overflow_canary() -> None:
                 abs(report.slot_nbytes / MIB - 11.421875) < 1e-6,
                 f"{report.slot_nbytes / MIB}",
             )
+            check(
+                "3B overflow slot count",
+                report.slots.count == OVERFLOW_SLOT_COUNT,
+                f"{report.slots.count}",
+            )
         check("embed not bf16 table", report.embed_mode != "nf4-dequant-table", report.embed_mode)
     finally:
         del model, report
@@ -325,6 +364,7 @@ def test_gpu_3b_overflow_canary() -> None:
 
 TESTS = [
     test_slotpair_two_ptrs_and_view_roundtrip,
+    test_slotpair_three_arenas,
     test_attach_host_empty_packed_forward_raises,
     test_attach_device_is_loaded_nbytes,
     test_loadreport_default_slots_none,

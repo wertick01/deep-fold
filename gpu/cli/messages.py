@@ -39,7 +39,7 @@ def unknown_ollama_tag(tag: str) -> str:
 
 
 NEED_HUB = """\
-from-ollama needs huggingface_hub to download BF16 safetensors.
+deepfold pull / from-ollama needs huggingface_hub to download BF16 safetensors.
 Install the extra:
 
   pip install "deepfold[hub]"
@@ -47,6 +47,43 @@ Install the extra:
 Or download the HuggingFace repo yourself, then:
 
   deepfold run --model <that directory>"""
+
+
+def unknown_hf_id(hf_id: str, table: tuple[str, ...]) -> str:
+    """Closed Hub lookup: not an allowlisted BF16 tree."""
+    listed = ", ".join(table)
+    return (
+        f"pull: unknown HuggingFace id {hf_id!r}.\n"
+        "Deepfold downloads an allowlisted BF16 tree, not arbitrary Hub repos.\n"
+        f"Allowlisted ids: {listed}.\n"
+        "This is not a general HuggingFace runtime."
+    )
+
+
+CHAT_NEED_TTY = (
+    "deepfold chat needs a TTY. For scripts and pipes: deepfold run --prompt ..."
+)
+
+CHAT_NEED_TOOLKIT = """\
+deepfold chat needs prompt_toolkit. Install the extra:
+
+  pip install "deepfold[chat]"
+
+Or use deepfold run --prompt."""
+
+SETUP_REFUSE_TORCH_GPU = """\
+deepfold setup refuses to pip-install into conda env torch-gpu
+(that interpreter is the author's lab; a broken wheel there takes the kernel).
+Create a neighbor venv instead:
+
+  powershell -File scripts/setup.ps1
+  bash scripts/setup.sh"""
+
+CHAT_HELP = (
+    "Enter sends. Ctrl+J adds a line. "
+    "Slash: /help /quit /exit /clear /stats. "
+    "Each turn prefills the whole chat (KV is not reused)."
+)
 
 #: Kept for the doctor / catalog copy. It is *not* the generate authority any
 #: more: after wave10 P1 that is `gpu.host.attach` (the walker) plus the
@@ -120,7 +157,7 @@ NF4 pays off when the 16-bit model does not fit (14B, 20B)."""
 # --------------------------------------------------------------------------- #
 
 CPU_TORCH = """\
-PyTorch has no CUDA. Deepfold's kernel is Ampere CUDA (sm_86), not CPU.
+PyTorch has no CUDA. Deepfold's kernel is Ampere-family CUDA (sm_80/86/89), not CPU.
 Default "pip install torch" is often the CPU wheel.
 Install a CUDA 12.4 wheel, then re-run doctor:
 
@@ -130,7 +167,7 @@ Deepfold does not install the NVIDIA driver."""
 
 NO_TORCH = """\
 PyTorch is not installed in this interpreter. Deepfold's kernel is Ampere
-CUDA (sm_86); the CUDA wheel is not on the default PyPI index:
+CUDA (sm_86 ship; sm_80/sm_89 experimental); the CUDA wheel is not on the default PyPI index:
 
   pip install torch --index-url https://download.pytorch.org/whl/cu124
 
@@ -141,16 +178,16 @@ def wrong_capability(capability: tuple[int, int] | None) -> str:
     """wave8-install.md §8, with the capability doctor actually saw."""
     sm = f"sm_{capability[0]}{capability[1]}" if capability else "unknown"
     return (
-        f"This GPU is {sm}. The NF4 kernel is built only for sm_86\n"
-        "(-gencode=arch=compute_86,code=sm_86; no PTX).\n"
-        "Measured machine: RTX 3080. Ada / Hopper / Blackwell are refused, "
-        "not a kernel port."
+        f"This GPU is {sm}. The NF4 kernel ships as an Ampere-family fatbinary\n"
+        f"(sm_80 / sm_86 / sm_89 + PTX compute_80).\n"
+        "Measured machine: RTX 3080 (sm_86). Turing / Hopper / Blackwell are "
+        "refused, not a silent fallback."
     )
 
 
 MACOS_RUN = """\
 deepfold run needs the Ampere CUDA kernel. There is no CUDA kernel on macOS.
-chr compress on this Mac is supported; copy the .chr to a CUDA sm_86 machine."""
+chr compress on this Mac is supported; copy the .chr to a CUDA Ampere/Ada machine."""
 
 MISSING_CHR = """\
 chr (Go compressor) was not found. Deepfold does not pack weights in Python.
@@ -207,15 +244,15 @@ COMPRESS_FAILED = "Deepfold did not load anything."
 GENERATE_SHIP = "generate: yes (ship, sm_86)"
 
 GENERATE_EXPERIMENTAL = (
-    "generate: experimental (unmeasured arch, DEEPFOLD_ALLOW_UNMEASURED_ARCH=1)"
+    "generate: experimental (Ampere-family, unmeasured; plate is RTX 3080 sm_86)"
 )
 
 
 def generate_unmeasured(capability: tuple[int, int]) -> str:
     sm = f"sm_{capability[0]}{capability[1]}"
     return (
-        f"generate: no -- binary is sm_86 SASS only; this GPU is {sm}. "
-        "Ada / Hopper / Blackwell are refused, not a kernel port (D2)."
+        f"generate: experimental -- this GPU is {sm}; the plate is sm_86. "
+        "Ampere-family fatbinary (sm_80/86/89 + PTX)."
     )
 
 
@@ -235,15 +272,15 @@ GENERATE_APPLE = (
 )
 
 GENERATE_ROCM = (
-    "generate: no -- ROCm is not implemented. NVIDIA CUDA Ampere (sm_86 ship) only."
+    "generate: no -- ROCm is not implemented. NVIDIA CUDA Ampere-family only."
 )
 
 
 def generate_unsupported(capability: tuple[int, int]) -> str:
     sm = f"sm_{capability[0]}{capability[1]}"
     return (
-        f"generate: no -- this GPU is {sm}; the shipped kernel image is sm_86 "
-        "SASS only, and sm_86 is the only measured arch (D1)."
+        f"generate: no -- this GPU is {sm}; Ampere-family is sm_80/86/89. "
+        "Hopper / Blackwell are refused (D1)."
     )
 
 

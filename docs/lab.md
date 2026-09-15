@@ -221,8 +221,9 @@ archives (rotated SVG labels, two separate stories). Use `03_codec_lab.ipynb`.
 
 ## How to run
 
-Generate (no notebook; `sm_86` only; Ada/Hopper/Blackwell refused, not a
-port; GGUF refused; sibling `.chr` matched by CHR0 header):
+Generate (no notebook; Ampere-family CUDA: **sm_86 measured**, A100/Ada
+experimental; Turing/Hopper/Blackwell refused; GGUF refused; sibling `.chr`
+matched by CHR0 header):
 
 ```powershell
 python -m gpu.cli doctor
@@ -230,7 +231,8 @@ python -m gpu.cli run --model <HuggingFace-dir>
 ```
 
 The comparison plate still uses `DEEPFOLD_MODEL`, `DEEPFOLD_CHR`,
-`DEEPFOLD_RUNS` (defaults are the author’s machine):
+`DEEPFOLD_MODELS`, `DEEPFOLD_RUNS` (author-box defaults apply only when
+`C:\dev\models` exists):
 
 ```powershell
 conda activate torch-gpu

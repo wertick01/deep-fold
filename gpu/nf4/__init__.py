@@ -3,8 +3,9 @@
 ``nf4_gemm(packed, scale, x, M, K, K_pad) -> y`` with ``y`` BF16 ``[M, N]``.
 Caller owns every tensor; the kernel does not allocate.
 
-Compile (Windows, sm_86), from a VS x64 prompt or after vcvars64.bat,
-**when the 3080 is free** (do not JIT while the 3B lab holds the card):
+Compile (Windows, Ampere-family fatbinary), from a VS x64 prompt or after
+vcvars64.bat, **when the 3080 is free** (do not JIT while the 3B lab holds
+the card):
 
     C:\\Users\\Professional\\anaconda3\\envs\\torch-gpu\\python.exe gpu/nf4/setup.py build_ext --inplace
     C:\\Users\\Professional\\anaconda3\\envs\\torch-gpu\\python.exe -m gpu.nf4.test_plan
@@ -34,6 +35,7 @@ _SOURCES = _KERNEL_SOURCES + (_INCLUDE / "chr_gpu.h",)
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
+from gpu.ampere_gencode import nvcc_cflags  # noqa: E402
 from gpu.ext_bin import find_ext, have_host_compiler  # noqa: E402
 from .plan import LIVE_MAX_N, PLAN_MAX_N  # noqa: E402
 
@@ -80,12 +82,7 @@ def _jit_load():
         sources=[str(_DIR / "bindings.cpp"), str(_DIR / "nf4_gemm.cu")],
         extra_include_paths=[str(_INCLUDE)],
         extra_cflags=cxx_flags,
-        extra_cuda_cflags=[
-            "-O3",
-            "-gencode=arch=compute_86,code=sm_86",
-            "--expt-relaxed-constexpr",
-            "-lineinfo",
-        ],
+        extra_cuda_cflags=nvcc_cflags(),
         verbose=True,
     )
 

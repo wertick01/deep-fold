@@ -15,6 +15,8 @@ from __future__ import annotations
 import os
 from typing import Sequence
 
+from gpu.cli.paths import models_root, runs_root
+
 __all__ = [
     "CHR_PATH",
     "END_OF_TURN_TOKENS",
@@ -68,10 +70,10 @@ TURNS_NOTE = (
     "independent turns: KV reset between messages, each prompt is a clean prefill"
 )
 
-# This machine. Overridable so the notebook can point at another checkout.
-MODEL_DIR = os.environ.get("DEEPFOLD_MODEL", r"C:\dev\models\Qwen2.5-3B-Instruct")
-CHR_PATH = os.environ.get("DEEPFOLD_CHR", r"C:\dev\models\qwen25-3b.nf4.chr")
-RUNS_DIR = os.environ.get("DEEPFOLD_RUNS", r"C:\dev\models\runs")
+# Overridable so another machine does not need C:\dev\models.
+MODEL_DIR = os.environ.get("DEEPFOLD_MODEL", str(models_root() / "Qwen2.5-3B-Instruct"))
+CHR_PATH = os.environ.get("DEEPFOLD_CHR", str(models_root() / "qwen25-3b.nf4.chr"))
+RUNS_DIR = os.environ.get("DEEPFOLD_RUNS", str(runs_root()))
 
 
 def quality_ok(message_id: int, response: str) -> bool:

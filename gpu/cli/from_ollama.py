@@ -92,6 +92,8 @@ def _run_model(model_dir: Path) -> int:
             no_compress=False,
             quiet=False,
             debug=False,
+            codec="auto",
+            max_resident_mib=None,
         )
     )
 

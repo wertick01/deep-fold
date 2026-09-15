@@ -17,3 +17,4 @@
 Опционально позже: `Qwen/Qwen2.5-7B-Instruct` (~15 ГБ) — в BF16 уже нет, в NF4 свободно. Не обязателен для корзин выше.
 
 Порядок качания: 3B → 14B → 20B → 32B (32B уже на диске).
+CLI: `deepfold pull Qwen/Qwen2.5-3B-Instruct --yes` (allowlist, не произвольный Hub).

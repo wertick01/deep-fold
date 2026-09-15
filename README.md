@@ -542,9 +542,11 @@ quality benchmark, and no accuracy claim is made from it. Method:
   tok/s. The older n16 pair was 45 against 139 ms. n64 is not live.
 - **Display memory is inside the `nvidia-smi` reading.** It is real, it is on
   the same card, and it is not subtracted away here.
-- **Generate is Ampere `sm_86` only.** Ada / Hopper / Blackwell are a named
-  refuse, not a port. “Two clicks, all OS” is not a claim: CUDA, the compiler,
-  Go, and the HuggingFace tree are user-provided; Linux tok/s are unpublished.
+- **Generate is Ampere-family CUDA.** sm_86 (RTX 3080) is the measured plate.
+  A100 (`sm_80`) and Ada (`sm_89`) generate as experimental. Turing / Hopper /
+  Blackwell are a named refuse, not a port. “Two clicks, all OS” is not a
+  claim: CUDA, the compiler, Go, and the HuggingFace tree are user-provided;
+  Linux tok/s are unpublished.
 - **The lab can emit a synthetic figure** (`--dry-plot`), whose CSVs are
   stamped `FIXTURE`. Nothing in the tables above comes from that fixture.
 - **WikiText PPL is unpublished.** An NLL adapter exists; no corpus number
@@ -572,18 +574,38 @@ Round-trip verification is described in
 they would flush to zero in float16 are encoded as a scale of `1`; see
 [`internal/nf4`](internal/nf4/).
 
+## Install
+
+On another PC (not this 3080) use [`docs/quickstart.md`](docs/quickstart.md)
+([русский](docs/quickstart.ru.md)) for the short command list, and
+[`docs/install.md`](docs/install.md) ([русский](docs/install.ru.md)) for `-h`
+dumps. Neighbor contract: a repo `.venv`, CUDA torch from the cu124 index,
+`chr`, then `doctor` / `pull` / `chat`. Do not pip-install into conda env
+`torch-gpu`. To send metrics back from another card:
+
+```powershell
+powershell -File scripts/plate.ps1 3b
+```
+
+```powershell
+powershell -File scripts/setup.ps1
+.\.venv\Scripts\Activate.ps1
+deepfold pull Qwen/Qwen2.5-3B-Instruct --yes
+deepfold chat --model <that directory>
+```
+
 ## Run the lab
 
-Generate from a packed `.chr` without a notebook. Ampere `sm_86` only (RTX
-3080 class); GGUF is refused; a sibling `.chr` is used only when its CHR0
-header matches this model (`hidden_size`, `num_layers`, `vocab_size`).
+Generate from a packed `.chr` without a notebook. Ampere-family CUDA:
+**sm_86 is the measured plate** (RTX 3080); A100 (`sm_80`) and Ada (`sm_89`)
+generate as experimental. GGUF is refused; a sibling `.chr` is used only when
+its CHR0 header matches this model (`hidden_size`, `num_layers`, `vocab_size`).
 
 This is **not** two clicks on every OS. `doctor` / `run` do not install the
 NVIDIA driver, a CUDA PyTorch wheel, MSVC/`nvcc`, Go, or a HuggingFace tree.
 macOS can compress and cannot generate. Linux can load a `.so`; there is
-**no published Linux tok/s**. Ada (`sm_89`), Hopper, and Blackwell **refuse
-generate** — the image is `-gencode=arch=compute_86,code=sm_86` with no
-PTX. That is a refuse, not a kernel port.
+**no published Linux tok/s**. Turing, Hopper, and Blackwell **refuse
+generate**. The kernel image is `sm_80/sm_86/sm_89` plus PTX `compute_80`.
 
 ```powershell
 conda activate torch-gpu
@@ -600,9 +622,11 @@ the author's Windows layout and can be overridden:
 
 | Variable | Default on this machine |
 |---|---|
-| `DEEPFOLD_MODEL` | `C:\dev\models\Qwen2.5-3B-Instruct` |
-| `DEEPFOLD_CHR` | `C:\dev\models\qwen25-3b.nf4.chr` |
-| `DEEPFOLD_RUNS` | `C:\dev\models\runs` |
+| `DEEPFOLD_MODEL` | HuggingFace dir (`C:\dev\models\Qwen2.5-3B-Instruct` on the author box) |
+| `DEEPFOLD_CHR` | packed file (`C:\dev\models\qwen25-3b.nf4.chr` there) |
+| `DEEPFOLD_MODELS` | root for catalog trees; else `C:\dev\models` if present, else `$DEEPFOLD_HOME/models` |
+| `DEEPFOLD_RUNS` | run dumps; else `<models>/runs` |
+| `DEEPFOLD_HOME` | cache (`%LOCALAPPDATA%\deepfold` / `~/.cache/deepfold`) |
 
 ```powershell
 conda activate torch-gpu

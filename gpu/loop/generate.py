@@ -646,8 +646,11 @@ class TokenLoop:
             pair.load_pos(cos, sin)
         shape = self._rms_shape
         norm1, norm2, layers = self._norm1, self._norm2, self._layer
+        ring = self._ring
 
         for li, (g_qkv, g_o, g_gu, g_down) in enumerate(layers):
+            if ring is not None:
+                ring.prefetch()  # first HOST of this layer overlaps qkv
             h = F.rms_norm(x, shape, norm1[li], eps)
             if pack is not None:
                 q, k, v = pack(g_qkv.run(h)[0], n_q, n_kv, hd)
@@ -666,8 +669,12 @@ class TokenLoop:
             a = sdpa(q.view(1, n_kv, n_rep, hd), k_all, v_all, scale=scaling)
             x = x.add_(g_o.run(a.reshape(1, q_dim))[0])
 
+            if ring is not None:
+                ring.prefetch()  # HOST gate/up (tail D) overlaps remaining DEVICE
             h = F.rms_norm(x, shape, norm2[li], eps)
             gate, up = g_gu.run(h)
+            if ring is not None:
+                ring.prefetch()  # down if not already in flight
             x = x.add_(g_down.run(silu(gate) * up)[0])
         return x
 
@@ -688,8 +695,11 @@ class TokenLoop:
         attend = self._attend
         silu = F.silu
         norm1, norm2, layers = self._norm1, self._norm2, self._layer
+        ring = self._ring
 
         for li, (g_qkv, g_o, g_gu, g_down) in enumerate(layers):
+            if ring is not None:
+                ring.prefetch()
             h = rms(x, norm1[li], eps)
             if pack is not None:
                 q, k, v = pack(g_qkv.run(h)[0], n_q, n_kv, hd)
@@ -704,8 +714,12 @@ class TokenLoop:
             k_all, v_all = kv.view(li, seq)
             x = x.add_(g_o.run(attend(q, k_all, v_all, n, mask))[0])
 
+            if ring is not None:
+                ring.prefetch()
             h = rms(x, norm2[li], eps)
             gate, up = g_gu.run(h)
+            if ring is not None:
+                ring.prefetch()
             x = x.add_(g_down.run(silu(gate) * up)[0])
         return x
 

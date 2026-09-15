@@ -324,8 +324,12 @@ def _prompts(args):
     if sys.stdin is None:
         return
     tty = sys.stdin.isatty()
+    hinted = False
     while True:
         if tty:
+            if not hinted:
+                _err("hint: deepfold chat --model DIR is the interactive session")
+                hinted = True
             print("> ", end="", file=sys.stderr, flush=True)
         line = sys.stdin.readline()
         if not line:
@@ -373,10 +377,10 @@ def _max_resident_bytes(
     return _overflow_cap_from_chr(chr_file, vram, int(args.max_seq))
 
 
-def _generate(
+def _open_loop(
     args, model: str, chr_file: Path, trust_remote_code: bool, *, vram_mib: int | None = None
-) -> int:
-    """Load packed weights once, then drive TokenLoop until stdin is done."""
+):
+    """Load packed weights once. Shared by ``run`` and ``chat``."""
     import torch
     from transformers import AutoTokenizer
 
@@ -439,7 +443,16 @@ def _generate(
     total = torch.cuda.get_device_properties(0).total_memory // MIB
     if not report.overflow and _both_fit(weight_mib, total):
         _err(messages.THREE_B_SPEED)
+    return tok, loop, stop, report
 
+
+def _generate(
+    args, model: str, chr_file: Path, trust_remote_code: bool, *, vram_mib: int | None = None
+) -> int:
+    """Load packed weights once, then drive TokenLoop until stdin is done."""
+    tok, loop, stop, _report = _open_loop(
+        args, model, chr_file, trust_remote_code, vram_mib=vram_mib
+    )
     for text in _prompts(args):
         ids = _encode(tok, text, chat=not args.raw)
         out = loop.generate(ids, args.max_new_tokens, stop=stop)
@@ -451,17 +464,17 @@ def _generate(
     return 0
 
 
-def run(args) -> int:
-    """``deepfold run --model DIR [--chr FILE]``."""
+def prepare_run(args) -> tuple[int, tuple | None]:
+    """Gate, doctor, internlm extras, resolve ``.chr``. Shared by ``run`` and ``chat``."""
     model = args.model or os.environ.get(ENV_MODEL)
     if not model:
         _err("deepfold run needs --model <HuggingFace dir> (or $DEEPFOLD_MODEL).")
-        return 1
+        return 1, None
 
     checked = gate(model)
     if not checked.ok:
         _err(checked.reason)
-        return 1
+        return 1, None
     if checked.note:
         _err(checked.note)
 
@@ -474,18 +487,28 @@ def run(args) -> int:
             _err(v.refusal)
         _err("")
         _err("deepfold doctor explains the whole install.")
-        return 1
+        return 1, None
+    if v.generate == "experimental":
+        _err(v.line)
 
     if checked.needs_internlm:
         missing = missing_internlm_extras()
         if missing:
             _err(messages.INTERNLM_EXTRAS)
-            return 1
+            return 1, None
 
     chr_file, code = _resolve_weights(args, model, vram_mib=m.vram_total_mib)
     if chr_file is None:
-        return code
+        return code, None
+    return 0, (model, chr_file, checked, m, v)
 
+
+def run(args) -> int:
+    """``deepfold run --model DIR [--chr FILE]``."""
+    code, ctx = prepare_run(args)
+    if ctx is None:
+        return code
+    model, chr_file, checked, m, _v = ctx
     try:
         return _generate(
             args, model, chr_file, checked.trust_remote_code, vram_mib=m.vram_total_mib

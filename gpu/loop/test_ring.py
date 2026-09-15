@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import io
+import os
 import subprocess
 import sys
 import time
@@ -19,12 +20,13 @@ if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
 import gpu.loop.graph as graph_mod  # noqa: E402
+from gpu.cli.paths import models_root  # noqa: E402
 from gpu.host.host_image import HostImage, maybe_pin  # noqa: E402
 from gpu.host.linear import CompressedLinear  # noqa: E402
 from gpu.host.slots import SlotPair  # noqa: E402
 from gpu.loop.generate import TokenLoop  # noqa: E402
 from gpu.loop.graph import Gemm, GemmGroup, GraphedGemmGroup, group_is_resident  # noqa: E402
-from gpu.loop.ring import CopyRing  # noqa: E402
+from gpu.loop.ring import CopyRing, default_join_copy  # noqa: E402
 from gpu.loop.test_attach import _bound, qwen2_model  # noqa: E402
 from gpu.loop import generate as generate_mod  # noqa: E402
 from gpu.tests.skips import Skip  # noqa: E402
@@ -32,8 +34,8 @@ from gpu.tests.skips import Skip  # noqa: E402
 CHECKS: list[tuple[str, bool, str]] = []
 SKIPPED: list[tuple[str, str]] = []
 
-CHR_3B = Path(r"C:\dev\models\qwen25-3b.nf4.chr")
-MODEL_3B = Path(r"C:\dev\models\Qwen2.5-3B-Instruct")
+CHR_3B = models_root() / "qwen25-3b.nf4.chr"
+MODEL_3B = models_root() / "Qwen2.5-3B-Instruct"
 DOWN_NAME = "model.layers.0.mlp.down_proj"
 KERNEL_ABS_LIMIT = 0.05
 
@@ -138,6 +140,32 @@ def test_attach_host_pins_pageable_arena() -> None:
         check("no CUDA: still pageable", not arena.is_pinned(), "")
 
 
+def test_bind_cpu_join_before_prefetch() -> None:
+    """WDDM: synchronize copy_i before queueing copy_{i+1} (0.01 tok/s otherwise)."""
+    import inspect
+
+    src = inspect.getsource(CopyRing.bind_for_gemm)
+    i_pref = src.find("self.prefetch()")
+    i_join = src.find("synchronize()")
+    check("bind source has prefetch()", i_pref >= 0, "" if i_pref >= 0 else "prefetch missing")
+    check("bind source has synchronize()", i_join >= 0, "" if i_join >= 0 else "join missing")
+    check("synchronize() before prefetch()", 0 <= i_join < i_pref, f"join={i_join} pref={i_pref}")
+
+
+def test_join_copy_env_override() -> None:
+    previous = os.environ.get("DEEPFOLD_COPY_JOIN")
+    try:
+        os.environ["DEEPFOLD_COPY_JOIN"] = "0"
+        check("DEEPFOLD_COPY_JOIN=0", default_join_copy() is False, "")
+        os.environ["DEEPFOLD_COPY_JOIN"] = "1"
+        check("DEEPFOLD_COPY_JOIN=1", default_join_copy() is True, "")
+    finally:
+        if previous is None:
+            os.environ.pop("DEEPFOLD_COPY_JOIN", None)
+        else:
+            os.environ["DEEPFOLD_COPY_JOIN"] = previous
+
+
 def test_bind_prefetches_next_before_record_gemm() -> None:
     """copy(i+1) is issued in bind(i), before the caller GEMM / record_gemm."""
     g0, img0 = _host_gemm("a", 4, 64, fill=1)
@@ -160,7 +188,7 @@ def test_timing_false_skips_elapsed_time_fields() -> None:
     g1, _ = _host_gemm("b", 4, 64, fill=2)
     ring = CopyRing(SlotPair(img.nbytes, "cpu"))
     check("timing default False", ring.timing is False, str(ring.timing))
-    check("product join_copy on", ring._join_copy is True, str(ring._join_copy))
+    check("product join_copy follows profile", ring._join_copy is default_join_copy(), str(ring._join_copy))
     ring.arm([g0, g1])
     ring.prefetch()
     ring.bind_for_gemm(g0)
@@ -214,6 +242,82 @@ def test_three_overflow_slots_0_1_0() -> None:
         str(kinds[:6]),
     )
     check("has wait_copy then record_gemm", "wait_copy" in kinds and "record_gemm" in kinds, "")
+    check("two-slot max_ahead 1", ring.max_ahead == 1 and ring.n_copy_streams == 1, "")
+
+
+def test_three_arenas_ahead_2() -> None:
+    """Product overflow: 3 slots, ahead=2, two copy-stream handles, one H2D engine."""
+    gemms = [_host_gemm(n, 4, 64, fill=i + 1)[0] for i, n in enumerate("abcd")]
+    ring = CopyRing(SlotPair(gemms[0].host_image.nbytes, "cpu", count=3))
+    check("n_slots 3", ring.n_slots == 3, f"{ring.n_slots}")
+    check("max_ahead 2", ring.max_ahead == 2, f"{ring.max_ahead}")
+    check("n_copy_streams 2", ring.n_copy_streams == 2, f"{ring.n_copy_streams}")
+    snap = ring.snapshot()
+    check("snapshot n_slots", snap["n_slots"] == 3 and snap["max_ahead"] == 2, str(snap))
+    ring.arm(gemms)
+    ring.prefetch()
+    check(
+        "prefetch fills ahead 2",
+        ring.ahead == 2 and ring.slot_order == [0, 1],
+        f"ahead={ring.ahead} order={ring.slot_order}",
+    )
+    raised = False
+    try:
+        ring.issue(gemms[2])
+    except RuntimeError as exc:
+        raised = "ahead" in str(exc) or "depth is 2" in str(exc)
+    check("ahead=2 refuses third issue", raised, "")
+    ring.bind_for_gemm(gemms[0])
+    check(
+        "bind prefetches slot 2",
+        ring.ahead == 2 and ring.slot_order == [0, 1, 2],
+        str(ring.slot_order),
+    )
+    ring.record_gemm(gemms[0])
+    ring.bind_for_gemm(gemms[1])
+    ring.record_gemm(gemms[1])
+    ring.bind_for_gemm(gemms[2])
+    ring.record_gemm(gemms[2])
+    ring.bind_for_gemm(gemms[3])
+    ring.record_gemm(gemms[3])
+    check("slot cycle 0,1,2,0", ring.slot_order == [0, 1, 2, 0], str(ring.slot_order))
+    check("ahead 0 after tape", ring.ahead == 0, f"{ring.ahead}")
+
+
+def test_prefetch_next_ahead_2_carry_prefix() -> None:
+    gemms = [_host_gemm(n, 4, 64, fill=i + 1)[0] for i, n in enumerate("abc")]
+    ring = CopyRing(SlotPair(gemms[0].host_image.nbytes, "cpu", count=3))
+    ring.arm(gemms)
+    ring.prefetch()
+    for g in gemms:
+        ring.bind_for_gemm(g)
+        ring.record_gemm(g)
+    copies = ring.total_copies
+    check("three copies after tape", copies == 3, f"{copies}")
+    ring.prefetch_next()
+    check("prefetch_next ahead 2", ring.ahead == 2, f"{ring.ahead}")
+    check("prefetch_next two extra H2D", ring.total_copies == copies + 2, f"{ring.total_copies}")
+    check("queue is tape[0], tape[1]", [g.name for g, _ in ring._queue] == ["a", "b"], "")
+    copies = ring.total_copies
+    phase = ring._phase
+    ring.arm(gemms)
+    check("arm carry keeps ahead 2", ring.ahead == 2, f"{ring.ahead}")
+    check("arm carry tape_i 2", ring._tape_i == 2, f"{ring._tape_i}")
+    check("arm carry keeps phase", ring._phase == phase, f"{ring._phase}")
+    ring.prefetch()
+    check("arm+prefetch no re-H2D of prefix", ring.total_copies == copies, f"{ring.total_copies}")
+    ring.bind_for_gemm(gemms[0])
+    check(
+        "bind first issues only tape[2]",
+        ring.total_copies == copies + 1 and ring.issue_count == 1,
+        f"copies={ring.total_copies} issue={ring.issue_count}",
+    )
+    ring.record_gemm(gemms[0])
+    ring.bind_for_gemm(gemms[1])
+    ring.record_gemm(gemms[1])
+    ring.bind_for_gemm(gemms[2])
+    ring.record_gemm(gemms[2])
+    check("second forward one extra H2D", ring.total_copies == copies + 1, f"{ring.total_copies}")
 
 
 def test_tape_prefetch_three_slots() -> None:
@@ -818,7 +922,7 @@ def _pin_host_gemm(name: str, m: int, k: int, fill: int = 1) -> tuple[Gemm, Host
 
 
 def test_gpu_bind_join_prefetches_and_skips_elapsed() -> None:
-    """CUDA product bind: timing e_copy, no CPU join, prefetch next, no elapsed_time."""
+    """CUDA product bind: timing e_copy, profile join, prefetch next, no elapsed_time."""
     if not torch.cuda.is_available():
         print("  SKIP  gpu bind join prefetch  -- no CUDA")
         return
@@ -827,7 +931,7 @@ def test_gpu_bind_join_prefetches_and_skips_elapsed() -> None:
     slots = SlotPair(img0.nbytes, "cuda")
     ring = CopyRing(slots, timing=False)
     check("gpu product timing False", ring.timing is False, "")
-    check("gpu product join_copy", ring._join_copy is True, "")
+    check("gpu product join_copy follows profile", ring._join_copy is default_join_copy(), str(ring._join_copy))
     check("gpu no h2d start events", ring._e_h2d_start == (None, None), "")
     ring.arm([g0, g1])
     ring.prefetch()
@@ -857,8 +961,49 @@ def test_gpu_bind_join_prefetches_and_skips_elapsed() -> None:
     torch.cuda.empty_cache()
 
 
+def test_gpu_two_copy_streams_three_slots() -> None:
+    """Two copy-stream handles on one H2D engine; three slot events."""
+    if not torch.cuda.is_available():
+        print("  SKIP  gpu two copy streams  -- no CUDA")
+        return
+    g0, img0 = _pin_host_gemm("a", 64, 256, fill=1)
+    g1, _ = _pin_host_gemm("b", 64, 256, fill=2)
+    g2, _ = _pin_host_gemm("c", 64, 256, fill=3)
+    slots = SlotPair(img0.nbytes, "cuda", count=3)
+    ring = CopyRing(slots, timing=False)
+    check("gpu 3-slot max_ahead 2", ring.max_ahead == 2, f"{ring.max_ahead}")
+    check("gpu 3-slot two copy streams", ring.n_copy_streams == 2, f"{ring.n_copy_streams}")
+    check("gpu two stream objects", len(ring._copy_streams) == 2, f"{len(ring._copy_streams)}")
+    check(
+        "gpu streams distinct",
+        ring._copy_streams[0] is not ring._copy_streams[1],
+        "",
+    )
+    check("copy_stream is first", ring.copy_stream is ring._copy_streams[0], "")
+    check(
+        "copy not default",
+        ring.copy_stream is not torch.cuda.default_stream(),
+        "",
+    )
+    check("three copy events", len(ring._e_copy) == 3, f"{len(ring._e_copy)}")
+    ring.arm([g0, g1, g2])
+    ring.prefetch()
+    check("gpu prefetch ahead 2", ring.ahead == 2, f"{ring.ahead}")
+    ring.bind_for_gemm(g0)
+    check("gpu bind keeps ahead 2", ring.ahead == 2 and ring.slot_order == [0, 1, 2], str(ring.slot_order))
+    ring.record_gemm(g0)
+    ring.bind_for_gemm(g1)
+    ring.record_gemm(g1)
+    ring.bind_for_gemm(g2)
+    ring.record_gemm(g2)
+    torch.cuda.synchronize()
+    check("gpu 3-slot tape 0,1,2", ring.slot_order == [0, 1, 2], str(ring.slot_order))
+    del slots, ring
+    torch.cuda.empty_cache()
+
+
 def test_gpu_copy_join_microbench() -> None:
-    """Pinned ping-pong: product (timed e_copy, no join) vs join vs timing=True."""
+    """Pinned ping-pong: product (timed e_copy + join-after-prefetch) vs join vs timing=True."""
     if not torch.cuda.is_available():
         print("  SKIP  gpu copy join microbench  -- no CUDA")
         return
@@ -946,9 +1091,13 @@ def test_gpu_copy_join_microbench() -> None:
 TESTS = [
     test_gemm_of_host_does_not_raise_on_empty_packed,
     test_attach_host_pins_pageable_arena,
+    test_bind_cpu_join_before_prefetch,
+    test_join_copy_env_override,
     test_bind_prefetches_next_before_record_gemm,
     test_timing_false_skips_elapsed_time_fields,
     test_three_overflow_slots_0_1_0,
+    test_three_arenas_ahead_2,
+    test_prefetch_next_ahead_2_carry_prefix,
     test_tape_prefetch_three_slots,
     test_ring_lifetime_bytes_survive_arm,
     test_group_is_resident_skips_host,
@@ -963,6 +1112,7 @@ TESTS = [
     test_tokenloop_dummy_forward_lm_head_prefetch,
     test_gpu_overflow_down_vs_resident,
     test_gpu_bind_join_prefetches_and_skips_elapsed,
+    test_gpu_two_copy_streams_three_slots,
     test_gpu_copy_join_microbench,
     test_gpu_tokenloop_overflow_3b,
     test_gpu_tokenloop_resident_3b_graphs,

@@ -4,6 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from gpu.cli.paths import models_root
+
+
+def _under_models(*parts: str) -> str:
+    return str(models_root().joinpath(*parts))
+
 
 @dataclass(frozen=True)
 class LabModel:
@@ -31,8 +37,8 @@ LABS: tuple[LabModel, ...] = (
         slug="qwen25-3b",
         notebook="03_codec_lab.ipynb",
         title="Qwen2.5-3B-Instruct",
-        model_dir=r"C:\dev\models\Qwen2.5-3B-Instruct",
-        chr_path=r"C:\dev\models\qwen25-3b.nf4.chr",
+        model_dir=_under_models("Qwen2.5-3B-Instruct"),
+        chr_path=_under_models("qwen25-3b.nf4.chr"),
         bf16_fits=True,
         nf4_fits=True,
         nf4_driver="qwen2",
@@ -44,8 +50,8 @@ LABS: tuple[LabModel, ...] = (
         slug="qwen25-14b",
         notebook="04_qwen25_14b_lab.ipynb",
         title="Qwen2.5-14B-Instruct",
-        model_dir=r"C:\dev\models\Qwen2.5-14B-Instruct",
-        chr_path=r"C:\dev\models\qwen25-14b.nf4.chr",
+        model_dir=_under_models("Qwen2.5-14B-Instruct"),
+        chr_path=_under_models("qwen25-14b.nf4.chr"),
         bf16_fits=False,
         nf4_fits=True,
         nf4_driver="qwen2",
@@ -57,16 +63,16 @@ LABS: tuple[LabModel, ...] = (
             "is the measurement. NF4 leftover is ~3.5 GiB per vram-3080.md."
         ),
         compress_cmd=(
-            r"C:\dev\deep-fold\chr.exe compress --in C:\dev\models\Qwen2.5-14B-Instruct "
-            r"--out C:\dev\models\qwen25-14b.nf4.chr --codec nf4 --quiet"
+            "chr compress --in <models>/Qwen2.5-14B-Instruct "
+            "--out <models>/qwen25-14b.nf4.chr --codec nf4 --quiet"
         ),
     ),
     LabModel(
         slug="internlm20b",
         notebook="05_internlm20b_lab.ipynb",
         title="internlm2_5-20b-chat",
-        model_dir=r"C:\dev\models\internlm2_5-20b-chat",
-        chr_path=r"C:\dev\models\internlm2_5-20b.nf4.chr",
+        model_dir=_under_models("internlm2_5-20b-chat"),
+        chr_path=_under_models("internlm2_5-20b.nf4.chr"),
         bf16_fits=False,
         nf4_fits=False,
         nf4_driver="internlm2",
@@ -78,8 +84,8 @@ LABS: tuple[LabModel, ...] = (
             "sentencepiece==0.1.99."
         ),
         compress_cmd=(
-            r"C:\dev\deep-fold\chr.exe compress --in C:\dev\models\internlm2_5-20b-chat "
-            r"--out C:\dev\models\internlm2_5-20b.nf4.chr --codec nf4 --quiet"
+            "chr compress --in <models>/internlm2_5-20b-chat "
+            "--out <models>/internlm2_5-20b.nf4.chr --codec nf4 --quiet"
         ),
     ),
 )

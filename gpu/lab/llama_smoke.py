@@ -7,8 +7,8 @@ license to name that tag. A measured generate on this 3080 is.
 What it will do:
 
 1. Look for a HuggingFace Llama tree **already on disk** (``DEEPFOLD_LLAMA``,
-   well-known ``C:\\dev\\models\\…`` names, then ``model_type=llama`` under
-   ``C:\\dev\\models``). Never ``~/.ollama``, never GGUF, never ``snapshot_download``.
+   well-known names under ``$DEEPFOLD_MODELS``, then ``model_type=llama`` there).
+   Never ``~/.ollama``, never GGUF, never ``snapshot_download``.
 2. Refuse SWA and qk-norm from ``config.json`` before touching the GPU.
 3. ``--generate`` is the only path that loads weights. Default is discover +
    write ``SOURCE.txt``.
@@ -26,7 +26,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from gpu.cli.paths import looks_like_gguf
+from gpu.cli.paths import looks_like_gguf, models_root as default_models_root, runs_root
 from gpu.graphs import config_refusal, effective_sliding_window
 
 __all__ = [
@@ -41,7 +41,6 @@ __all__ = [
 
 ENV_LLAMA = "DEEPFOLD_LLAMA"
 SKIP = "SKIP:"
-_MODELS_ROOT = Path(r"C:\dev\models")
 
 #: Leaf names we look for first. None of these have to exist.
 CANDIDATE_NAMES = (
@@ -102,7 +101,7 @@ def _from_dir(model_dir: Path) -> LlamaTree | None:
 def discover(
     *,
     explicit: str | None = None,
-    models_root: Path | None = _MODELS_ROOT,
+    models_root: Path | None = None,
 ) -> list[LlamaTree]:
     """HuggingFace Llama dirs on disk, in attempt order. Never Hub, never Ollama."""
     found: list[LlamaTree] = []
@@ -136,7 +135,7 @@ def discover(
     if env:
         add(Path(env))
 
-    root = models_root
+    root = models_root if models_root is not None else default_models_root()
     if root is not None and root.is_dir():
         for name in CANDIDATE_NAMES:
             add(root / name)
@@ -155,7 +154,7 @@ def skip_reason(trees: list[LlamaTree]) -> str:
     if not trees:
         return (
             f"{SKIP} no HuggingFace Llama directory on disk. "
-            "Looked at $DEEPFOLD_LLAMA and C:\\dev\\models (model_type=llama). "
+            "Looked at $DEEPFOLD_LLAMA and $DEEPFOLD_MODELS (model_type=llama). "
             "Did not download meta-llama/Meta-Llama-3.1-8B-Instruct "
             "(gated, ~16 GB) and did not add llama3.1:8b to from-ollama."
         )
@@ -257,7 +256,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     trees = discover(explicit=args.model or None)
-    out = Path(args.out) if args.out else Path(r"C:\dev\models\runs\llama-smoke")
+    out = Path(args.out) if args.out else runs_root() / "llama-smoke"
     source = write_source(out, trees)
     print(f"wrote {source}")
 

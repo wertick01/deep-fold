@@ -1,25 +1,28 @@
 """Acceptance for ``gpu/cli`` with no GPU, no torch and no model on disk.
 
+The doctor verdict is a pure function of a hand-built :class:`Machine`, so
+"this GPU is sm_90, refuse" is a test and not a story:
+
     python gpu/cli/test_cli.py
     python -m pytest gpu/cli/test_cli.py
 
 The point of this file is that every refusal is reachable on a laptop. The
-doctor verdict is a pure function of a hand-built :class:`Machine`, so
-"this GPU is sm_89, refuse" is a test and not a story:
+doctor verdict is a pure function of a hand-built :class:`Machine`:
 
 1. the architecture gate accepts the graphs the loop can drive (qwen2 /
    internlm2 / llama / mistral without a live sliding window), fails closed on a
    family it can name (gemma_gelu, phi3_concat, MoE, vision), and *defers* an
    unrecognised model_type to the walker instead of guessing either way;
 2. GGUF and Ollama blob paths are refused **without being opened**;
-3. generate is refused on sm_89 / sm_80 (unmeasured), sm_75 (no BF16 tensor
-   cores), ROCm, macOS, CPU torch and a missing torch -- each with its own copy;
-4. the ``DEEPFOLD_ALLOW_UNMEASURED_ARCH`` override is the only way sm_89 turns
-   into "experimental", and it never becomes "yes";
+3. generate is *experimental* on sm_80 / sm_89 (Ampere-family, unmeasured plate),
+   refused on sm_75 (no BF16 tensor cores), Hopper, ROCm, macOS, CPU torch and a
+   missing torch -- each with its own copy;
+4. sm_89 is never ``ship``; the 3080 plate stays sm_86;
 5. doctor exit codes separate a broken install (2) from a machine whose class
    refuses generate (3); 3 is not green;
 6. ``run`` does not call ``chr compress`` when a ``.chr`` was given;
-7. the argparse surface is the one ``docs/tz/wave7-ux.md`` §6 froze.
+7. the argparse surface is setup / doctor / pull / compress / run / chat /
+   test / from-ollama (K5 user CLI; WAVE 7 freeze plus those commands).
 """
 
 from __future__ import annotations
@@ -33,14 +36,19 @@ import sys
 import tempfile
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 
 _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
+from gpu.cli import chat as chat_mod  # noqa: E402
 from gpu.cli import from_ollama as from_ollama_mod  # noqa: E402
+from gpu.cli import hub as hub_mod  # noqa: E402
 from gpu.cli import messages, paths, run as run_mod  # noqa: E402
-from gpu.cli.ollama_map import ResolveError, resolve  # noqa: E402
+from gpu.cli import selftest as selftest_mod  # noqa: E402
+from gpu.cli import setup_env as setup_mod  # noqa: E402
+from gpu.cli.ollama_map import ResolveError, hf_id_list, resolve  # noqa: E402
 from gpu.cli.arch import gate  # noqa: E402
 from gpu.cli.doctor import (  # noqa: E402
     Machine,
@@ -382,24 +390,30 @@ def test_sm86_ships() -> None:
     assert v.line == messages.GENERATE_SHIP
 
 
-def test_unmeasured_arch_is_refused_not_warned() -> None:
-    """wave8-runtime D2: sm_80 / sm_89 compile-likely, unmeasured, refuse."""
-    for cap in ((8, 0), (8, 9)):
-        v = verdict(_ship(capability=cap, device_name="unmeasured"), override=False)
-        assert v.generate == "no", cap
-        assert v.arch == "unmeasured", cap
-        assert f"sm_{cap[0]}{cap[1]}" in v.line, cap
-        assert "sm_86 SASS only" in v.line, cap
-        # The §8 block names the gencode, so the reason is actionable.
-        assert "compute_86,code=sm_86" in v.refusal, cap
-        assert "no PTX" in v.refusal, cap
+def test_ada_is_experimental_and_exit_zero() -> None:
+    m = _ship(capability=(8, 9), device_name="RTX 4070")
+    v = verdict(m, override=False)
+    assert v.allowed and v.arch == "experimental"
+    assert _code(m) == 0
 
 
-def test_override_makes_unmeasured_experimental_never_yes() -> None:
+def test_ampere_family_is_experimental_not_ship() -> None:
+    """sm_80 / sm_87 / sm_89 generate without an env override; never 'ship'."""
+    from gpu.ampere_gencode import FAMILY_CAPABILITIES, MEASURED_CAPABILITY
+
+    for cap in sorted(FAMILY_CAPABILITIES - {MEASURED_CAPABILITY}):
+        v = verdict(_ship(capability=cap, device_name="family"), override=False)
+        assert v.generate == "experimental", cap
+        assert v.arch == "experimental", cap
+        assert v.allowed, cap
+        assert messages.GENERATE_SHIP not in v.line, cap
+        assert "experimental" in v.line, cap
+
+
+def test_experimental_never_becomes_ship() -> None:
     v = verdict(_ship(capability=(8, 9)), override=True)
     assert v.generate == "experimental" and v.arch == "experimental"
-    assert "DEEPFOLD_ALLOW_UNMEASURED_ARCH=1" in v.line
-    assert v.generate != "yes", "the override must not promote an arch to ship"
+    assert v.generate != "yes", "Ada must not claim the 3080 plate"
 
 
 def test_turing_is_refused_for_the_right_reason() -> None:
@@ -453,6 +467,18 @@ def test_newer_nvidia_arch_is_out_of_the_matrix() -> None:
     assert "sm_90" in v.line
 
 
+def test_kernel_gencode_is_ampere_family_fatbinary() -> None:
+    from gpu.ampere_gencode import KERNEL_GENCODE, NVCC_GENCODE_FLAGS, nvcc_cflags
+
+    flags = " ".join(NVCC_GENCODE_FLAGS)
+    assert "sm_80" in flags and "sm_86" in flags and "sm_89" in flags
+    assert "compute_80" in flags
+    assert "sm_90" not in flags and "sm_75" not in flags
+    assert "PTX" in KERNEL_GENCODE
+    cflags = " ".join(nvcc_cflags())
+    assert flags in cflags
+
+
 # --------------------------------------------------------------------------- #
 # 5. doctor exit codes and report
 # --------------------------------------------------------------------------- #
@@ -476,9 +502,9 @@ def test_doctor_two_is_a_broken_install_on_a_card_that_could_run() -> None:
 
 
 def test_doctor_three_is_refused_generate_with_working_compress() -> None:
-    wrong_arch = _ship(capability=(8, 9))
-    assert _code(wrong_arch) == 3
-    assert compress_ok(wrong_arch), "compress is still the CPU product"
+    hopper = _ship(capability=(9, 0), device_name="H100")
+    assert _code(hopper) == 3
+    assert compress_ok(hopper), "compress is still the CPU product"
     mac = Machine(system="Darwin", torch="2.5.1", cuda_available=False, mps=True,
                   chr_bin=Path("/usr/local/bin/chr"), chr_runs=True)
     assert _code(mac) == 3
@@ -489,11 +515,11 @@ def test_doctor_one_when_nothing_works() -> None:
 
 
 def test_doctor_report_never_calls_a_refusal_green() -> None:
-    m = _ship(capability=(8, 9))
+    m = _ship(capability=(9, 0), device_name="H100")
     v = verdict(m, override=False)
     text = render(m, v, checks(m, v))
     assert messages.DOCTOR_OK not in text
-    assert "sm_89" in text
+    assert "sm_90" in text
     assert messages.DOCTOR_COMPRESS_ONLY in text
 
 
@@ -694,7 +720,7 @@ def test_run_refuses_when_doctor_refuses() -> None:
         model = _fake_model(Path(tmp), "qwen2")
         err = io.StringIO()
         original = run_mod.probe
-        run_mod.probe = _Spy(_ship(capability=(8, 9)))  # type: ignore[assignment]
+        run_mod.probe = _Spy(_ship(capability=(9, 0), device_name="H100"))  # type: ignore[assignment]
         try:
             with redirect_stderr(err):
                 code = run_mod.run(_RunArgs(model=str(model)))
@@ -702,7 +728,34 @@ def test_run_refuses_when_doctor_refuses() -> None:
             run_mod.probe = original  # type: ignore[assignment]
     text = err.getvalue()
     assert code == 1
-    assert "sm_89" in text and "deepfold doctor" in text
+    assert "sm_90" in text and "deepfold doctor" in text
+
+
+def test_run_allows_ada_experimental() -> None:
+    """Ada is generate-allowed; doctor exit 3 is Hopper, not sm_89."""
+    with tempfile.TemporaryDirectory() as tmp:
+        model = _fake_model(Path(tmp), "qwen2")
+        fake_chr = Path(tmp) / "x.nf4.chr"
+        fake_chr.write_bytes(b"CHR0")
+        err = io.StringIO()
+        original_probe = run_mod.probe
+        original_resolve = run_mod._resolve_weights
+        original_generate = run_mod._generate
+        resolve_spy = _Spy((fake_chr, 0))
+        generate_spy = _Spy(0)
+        run_mod.probe = _Spy(_ship(capability=(8, 9), device_name="RTX 4070"))  # type: ignore[assignment]
+        run_mod._resolve_weights = resolve_spy  # type: ignore[assignment]
+        run_mod._generate = generate_spy  # type: ignore[assignment]
+        try:
+            with redirect_stderr(err):
+                code = run_mod.run(_RunArgs(model=str(model)))
+        finally:
+            run_mod.probe = original_probe  # type: ignore[assignment]
+            run_mod._resolve_weights = original_resolve  # type: ignore[assignment]
+            run_mod._generate = original_generate  # type: ignore[assignment]
+    assert code == 0
+    assert "experimental" in err.getvalue()
+    assert generate_spy.calls, "Ada must reach generate, not the class-3 refuse"
 
 
 def test_both_fit_only_when_a_bf16_copy_would_also_fit() -> None:
@@ -721,7 +774,16 @@ def test_both_fit_only_when_a_bf16_copy_would_also_fit() -> None:
 def test_parser_has_the_frozen_subcommands() -> None:
     ap = build_parser()
     action = next(a for a in ap._actions if a.dest == "command")
-    assert {"doctor", "compress", "run"} <= set(action.choices)
+    assert {
+        "setup",
+        "doctor",
+        "pull",
+        "compress",
+        "run",
+        "chat",
+        "test",
+        "from-ollama",
+    } <= set(action.choices)
 
 
 def test_parser_run_flags() -> None:
@@ -1051,6 +1113,185 @@ def test_parser_from_ollama_flags() -> None:
     assert args.yes is True and args.run is True
 
 
+def test_parser_k5_commands() -> None:
+    pull = build_parser().parse_args(
+        ["pull", "Qwen/Qwen2.5-3B-Instruct", "--yes", "--dir", "D:/hf"]
+    )
+    assert pull.command == "pull" and pull.yes is True and pull.dir == "D:/hf"
+    chat = build_parser().parse_args(["chat", "--model", "D:/m", "--max-new-tokens", "8"])
+    assert chat.command == "chat" and chat.model == "D:/m" and chat.max_new_tokens == 8
+    assert not hasattr(chat, "prompt")
+    setup = build_parser().parse_args(["setup", "--dry-run"])
+    assert setup.dry_run is True
+    live = build_parser().parse_args(["test", "--live"])
+    assert live.live is True
+
+
+def test_hf_allowlist_includes_32b() -> None:
+    ids = hf_id_list()
+    assert ids[0] == "Qwen/Qwen2.5-3B-Instruct"
+    assert "Qwen/Qwen2.5-32B-Instruct" in ids
+    assert "internlm/internlm2_5-20b-chat" in ids
+
+
+def test_slash_commands_are_not_prompts() -> None:
+    assert chat_mod.classify_slash("hello") is None
+    assert chat_mod.classify_slash("/quit") == "quit"
+    assert chat_mod.classify_slash("/exit") == "quit"
+    assert chat_mod.classify_slash("/clear") == "clear"
+    assert chat_mod.classify_slash("/help") == "help"
+    assert chat_mod.classify_slash("/stats") == "stats"
+    assert chat_mod.classify_slash("/rm") == "unknown"
+
+
+def test_chat_without_tty_points_at_run_prompt() -> None:
+    stdin = sys.stdin
+    sys.stdin = io.StringIO("hello\n")
+    err = io.StringIO()
+    try:
+        with redirect_stderr(err), redirect_stdout(io.StringIO()):
+            code = main(["chat", "--model", "D:/m"])
+    finally:
+        sys.stdin = stdin
+    assert code == 1
+    assert "run --prompt" in err.getvalue()
+
+
+def test_setup_dry_run_does_not_pip() -> None:
+    called: list[object] = []
+    original = setup_mod._run
+    setup_mod._run = lambda *a, **k: called.append((a, k)) or 0  # type: ignore[assignment]
+    err, out = io.StringIO(), io.StringIO()
+    try:
+        with redirect_stderr(err), redirect_stdout(out):
+            code = main(["setup", "--dry-run"])
+    finally:
+        setup_mod._run = original  # type: ignore[assignment]
+    assert code == 0
+    assert called == []
+    text = out.getvalue() + err.getvalue()
+    assert "torch" in text and "download.pytorch.org/whl/cu124" in text
+
+
+def test_setup_refuses_torch_gpu_without_pip() -> None:
+    called: list[object] = []
+    original_prot = setup_mod.prefix_is_protected
+    original_run = setup_mod._run
+    setup_mod.prefix_is_protected = lambda prefix=None: True  # type: ignore[assignment]
+    setup_mod._run = lambda *a, **k: called.append(1) or 0  # type: ignore[assignment]
+    err = io.StringIO()
+    try:
+        with redirect_stderr(err), redirect_stdout(io.StringIO()):
+            code = main(["setup"])
+    finally:
+        setup_mod.prefix_is_protected = original_prot  # type: ignore[assignment]
+        setup_mod._run = original_run  # type: ignore[assignment]
+    assert code == 1
+    assert called == []
+    assert "torch-gpu" in err.getvalue()
+    assert "scripts/setup.ps1" in err.getvalue()
+
+
+def test_pull_unknown_id_does_not_open_files() -> None:
+    opened, real_open = _watch_open()
+    err = io.StringIO()
+    try:
+        with redirect_stderr(err):
+            code = main(["pull", "meta-llama/Llama-3.1-8B-Instruct"])
+    finally:
+        builtins.open = real_open  # type: ignore[assignment]
+    assert code == 1
+    assert "unknown HuggingFace id" in err.getvalue()
+    assert "Qwen/Qwen2.5-3B-Instruct" in err.getvalue()
+    assert "not a general HuggingFace runtime" in err.getvalue()
+    assert not [p for p in opened if "Llama" in p]
+
+
+def test_pull_gguf_is_refused_without_being_opened() -> None:
+    opened, real_open = _watch_open()
+    err = io.StringIO()
+    try:
+        with redirect_stderr(err):
+            code = main(["pull", r"C:\Users\x\.ollama\models\blobs\sha256-dead"])
+    finally:
+        builtins.open = real_open  # type: ignore[assignment]
+    assert code == 1
+    assert "GGUF" in err.getvalue()
+    assert not [p for p in opened if "sha256-dead" in p.lower() or ".gguf" in p.lower()]
+
+
+def test_pull_yes_stub_snapshot_download() -> None:
+    called: list[dict[str, str]] = []
+
+    def stub(*, repo_id: str, local_dir: str) -> str:
+        called.append({"repo_id": repo_id, "local_dir": local_dir})
+        Path(local_dir).mkdir(parents=True, exist_ok=True)
+        (Path(local_dir) / "config.json").write_text("{}", encoding="utf-8")
+        return local_dir
+
+    original = hub_mod.snapshot_download
+    hub_mod.snapshot_download = stub  # type: ignore[assignment]
+    err, out = io.StringIO(), io.StringIO()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "hf"
+            with redirect_stderr(err), redirect_stdout(out):
+                code = main(
+                    ["pull", "Qwen/Qwen2.5-3B-Instruct", "--yes", "--dir", str(dest)]
+                )
+    finally:
+        hub_mod.snapshot_download = original  # type: ignore[assignment]
+    assert code == 0, err.getvalue()
+    assert called == [{"repo_id": "Qwen/Qwen2.5-3B-Instruct", "local_dir": str(dest)}]
+    assert f"deepfold chat --model {dest}" in out.getvalue()
+    assert f"deepfold run --model {dest}" in out.getvalue()
+
+
+def test_pull_32b_is_on_the_table() -> None:
+    called: list[str] = []
+
+    def stub(*, repo_id: str, local_dir: str) -> str:
+        called.append(repo_id)
+        Path(local_dir).mkdir(parents=True, exist_ok=True)
+        (Path(local_dir) / "config.json").write_text("{}", encoding="utf-8")
+        return local_dir
+
+    original = hub_mod.snapshot_download
+    hub_mod.snapshot_download = stub  # type: ignore[assignment]
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "hf"
+            err = io.StringIO()
+            with redirect_stderr(err), redirect_stdout(io.StringIO()):
+                code = main(
+                    ["pull", "Qwen/Qwen2.5-32B-Instruct", "--yes", "--dir", str(dest)]
+                )
+    finally:
+        hub_mod.snapshot_download = original  # type: ignore[assignment]
+    assert code == 0
+    assert called == ["Qwen/Qwen2.5-32B-Instruct"]
+
+
+def test_selftest_live_skips_without_3b() -> None:
+    import gpu.cli.doctor as doctor_mod
+
+    original_root = selftest_mod.models_root
+    original_probe = doctor_mod.probe
+    doctor_mod.probe = lambda **k: _ship()  # type: ignore[assignment]
+    err = io.StringIO()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            selftest_mod.models_root = lambda: Path(tmp)  # type: ignore[assignment]
+            with redirect_stderr(err):
+                code = selftest_mod.selftest(SimpleNamespace(live=True, chr_bin=None))
+    finally:
+        selftest_mod.models_root = original_root  # type: ignore[assignment]
+        doctor_mod.probe = original_probe  # type: ignore[assignment]
+    assert code == 0
+    assert "SKIP:" in err.getvalue()
+    assert "deepfold pull Qwen/Qwen2.5-3B-Instruct" in err.getvalue()
+
+
 # --------------------------------------------------------------------------- #
 # paths
 # --------------------------------------------------------------------------- #
@@ -1059,6 +1300,26 @@ def test_parser_from_ollama_flags() -> None:
 def test_slug_for_a_directory_and_for_a_hub_id() -> None:
     assert paths.slug(r"C:\dev\models\Qwen2.5-3B-Instruct") == "Qwen2.5-3B-Instruct"
     assert paths.slug("Qwen/Qwen2.5-3B-Instruct") == "Qwen_Qwen2.5-3B-Instruct"
+
+
+def test_models_root_honours_env() -> None:
+    previous_models = os.environ.get("DEEPFOLD_MODELS")
+    previous_runs = os.environ.get("DEEPFOLD_RUNS")
+    with tempfile.TemporaryDirectory() as tmp:
+        os.environ["DEEPFOLD_MODELS"] = tmp
+        os.environ["DEEPFOLD_RUNS"] = str(Path(tmp) / "runs")
+        try:
+            assert paths.models_root() == Path(tmp)
+            assert paths.runs_root() == Path(tmp) / "runs"
+        finally:
+            if previous_models is None:
+                os.environ.pop("DEEPFOLD_MODELS", None)
+            else:
+                os.environ["DEEPFOLD_MODELS"] = previous_models
+            if previous_runs is None:
+                os.environ.pop("DEEPFOLD_RUNS", None)
+            else:
+                os.environ["DEEPFOLD_RUNS"] = previous_runs
 
 
 def test_chr_bin_search_order() -> None:

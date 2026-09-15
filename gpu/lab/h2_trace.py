@@ -6,6 +6,7 @@ start the hard-12 plate.
 
     python -m gpu.lab.h2_trace
     python -m gpu.lab.h2_trace --plan-only
+    python -m gpu.lab.h2_trace --force-overflow --model ... --chr ... --max-seq 512
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ from gpu.lab.h2_metrics import (  # noqa: E402
     CHR_32B,
     MODEL_32B,
     auto_max_resident_bytes,
+    canary_overflow_bytes,
     dump_json,
     expected_h2d_bytes,
     host_pin_snapshot,
@@ -68,6 +70,17 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--no-graphs", dest="graphs", action="store_false")
     p.add_argument("--no-timing", dest="ring_timing", action="store_false")
     p.add_argument("--trust-remote-code", action="store_true")
+    p.add_argument(
+        "--max-resident-mib",
+        type=float,
+        default=None,
+        help="force overflow cap in MiB (3B canary). Default: decide() on this card.",
+    )
+    p.add_argument(
+        "--force-overflow",
+        action="store_true",
+        help="3B canary cap: pin + 4*(2*gate), even if packed NF4 fits.",
+    )
     return p
 
 
@@ -128,9 +141,28 @@ def run_h2_trace(args: argparse.Namespace) -> int:
     }
     dump_json(out / "system_before.json", system_snapshot(label="before"))
 
-    cap, cap_info = auto_max_resident_bytes(
-        args.model, args.chr_path, args.max_seq
-    )
+    if args.max_resident_mib is not None:
+        cap = int(float(args.max_resident_mib) * MIB)
+        cap_info: dict[str, Any] = {
+            "overflow": True,
+            "cap_bytes": cap,
+            "cap_mib": float(args.max_resident_mib),
+            "forced": True,
+            "reason": f"forced --max-resident-mib={args.max_resident_mib}",
+        }
+    elif args.force_overflow:
+        cap = canary_overflow_bytes(args.chr_path)
+        cap_info = {
+            "overflow": True,
+            "cap_bytes": cap,
+            "cap_mib": cap / MIB,
+            "forced": True,
+            "reason": "forced --force-overflow (pin + 4*(2*gate))",
+        }
+    else:
+        cap, cap_info = auto_max_resident_bytes(
+            args.model, args.chr_path, args.max_seq
+        )
     snap["cap"] = cap_info
     dump_json(out / "cap.json", cap_info)
     if cap is None:
@@ -199,6 +231,9 @@ def run_h2_trace(args: argparse.Namespace) -> int:
         snap["report_streamed_bytes"] = int(report.streamed_bytes)
         snap["report_resident_bytes"] = int(report.resident_bytes)
         snap["report_slot_nbytes"] = int(report.slot_nbytes)
+        snap["n_slots"] = int(report.slots.count) if report.slots is not None else 0
+        snap["max_ahead"] = max(1, snap["n_slots"] - 1) if snap["n_slots"] else 0
+        snap["n_copy_streams"] = 2 if snap["n_slots"] >= 3 else (1 if snap["n_slots"] else 0)
         pin = host_pin_snapshot(model)
         snap["pin"] = pin
         after = system_snapshot(label="after_load")

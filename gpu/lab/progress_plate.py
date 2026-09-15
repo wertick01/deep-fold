@@ -20,12 +20,12 @@ from __future__ import annotations
 
 import argparse
 import csv
-import os
 import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from gpu.cli.paths import runs_root
 from .bundle import LabBundle
 from .competitor import read_competitor_csv, read_microbench_csv
 from .hard_plate import (
@@ -95,7 +95,7 @@ class ProgressPaths:
 def default_paths(repo: str | Path | None = None) -> ProgressPaths:
     """Committed plates under the repo; live dirs under ``DEEPFOLD_RUNS``."""
     root = Path(repo) if repo else _REPO
-    runs = Path(os.environ.get("DEEPFOLD_RUNS", r"C:\dev\models\runs"))
+    runs = runs_root()
     return ProgressPaths(
         repo=root,
         committed_3b=root / "docs" / "runs" / "qwen25-3b",

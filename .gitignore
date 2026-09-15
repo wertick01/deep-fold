@@ -19,3 +19,5 @@ gpu/*/build/
 *.egg-info/
 docs/tz/
 .cursor
+.venv/
+venv/

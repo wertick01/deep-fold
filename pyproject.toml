@@ -43,6 +43,8 @@ dependencies = [
 internlm = ["einops", "sentencepiece==0.1.99"]
 # Download a HuggingFace tree instead of placing it by hand.
 hub = ["huggingface_hub>=0.23"]
+# TTY chat session (deepfold chat). doctor / run --prompt do not need this.
+chat = ["prompt_toolkit>=3.0"]
 
 [project.scripts]
 deepfold = "gpu.cli.main:main"

@@ -3,7 +3,11 @@
 This page is the path for people who already have a model on disk and want the
 NF4 driver without a notebook.
 
-**Shipped** (`gpu/cli/`). Without installing anything:
+**Shipped** (`gpu/cli/`). Neighbor install is [`install.md`](install.md);
+short commands: [`quickstart.md`](quickstart.md). A one-model metrics dump for
+another PC is `scripts/plate.ps1` / `scripts/plate.sh`.
+
+Without installing anything from a checkout that already has CUDA torch:
 
 ```powershell
 python -m gpu.cli doctor
@@ -11,12 +15,14 @@ python -m gpu.cli run --model C:\dev\models\Qwen2.5-3B-Instruct
 ```
 
 After `pip install -e .` those are `deepfold doctor` and `deepfold run`.
-Also shipped: `compress` (wraps `chr compress --codec nf4`) and
-`from-ollama` (allowlisted Ollama library tags → HuggingFace BF16 ids;
-never `~/.ollama`, never GGUF). There is no `deepfold pull`. Generate ships
-on Ampere `sm_86` only (RTX 3080 class). Ada (`sm_89`), Hopper, Blackwell,
-Turing, ROCm, macOS, and CPU torch are **refused**, not a silent fallback
-and not a kernel port.
+Also shipped: `setup` (venv catch-up; refuses conda `torch-gpu`), `pull`
+(allowlisted HuggingFace BF16 ids), `compress`, `chat` (TTY session),
+`test`, and `from-ollama` (allowlisted Ollama tags → the same Hub ids;
+never `~/.ollama`, never GGUF). Generate ships on Ampere-family CUDA:
+**sm_86 is the measured plate** (RTX 3080).
+A100 (`sm_80`) and Ada (`sm_89`) **generate as experimental** — allowed, not the
+3080 tok/s. Turing, Hopper, Blackwell, ROCm, macOS generate, and CPU torch are
+**refused**. The kernel image is `sm_80/sm_86/sm_89` plus PTX `compute_80`.
 
 The lab comparison plate is separate: `python -m gpu.lab.run`, or
 `gpu.host.load_model` + `gpu.loop.TokenLoop` by hand. See the
@@ -59,9 +65,11 @@ Ollama stores **GGUF**. This project does not load GGUF, does not read
 `python -m gpu.cli from-ollama <tag>` maps **exact** allowlisted library
 names (`qwen2.5:3b`, `qwen2.5:3b-instruct`, `qwen2.5:14b`,
 `qwen2.5:14b-instruct`) to HuggingFace ids and downloads BF16 safetensors.
-It never reads `~/.ollama` and never loads GGUF. `--hf internlm/internlm2_5-20b-chat`
-is the only extra table id. `llama3.1:8b` stays unknown until a measured 3080
-Llama generate exists. A GGUF path is still the WAVE 7 blob copy.
+It never reads `~/.ollama` and never loads GGUF. `deepfold pull <hf_id>` is
+the same table without an Ollama name (`Qwen/Qwen2.5-32B-Instruct` and
+`internlm/internlm2_5-20b-chat` are pull/`--hf` only). `llama3.1:8b` stays
+unknown until a measured 3080 Llama generate exists. A GGUF path is still
+the WAVE 7 blob copy.
 
 Confirm disk (`--yes` or a TTY) before `snapshot_download`. Extra:
 `pip install "deepfold[hub]"`. If the tree is already at
@@ -76,10 +84,15 @@ not an import path. Unknown tags and arbitrary GGUF files are refused.
 
 ## Install
 
+Neighbor machines: [`install.md`](install.md) / [`install.ru.md`](install.ru.md)
+(`scripts/setup.ps1` / `scripts/setup.sh`). This 3080 already has conda
+`torch-gpu` — do not `deepfold setup` into that env.
+
 No Jupyter. Conda/pip for PyTorch **with CUDA**, `go build` for `chr` until a
 binary is attached to a release, then `doctor` and `run`. The Ampere kernel
-(`sm_86`, RTX 3080 class) still needs either a built `chr_nf4_ext` or MSVC
-Build Tools for a one-time JIT.
+(`sm_80` / `sm_86` / `sm_89` plus PTX `compute_80`) still needs either a built
+`chr_nf4_ext` or a host compiler (`cl.exe` / `g++`) plus `nvcc` for a one-time
+JIT. On this 3080 the prebuilt sm_86 `.pyd` is enough until you rebuild.
 
 ```powershell
 conda activate torch-gpu
@@ -87,6 +100,31 @@ go build -o chr.exe ./cmd/chr
 pip install -e .
 python -m gpu.cli doctor
 ```
+
+On another PC (different NVIDIA Ampere/Ada card, Windows or Linux) the same
+commands work without editing sources. Point at *that* machine's HuggingFace
+tree; do not expect `C:\dev\models` or the 3080 tok/s.
+
+```text
+# Windows
+set DEEPFOLD_MODELS=D:\weights
+set DEEPFOLD_MODEL=D:\weights\Qwen2.5-3B-Instruct
+go build -o chr.exe ./cmd/chr
+python -m gpu.cli doctor
+python -m gpu.cli run --model %DEEPFOLD_MODEL%
+
+# Linux
+export DEEPFOLD_MODELS=$HOME/models
+export DEEPFOLD_MODEL=$HOME/models/Qwen2.5-3B-Instruct
+go build -o chr ./cmd/chr
+python -m gpu.cli doctor
+python -m gpu.cli run --model "$DEEPFOLD_MODEL"
+```
+
+Doctor exit **3** because the card is not sm_86 is a bug of the old contract.
+Ada / A100 must be **0** (or **2** if the install is broken), with
+`generate: experimental`. Hopper, Turing, macOS generate remain **3**.
+JIT of the fatbinary on a neighbor box takes about a minute the first time.
 
 `pip install -e .` compiles no CUDA: the kernel is a prebuilt sidecar or a JIT
 that doctor announces first. We do **not** install the NVIDIA driver, CUDA,
@@ -96,21 +134,24 @@ doctor is the installer working, not a product bug.
 
 `python -m gpu.cli doctor` exit codes: **0** run is possible; **2** this box
 could run but the install is broken; **3** generate is refused by this
-machine's class (no NVIDIA GPU, macOS, Turing, ROCm, Ada/Hopper/Blackwell)
+machine's class (no NVIDIA GPU, macOS, Turing, Hopper, Blackwell, ROCm)
 while `chr compress` still works; **1** neither. **3 is not green generate.**
+Ada (`sm_89`) and A100 (`sm_80`) are **experimental generate** (exit 0 if
+the rest of the install works), not class-3.
 
 On macOS `chr compress` is real and `python -m gpu.cli run` exits 1: there
-is no CUDA kernel there. A Mac can pack a `.chr` for a Windows 3080 to run.
-Linux doctor can see a `.so`; there is **no published Linux generate tok/s**.
+is no CUDA kernel there. A Mac can pack a `.chr` for a CUDA Ampere/Ada
+machine to run. Linux doctor can see a `.so`; there is **no published Linux
+generate tok/s**.
 
 A single `pip install` that also drops CUDA, Visual Studio, and Go is not
 promised. “Two clicks, all OS” is a lie: click 1 is this package plus
 `doctor`; the driver, CUDA torch, compiler, Go, and the HF tree are
-user-provided. Extra `-gencode` for Ada/Hopper is not a measured machine.
+user-provided. Ada generate is a fatbinary, not a second plate.
 
 ## Not in this repo
 
-- HuggingFace id download of arbitrary repos (`pull`) — `from-ollama` is an allowlist
+- HuggingFace id download of **arbitrary** repos — `pull` / `from-ollama` are an allowlist
 - llama.cpp / GGUF drop-in
 - OpenAI-compatible HTTP server
 - Ollama plugin or runner for existing blobs

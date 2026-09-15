@@ -176,6 +176,12 @@ def test_prefetch_next_is_before_lm_head_on_n1() -> None:
     ids = torch.tensor([1], dtype=torch.long)
     loop.forward(ids, 0)
     assert order[:2] == ["arm", "prefetch"], order
+    n_layer = len(loop._layer)
+    # embed kick + 3 kicks/layer (qkv, mlp, down). Fake ring records every call.
+    check_n = 1 + 3 * n_layer
+    assert order.count("prefetch") == check_n, (
+        f"expected {check_n} prefetch kicks, got {order.count('prefetch')}: {order}"
+    )
     assert "prefetch_next" in order and "head" in order, order
     assert order.index("prefetch_next") < order.index("head"), order
 

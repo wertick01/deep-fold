@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 from setuptools import setup
@@ -14,14 +15,12 @@ from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parents[1]
 INCLUDE = REPO / "gpu" / "include"
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+from gpu.ampere_gencode import nvcc_cflags  # noqa: E402
 
 cxx_flags = ["/O2"] if os.name == "nt" else ["-O3"]
-nvcc_flags = [
-    "-O3",
-    "-gencode=arch=compute_86,code=sm_86",
-    "--expt-relaxed-constexpr",
-    "-lineinfo",
-]
+nvcc_flags = nvcc_cflags()
 
 setup(
     name="chr_nf4",

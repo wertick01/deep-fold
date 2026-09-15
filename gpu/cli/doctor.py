@@ -1,9 +1,9 @@
 """``deepfold doctor``: can ``deepfold run`` succeed on *this* machine?
 
 Doctor is the only public chooser of prebuilt-versus-JIT and of whether this
-GPU may generate at all. Shipped generate is **sm_86 only**. sm_80 and sm_89
-are refused unless ``DEEPFOLD_ALLOW_UNMEASURED_ARCH=1`` after a rebuild --
-that override is not a documented feature.
+GPU may generate at all. ``sm_86`` is the measured ship. Other Ampere-family
+cards (sm_80 / sm_87 / sm_89) generate as **experimental** (allowed, not the
+3080 plate). Turing, Hopper, Blackwell, ROCm, macOS, CPU torch refuse.
 
 :func:`probe` is the only function that touches torch, the driver, or the
 filesystem; :func:`verdict` / :func:`checks` / :func:`exit_code` are pure
@@ -25,14 +25,13 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from gpu.ampere_gencode import FAMILY_CAPABILITIES, KERNEL_GENCODE, MEASURED_CAPABILITY
+
 from . import messages
 from .paths import REPO, find_chr_bin
 
-SHIP_CAPABILITY = (8, 6)
-# Same .cu, same MMA + cp.async; only an extra -gencode away from loading.
-UNMEASURED_CAPABILITIES = ((8, 0), (8, 9))
+SHIP_CAPABILITY = MEASURED_CAPABILITY
 OVERRIDE_ENV = "DEEPFOLD_ALLOW_UNMEASURED_ARCH"
-KERNEL_GENCODE = "compute_86,sm_86; no PTX"
 
 # An arch class whose only problem is the install, not the hardware.
 FIXABLE = frozenset({"ship", "experimental", "cpu-torch", "no-torch"})
@@ -276,8 +275,11 @@ def verdict(m: Machine, *, override: bool | None = None) -> Verdict:
     CUDA kernel there whatever the wheel says, so "install a CUDA torch" would
     be the wrong next action (D5). ROCm reports ``torch.cuda.is_available() ==
     True``, so HIP is checked before CUDA.
+
+    ``override`` is kept so old call sites still type-check. Ampere-family
+    cards generate as experimental without ``DEEPFOLD_ALLOW_UNMEASURED_ARCH``.
     """
-    unmeasured_ok = allow_unmeasured() if override is None else override
+    _ = override
 
     if m.system == "Darwin":
         return Verdict("no", "darwin", messages.GENERATE_APPLE, messages.MACOS_RUN)
@@ -315,15 +317,8 @@ def verdict(m: Machine, *, override: bool | None = None) -> Verdict:
     if cap == SHIP_CAPABILITY:
         return Verdict("yes", "ship", messages.GENERATE_SHIP)
 
-    if cap in UNMEASURED_CAPABILITIES:
-        if unmeasured_ok:
-            return Verdict("experimental", "experimental", messages.GENERATE_EXPERIMENTAL)
-        return Verdict(
-            "no",
-            "unmeasured",
-            messages.generate_unmeasured(cap),
-            messages.wrong_capability(cap),
-        )
+    if cap in FAMILY_CAPABILITIES:
+        return Verdict("experimental", "experimental", messages.GENERATE_EXPERIMENTAL)
 
     if cap == (7, 5):
         return Verdict(
@@ -397,7 +392,7 @@ def checks(m: Machine, v: Verdict) -> list[Check]:
         out.append(Check(tag, f"GPU {m.sm}", detail))
     else:
         out.append(Check("fail", "GPU capability", "no CUDA device to ask"))
-    out.append(Check("ok", "kernel target sm_86", f"(gencode {KERNEL_GENCODE})"))
+    out.append(Check("ok", "kernel target Ampere-family", f"(gencode {KERNEL_GENCODE})"))
 
     if m.chr_bin is None:
         out.append(Check("fail", "chr", "not found"))

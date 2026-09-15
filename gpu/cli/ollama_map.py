@@ -18,7 +18,9 @@ __all__ = [
     "AllowlistRow",
     "Mapped",
     "ResolveError",
+    "all_rows",
     "canonical_tag",
+    "hf_id_list",
     "hf_ids",
     "known_tags",
     "resolve",
@@ -53,18 +55,35 @@ _QWEN_14B = AllowlistRow(
     tags=("qwen2.5:14b", "qwen2.5:14b-instruct"),
 )
 
-#: Table HF ids that have no short Ollama library tag. ``--hf`` only.
+_INTERNLM_20B = AllowlistRow(
+    hf_id="internlm/internlm2_5-20b-chat",
+    disk_gb=40.0,
+    local_hints=(r"C:\dev\models\internlm2_5-20b-chat",),
+)
+_QWEN_32B = AllowlistRow(
+    hf_id="Qwen/Qwen2.5-32B-Instruct",
+    disk_gb=65.0,
+    local_hints=(r"C:\dev\models\Qwen2.5-32B-Instruct",),
+)
+
+#: Table HF ids that have no short Ollama library tag. ``--hf`` / ``pull`` only.
 HF_ONLY: dict[str, AllowlistRow] = {
-    "internlm/internlm2_5-20b-chat": AllowlistRow(
-        hf_id="internlm/internlm2_5-20b-chat",
-        disk_gb=37.0,
-        local_hints=(r"C:\dev\models\internlm2_5-20b-chat",),
-    ),
+    _INTERNLM_20B.hf_id: _INTERNLM_20B,
+    _QWEN_32B.hf_id: _QWEN_32B,
 }
 
 for _row in (_QWEN_3B, _QWEN_14B):
     for _tag in _row.tags:
         ALLOWLIST[_tag] = _row
+
+
+def all_rows() -> tuple[AllowlistRow, ...]:
+    """docs/models.md order: 3B, 14B, internlm 20B, 32B overflow."""
+    return (_QWEN_3B, _QWEN_14B, _INTERNLM_20B, _QWEN_32B)
+
+
+def hf_id_list() -> tuple[str, ...]:
+    return tuple(row.hf_id for row in all_rows())
 
 
 def known_tags() -> tuple[str, ...]:

@@ -19,10 +19,11 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from gpu.chr0 import load_header
 from gpu.host.vq_blobs import materialize_vq, reconstruct_vq
+from gpu.cli.paths import models_root
 from gpu.lab.script import MESSAGES, chat_text, quality_ok, stop_token_ids
 
-MODEL_DIR = os.environ.get("DEEPFOLD_MODEL", r"C:\dev\models\Qwen2.5-3B-Instruct")
-CHR = os.environ.get("DEEPFOLD_VQ_CHR", r"C:\dev\models\qwen25-3b.vq2.chr")
+MODEL_DIR = os.environ.get("DEEPFOLD_MODEL", str(models_root() / "Qwen2.5-3B-Instruct"))
+CHR = os.environ.get("DEEPFOLD_VQ_CHR", str(models_root() / "qwen25-3b.vq2.chr"))
 MAX_NEW = 32
 
 

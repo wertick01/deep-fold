@@ -12,6 +12,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from gpu.cli.paths import models_root
 from gpu.host.host_image import cpu_is_pinned
 from gpu.host.residency import MIB
 
@@ -21,6 +22,7 @@ __all__ = [
     "MODEL_32B",
     "CHR_32B",
     "auto_max_resident_bytes",
+    "canary_overflow_bytes",
     "dump_json",
     "expected_h2d_bytes",
     "h2d_ms",
@@ -36,8 +38,10 @@ __all__ = [
 H2D_CALIB_MIB = 256.0
 H2D_CALIB_MS = 10.31
 
-MODEL_32B = os.environ.get("DEEPFOLD_MODEL_32B", r"C:\dev\models\Qwen2.5-32B-Instruct")
-CHR_32B = os.environ.get("DEEPFOLD_CHR_32B", r"C:\dev\models\qwen25-32b.nf4.chr")
+MODEL_32B = os.environ.get(
+    "DEEPFOLD_MODEL_32B", str(models_root() / "Qwen2.5-32B-Instruct")
+)
+CHR_32B = os.environ.get("DEEPFOLD_CHR_32B", str(models_root() / "qwen25-32b.nf4.chr"))
 
 _SMI_FIELDS = (
     "name",
@@ -117,6 +121,23 @@ def auto_max_resident_bytes(
     info["cap_bytes"] = cap
     info["cap_mib"] = cap / MIB
     return cap, info
+
+
+def canary_overflow_bytes(chr_path: str | Path) -> int:
+    """3B-style fake cap: keep pin kinds + 4 resident gate/up pairs.
+
+    Packed NF4 still fits the card; this forces policy D overflow without
+    changing decide(). Same formula as ``gpu.host.test_slots`` GPU canary.
+    """
+    from gpu.chr0 import load_header
+    from gpu.host.residency import descs_from_header, pin_nbytes
+
+    descs = descs_from_header(load_header(str(chr_path)))
+    pin = pin_nbytes(descs)
+    gate_n = next((int(d.nbytes) for d in descs if d.kind == "gate"), None)
+    if gate_n is None:
+        raise ValueError(f"{chr_path}: no gate tensor for canary overflow cap")
+    return int(pin + 4 * (2 * gate_n))
 
 
 def ram_snapshot() -> dict[str, Any]:
@@ -265,12 +286,22 @@ def render_data_path(snap: Mapping[str, Any]) -> str:
     host_layers = plan.get("host_layers") or {}
     downs = host_layers.get("down") or []
     gates = host_layers.get("gate") or []
+    ring = (loop.get("ring") or {}) if isinstance(loop, Mapping) else {}
+    n_slots = int(ring.get("n_slots") or snap.get("n_slots") or 2)
+    max_ahead = int(ring.get("max_ahead") or snap.get("max_ahead") or max(1, n_slots - 1))
+    n_cs = int(
+        ring.get("n_copy_streams")
+        or snap.get("n_copy_streams")
+        or (2 if n_slots >= 3 else 1)
+    )
+    stream_word = "stream" if n_cs == 1 else "streams"
 
     lines = [
         "# H2 data path (this run)",
         "",
         "Pinned host image of overflow NF4 (packed‖scale, one arena per matrix).",
-        "Two static device slots. One copy stream. Prefetch depth 1.",
+        f"{n_slots} static device slots. {n_cs} copy {stream_word}. "
+        f"Prefetch depth {max_ahead}. One H2D engine.",
         "Dequant only in registers/smem of `chr_nf4_gemm`. No dense `[M,K]` in HBM.",
         "",
         "## Machine",
@@ -315,8 +346,11 @@ def render_data_path(snap: Mapping[str, Any]) -> str:
         "(overlaps embed).",
         "3. Each layer: DEVICE q/k/v (CUDA graph if captured) → RoPE/SDPA → "
         "DEVICE o → gate/up (DEVICE graph or HOST slot) → down (usually HOST).",
-        "4. HOST GEMM: `wait e_copy[s]` → `chr_nf4_gemm(slot views)` → "
-        "`record e_gemm[s]` → prefetch next tape entry into the other slot.",
+        "4. HOST GEMM: compute.wait(e_copy) → CPU join current copy (WDDM) → "
+        "prefetch up to max_ahead → chr_nf4_gemm(slot views) → record e_gemm. "
+        "Each layer also kicks prefetch before qkv / before MLP (no-op if already "
+        "ahead). Do not join after queueing the next H2D: WDDM drained the copy "
+        "stream (0.01 tok/s).",
         "5. Prefill: this whole tape once **per chunk** "
         f"(LIVE_MAX_N={loop.get('prefill_chunk')}), not per column.",
         "6. Decode N=1: same tape once per token.",

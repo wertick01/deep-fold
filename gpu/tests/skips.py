@@ -7,9 +7,9 @@ prints ``SKIP``. What it must never do is ``return`` quietly, because pytest
 records a function that returns as **passed** -- a green tick for a check that
 never ran is worse than a red one.
 
-The kernel is Ampere ``sm_86`` SASS only (``-gencode=arch=compute_86,code=sm_86``,
-no PTX), so "CUDA is available" and "this card can launch the shipped kernel"
-are two different questions and get two different helpers.
+The kernel ships as an Ampere-family fatbinary (sm_80 / sm_86 / sm_89 + PTX).
+"CUDA is available" and "this card can launch the shipped kernel" are two
+different questions.
 
 Import is deliberately cheap: ``torch`` is only imported once something
 actually asks about the device.
@@ -20,13 +20,17 @@ from __future__ import annotations
 import importlib.util
 from typing import NoReturn
 
+from gpu.ampere_gencode import FAMILY_CAPABILITIES, KERNEL_GENCODE, MEASURED_CAPABILITY
+
 __all__ = [
     "Skip",
     "skip",
     "cuda_reason",
     "sm86_reason",
+    "ampere_reason",
     "requires_cuda",
     "requires_sm86",
+    "requires_ampere",
     "requires_module",
 ]
 
@@ -40,8 +44,7 @@ except ImportError:
         """Raised instead of a test that needs absent hardware, deps or files."""
 
 
-#: The one capability the shipped kernel image was built for.
-SHIP_CAPABILITY = (8, 6)
+SHIP_CAPABILITY = MEASURED_CAPABILITY
 
 
 def skip(reason: str) -> NoReturn:
@@ -63,8 +66,31 @@ def cuda_reason() -> str | None:
     return None
 
 
+def ampere_reason() -> str | None:
+    """Why the Ampere-family kernel cannot launch here, or ``None`` when it can."""
+    reason = cuda_reason()
+    if reason is not None:
+        return reason
+    import torch
+
+    try:
+        cap = tuple(torch.cuda.get_device_capability(0))
+    except Exception as exc:  # noqa: BLE001
+        return f"device capability unreadable: {type(exc).__name__}: {exc}"
+    if cap not in FAMILY_CAPABILITIES:
+        return (
+            f"this GPU is sm_{cap[0]}{cap[1]}; the shipped kernel is Ampere-family "
+            f"({KERNEL_GENCODE})"
+        )
+    return None
+
+
 def sm86_reason() -> str | None:
-    """Why the shipped kernel cannot launch here, or ``None`` on an sm_86 card."""
+    """Why this is not the measured sm_86 card, or ``None`` on that card.
+
+    Kernel *launch* on Ada/A100 uses :func:`ampere_reason`. This helper pins
+    tests that quote the 3080 plate.
+    """
     reason = cuda_reason()
     if reason is not None:
         return reason
@@ -76,14 +102,20 @@ def sm86_reason() -> str | None:
         return f"device capability unreadable: {type(exc).__name__}: {exc}"
     if cap != SHIP_CAPABILITY:
         return (
-            f"this GPU is sm_{cap[0]}{cap[1]}; the shipped kernel is sm_86 SASS "
-            "only (-gencode=arch=compute_86,code=sm_86; no PTX)"
+            f"this GPU is sm_{cap[0]}{cap[1]}; the measured plate is sm_86 "
+            f"(Ampere-family generate still uses {KERNEL_GENCODE})"
         )
     return None
 
 
 def requires_cuda() -> None:
     reason = cuda_reason()
+    if reason is not None:
+        skip(reason)
+
+
+def requires_ampere() -> None:
+    reason = ampere_reason()
     if reason is not None:
         skip(reason)
 

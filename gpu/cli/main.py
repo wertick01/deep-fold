@@ -18,11 +18,64 @@ _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
+from . import chat as chat_mod  # noqa: E402
 from . import doctor as doctor_mod  # noqa: E402
 from . import from_ollama as from_ollama_mod  # noqa: E402
+from . import pull as pull_mod  # noqa: E402
 from . import run as run_mod  # noqa: E402
+from . import selftest as selftest_mod  # noqa: E402
+from . import setup_env as setup_mod  # noqa: E402
 
 PROG = "deepfold"
+
+
+def _add_runtime_flags(p: argparse.ArgumentParser, *, with_prompt: bool) -> None:
+    p.add_argument("--model", help="HuggingFace directory (or $DEEPFOLD_MODEL)")
+    p.add_argument("--chr", help="packed weights (or $DEEPFOLD_CHR, or a sibling)")
+    p.add_argument(
+        "--codec",
+        choices=("auto", "nf4", "vq"),
+        default="auto",
+        help="when packing: NF4 if it fits, else NF4 overflow (H2); --codec vq is oracle-only",
+    )
+    p.add_argument("--chr-bin", help="path to the Go chr binary")
+    if with_prompt:
+        p.add_argument("--prompt", help="one-shot prompt instead of the stdin REPL")
+    p.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=64,
+        help="tokens to generate per turn (default: 64)",
+    )
+    p.add_argument("--max-seq", type=int, default=512, help="preallocated KV length")
+    p.add_argument(
+        "--max-resident-mib",
+        type=int,
+        default=None,
+        help=(
+            "HBM cap for NF4 weights in MiB; overflow streams the rest (H2). "
+            "Default: fully resident if NF4 fits, else auto from VRAM and --max-seq. "
+            "Canary: fake a small cap on 3B without a 32B file. --codec vq ignores this."
+        ),
+    )
+    p.add_argument(
+        "--raw",
+        action="store_true",
+        help="tokenize the prompt as-is, without the model's chat template",
+    )
+    p.add_argument(
+        "--no-warmup",
+        dest="warmup",
+        action="store_false",
+        help="skip the warmup pass (first token then pays for kernel setup)",
+    )
+    p.add_argument(
+        "--no-compress",
+        action="store_true",
+        help="fail instead of packing when no .chr is found",
+    )
+    p.add_argument("--quiet", action="store_true", help="no chr progress output")
+    p.add_argument("--debug", action="store_true", help="traceback after the report")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -30,7 +83,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog=PROG,
         description=(
             "Packed CHR0 driver (NF4 or VQ 2-bit): weights stay packed in "
-            "VRAM for the whole run. Ampere sm_86 (RTX 3080 class) only."
+            "VRAM for the whole run. Ampere-family CUDA (sm_86 measured; "
+            "sm_80/sm_89 experimental). Turing / Hopper / Blackwell refuse."
         ),
     )
     sub = ap.add_subparsers(dest="command", metavar="<command>")
@@ -88,50 +142,24 @@ def build_parser() -> argparse.ArgumentParser:
             "Needs two things: a HuggingFace directory (config.json, tokenizer) "
             "and one .chr of packed weights (NF4 or VQ 2-bit). Compresses once "
             "if the .chr is missing. --codec auto (default) packs NF4 when it "
-            "fits this card, else NF4 overflow (H2). VQ 2-bit is --codec vq only."
+            "fits this card, else NF4 overflow (H2). VQ 2-bit is --codec vq only. "
+            "TTY one-liners: prefer deepfold chat."
         ),
     )
-    gen.add_argument("--model", help="HuggingFace directory (or $DEEPFOLD_MODEL)")
-    gen.add_argument("--chr", help="packed weights (or $DEEPFOLD_CHR, or a sibling)")
-    gen.add_argument(
-        "--codec",
-        choices=("auto", "nf4", "vq"),
-        default="auto",
-        help="when packing: NF4 if it fits, else NF4 overflow (H2); --codec vq is oracle-only",
-    )
-    gen.add_argument("--chr-bin", help="path to the Go chr binary")
-    gen.add_argument("--prompt", help="one-shot prompt instead of the stdin REPL")
-    gen.add_argument("--max-new-tokens", type=int, default=64)
-    gen.add_argument("--max-seq", type=int, default=512, help="preallocated KV length")
-    gen.add_argument(
-        "--max-resident-mib",
-        type=int,
-        default=None,
-        help=(
-            "HBM cap for NF4 weights in MiB; overflow streams the rest (H2). "
-            "Default: fully resident if NF4 fits, else auto from VRAM and --max-seq. "
-            "Canary: fake a small cap on 3B without a 32B file. --codec vq ignores this."
-        ),
-    )
-    gen.add_argument(
-        "--raw",
-        action="store_true",
-        help="tokenize the prompt as-is, without the model's chat template",
-    )
-    gen.add_argument(
-        "--no-warmup",
-        dest="warmup",
-        action="store_false",
-        help="skip the warmup pass (first token then pays for kernel setup)",
-    )
-    gen.add_argument(
-        "--no-compress",
-        action="store_true",
-        help="fail instead of packing when no .chr is found",
-    )
-    gen.add_argument("--quiet", action="store_true", help="no chr progress output")
-    gen.add_argument("--debug", action="store_true", help="traceback after the report")
+    _add_runtime_flags(gen, with_prompt=True)
     gen.set_defaults(func=run_mod.run)
+
+    talk = sub.add_parser(
+        "chat",
+        help="TTY chat session (history + streamed tokens)",
+        description=(
+            "Same load path as run, then a prompt_toolkit session. "
+            "Enter sends, Ctrl+J new line. Each turn prefills the whole chat. "
+            "Needs a TTY; scripts use run --prompt."
+        ),
+    )
+    _add_runtime_flags(talk, with_prompt=False)
+    talk.set_defaults(func=chat_mod.chat)
 
     ollama = sub.add_parser(
         "from-ollama",
@@ -159,6 +187,52 @@ def build_parser() -> argparse.ArgumentParser:
         help="do not ask before snapshot_download (required when stdin is not a TTY)",
     )
     ollama.set_defaults(func=from_ollama_mod.from_ollama)
+
+    get = sub.add_parser(
+        "pull",
+        help="download an allowlisted HuggingFace BF16 tree (never GGUF)",
+        description=(
+            "Allowlisted Hub ids from docs/models.md. Arbitrary repos are refused. "
+            "Confirm disk (--yes or a TTY). Extra: pip install \"deepfold[hub]\"."
+        ),
+    )
+    get.add_argument("hf_id", help="HuggingFace id, e.g. Qwen/Qwen2.5-3B-Instruct")
+    get.add_argument("--dir", help="download destination")
+    get.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="do not ask before snapshot_download (required when stdin is not a TTY)",
+    )
+    get.set_defaults(func=pull_mod.pull)
+
+    boot = sub.add_parser(
+        "setup",
+        help="install CUDA torch + build chr in this interpreter (not torch-gpu)",
+        description=(
+            "Catch-up inside an existing venv. Refuses conda env torch-gpu. "
+            "A neighbor PC should run scripts/setup.ps1 or scripts/setup.sh first."
+        ),
+    )
+    boot.add_argument("--chr-bin", help="path to the Go chr binary")
+    boot.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the commands; never pip install",
+    )
+    boot.set_defaults(func=setup_mod.setup, model=None, compress_only=False)
+
+    tests = sub.add_parser(
+        "test",
+        help="run CLI acceptance (no Hub). --live skips unless 3B is on disk",
+    )
+    tests.add_argument(
+        "--live",
+        action="store_true",
+        help="check doctor + 3B tree; does not generate and does not download",
+    )
+    tests.add_argument("--chr-bin", help="path to the Go chr binary")
+    tests.set_defaults(func=selftest_mod.selftest)
 
     return ap
 

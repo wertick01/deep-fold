@@ -26,7 +26,7 @@ from .embedding import Nf4Embedding, dequant_table
 from .host_image import HostImage
 from .linear import CompressedLinear
 from .residency import descs_from_header, plan_residency
-from .slots import SlotPair
+from .slots import OVERFLOW_SLOT_COUNT, SlotPair
 from .vq_blobs import materialize_vq, reconstruct_vq
 from .vq_linear import CompressedVqLinear, VqEmbedding
 
@@ -85,6 +85,7 @@ class LoadReport:
                 f"({self.streamed_bytes / MIB:.1f} MiB host) "
                 f"resident_plan={self.resident_bytes / MIB:.1f} MiB "
                 f"slot={self.slot_nbytes / MIB:.2f} MiB"
+                f"×{self.slots.count if self.slots is not None else OVERFLOW_SLOT_COUNT}"
             )
         return (
             f"{self.linears} {self.codec} linears ({self.linear_bytes / MIB:.1f} MiB), "
@@ -349,7 +350,7 @@ def load_chr_nf4(
         descs = descs_from_header(hdr)
         plan = plan_residency(descs, max_resident_bytes)
         # Slots first: addresses must not move when resident matrices scatter.
-        report.slots = SlotPair(plan.slot_nbytes, dev)
+        report.slots = SlotPair(plan.slot_nbytes, dev, count=OVERFLOW_SLOT_COUNT)
         report.slot_nbytes = plan.slot_nbytes
         report.streamed = len(plan.streamed)
         report.streamed_bytes = plan.streamed_bytes

@@ -1,7 +1,8 @@
 """Where things live: the ``chr`` binary, the cache root, and the ``.chr`` file.
 
 Env vars are ``DEEPFOLD_MODEL``, ``DEEPFOLD_CHR``, ``DEEPFOLD_CHR_BIN``,
-``DEEPFOLD_HOME``. :func:`looks_like_gguf` inspects the *string* the user
+``DEEPFOLD_HOME``, ``DEEPFOLD_MODELS``, ``DEEPFOLD_RUNS``.
+:func:`looks_like_gguf` inspects the *string* the user
 typed: a GGUF path is refused without being read. :func:`find_chr_file`
 picks a sibling ``.chr`` only when ``accept`` (CHR0 header vs ``config.json``)
 says it belongs to this model.
@@ -20,6 +21,11 @@ ENV_MODEL = "DEEPFOLD_MODEL"
 ENV_CHR = "DEEPFOLD_CHR"
 ENV_CHR_BIN = "DEEPFOLD_CHR_BIN"
 ENV_HOME = "DEEPFOLD_HOME"
+ENV_MODELS = "DEEPFOLD_MODELS"
+ENV_RUNS = "DEEPFOLD_RUNS"
+
+# Author box. Used only when that directory exists and DEEPFOLD_MODELS is unset.
+_LEGACY_MODELS = Path(r"C:\dev\models")
 
 # Substrings that mean "this is Ollama's or llama.cpp's copy, not a HF tree".
 # Matched against the user's argument, never against a directory listing.
@@ -35,6 +41,28 @@ def deepfold_home() -> Path:
     if local:
         return Path(local) / "deepfold"
     return Path.home() / ".cache" / "deepfold"
+
+
+def models_root() -> Path:
+    """HF trees and sibling ``.chr`` files.
+
+    ``$DEEPFOLD_MODELS``, else ``C:\\dev\\models`` when that folder exists
+    (author box), else ``$DEEPFOLD_HOME/models``.
+    """
+    env = os.environ.get(ENV_MODELS)
+    if env:
+        return Path(env)
+    if _LEGACY_MODELS.is_dir():
+        return _LEGACY_MODELS
+    return deepfold_home() / "models"
+
+
+def runs_root() -> Path:
+    """Where lab / competitor dumps go. ``$DEEPFOLD_RUNS`` or ``<models>/runs``."""
+    env = os.environ.get(ENV_RUNS)
+    if env:
+        return Path(env)
+    return models_root() / "runs"
 
 
 def chr_exe_names() -> tuple[str, ...]:

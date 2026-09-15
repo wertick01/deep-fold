@@ -3,7 +3,7 @@
 ``vq_gemm(index, book, x, M, K, K_pad) -> y`` with ``y`` BF16 ``[M, N]``.
 Caller owns every tensor; the kernel does not allocate.
 
-Compile (Windows, sm_86), from a VS x64 prompt or after vcvars64.bat:
+Compile (Windows, Ampere-family fatbinary), from a VS x64 prompt or after vcvars64.bat:
 
     C:\\Users\\Professional\\anaconda3\\envs\\torch-gpu\\python.exe gpu/vq/setup.py build_ext --inplace
 
@@ -30,6 +30,7 @@ _SOURCES = _KERNEL_SOURCES + (_INCLUDE / "chr_gpu.h",)
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
+from gpu.ampere_gencode import nvcc_cflags  # noqa: E402
 from gpu.ext_bin import find_ext, have_host_compiler  # noqa: E402
 
 _ext: Any = None
@@ -75,12 +76,7 @@ def _jit_load():
         sources=[str(_DIR / "bindings.cpp"), str(_DIR / "vq_gemm.cu")],
         extra_include_paths=[str(_INCLUDE)],
         extra_cflags=cxx_flags,
-        extra_cuda_cflags=[
-            "-O3",
-            "-gencode=arch=compute_86,code=sm_86",
-            "--expt-relaxed-constexpr",
-            "-lineinfo",
-        ],
+        extra_cuda_cflags=nvcc_cflags(),
         verbose=True,
     )
 

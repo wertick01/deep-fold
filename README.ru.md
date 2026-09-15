@@ -546,9 +546,11 @@ What is 17 times 19? Reply with the number only.
   ток/с. Старая пара n16 — 45 против 139 мс. n64 не живой.
 - **Память под изображение входит в показания `nvidia-smi`.** Она настоящая, она
   на той же карте, и здесь она не вычитается.
-- **Generate только Ampere `sm_86`.** Ada / Hopper / Blackwell — именованный
-  отказ, не порт. «Два клика, все ОС» — не утверждение: CUDA, компилятор, Go и
-  дерево HuggingFace ставит пользователь; Linux tok/s не опубликованы.
+- **Generate — семейство Ampere.** sm_86 (RTX 3080) — измеренная пластина.
+  A100 (`sm_80`) и Ada (`sm_89`) генерируют как experimental. Turing / Hopper /
+  Blackwell — именованный отказ, не порт. «Два клика, все ОС» — не утверждение:
+  CUDA, компилятор, Go и дерево HuggingFace ставит пользователь; Linux tok/s не
+  опубликованы.
 - **Лаборатория умеет рисовать синтетическую картинку** (`--dry-plot`), её CSV
   помечены как `FIXTURE`. В таблицах выше нет ничего из этой заготовки.
 - **WikiText PPL не опубликован.** Адаптер NLL есть; корпусного числа здесь нет.
@@ -575,19 +577,39 @@ chr compress --in <model-dir> --out <model>.nf4.chr --codec nf4
 маленькие, что в float16 они обнулились бы, кодируются масштабом `1`, см.
 [`internal/nf4`](internal/nf4/).
 
+## Установка
+
+На другом ПК (не эта 3080) — короткий список команд в
+[`docs/quickstart.ru.md`](docs/quickstart.ru.md)
+([English](docs/quickstart.md)), полный `-h` — в
+[`docs/install.ru.md`](docs/install.ru.md). Соседний контракт: `.venv` в
+репозитории, CUDA-torch с индекса cu124, `chr`, затем `doctor` / `pull` /
+`chat`. В conda env `torch-gpu` ничего не ставить. Метрики с чужой карты:
+
+```powershell
+powershell -File scripts/plate.ps1 3b
+```
+
+```powershell
+powershell -File scripts/setup.ps1
+.\.venv\Scripts\Activate.ps1
+deepfold pull Qwen/Qwen2.5-3B-Instruct --yes
+deepfold chat --model <этот каталог>
+```
+
 ## Запустить лабораторию
 
-Генерация из упакованного `.chr` без ноутбука. Только Ampere `sm_86`
-(класс RTX 3080); GGUF отклоняется; соседний `.chr` берётся только если
+Генерация из упакованного `.chr` без ноутбука. CUDA семейства Ampere:
+**sm_86 — измеренная пластина** (RTX 3080); A100 (`sm_80`) и Ada (`sm_89`)
+генерируют как experimental. GGUF отклоняется; соседний `.chr` берётся только если
 заголовок CHR0 совпадает с этой моделью (`hidden_size`, `num_layers`,
 `vocab_size`).
 
 Это **не** «два клика на любой ОС». `doctor` / `run` не ставят драйвер
 NVIDIA, CUDA-колесо PyTorch, MSVC/`nvcc`, Go и дерево HuggingFace. macOS
 сжимает и не генерирует. Linux может загрузить `.so`; **опубликованных Linux
-tok/s нет**. Ada (`sm_89`), Hopper и Blackwell **отказывают generate** —
-образ это `-gencode=arch=compute_86,code=sm_86` без PTX. Это отказ, а не
-порт ядра.
+tok/s нет**. Turing, Hopper и Blackwell **отказывают generate**. Образ ядра —
+`sm_80/sm_86/sm_89` плюс PTX `compute_80`.
 
 ```powershell
 conda activate torch-gpu
@@ -602,11 +624,13 @@ python -m gpu.cli run --model <каталог-HuggingFace>
 Сравнительная пластина BF16 против NF4 по-прежнему лабораторный стенд. По
 умолчанию пути указывают на рабочую машину автора, их можно переопределить:
 
-| Переменная | Значение по умолчанию на этой машине |
+| Переменная | Смысл |
 |---|---|
-| `DEEPFOLD_MODEL` | `C:\dev\models\Qwen2.5-3B-Instruct` |
-| `DEEPFOLD_CHR` | `C:\dev\models\qwen25-3b.nf4.chr` |
-| `DEEPFOLD_RUNS` | `C:\dev\models\runs` |
+| `DEEPFOLD_MODEL` | каталог HuggingFace (на машине автора — `C:\dev\models\Qwen2.5-3B-Instruct`) |
+| `DEEPFOLD_CHR` | упакованный файл (там же `C:\dev\models\qwen25-3b.nf4.chr`) |
+| `DEEPFOLD_MODELS` | корень деревьев; иначе `C:\dev\models` если есть, иначе `$DEEPFOLD_HOME/models` |
+| `DEEPFOLD_RUNS` | дампы прогонов; иначе `<models>/runs` |
+| `DEEPFOLD_HOME` | кэш (`%LOCALAPPDATA%\deepfold` / `~/.cache/deepfold`) |
 
 ```powershell
 conda activate torch-gpu

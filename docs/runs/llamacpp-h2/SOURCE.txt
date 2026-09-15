@@ -1,0 +1,20 @@
+llama.cpp CUDA Q4_K_M vs H2, same PC / same Instruct / greedy smoke.
+Live dump stays outside git:
+
+  C:\dev\models\runs\llamacpp-h2-20260915-224614
+
+Command:
+
+  python -m gpu.lab.llamacpp_h2 --bench
+
+Binary: ggml-org/llama.cpp b10964 win-cuda-12.4 (llama-server + llama-bench).
+Not llama-cpp-python (Windows Long Paths; that venv is not this row).
+GGUF: bartowski Qwen2.5-32B-Instruct-Q4_K_M.gguf, 19851336576 bytes.
+
+Cite this dump (parallel 1, ignore_eos plateau 64, llama-bench r3).
+The earlier 4-slot short-EOS plate
+C:\dev\models\runs\llamacpp-h2-20260915-224016 is the same order (~1.3 tok/s)
+and is not the number to quote.
+
+Ollama was not run. Korean blog qwen2.5-coder:32b / ctx 32k / temp 0.2
+is a different recipe; do not paste 2.9–3.1 tok/s into this row.

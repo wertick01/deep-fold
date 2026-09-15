@@ -43,7 +43,12 @@ art (`Linear4bit`, Marlin, AWQ W4A16); утверждение про стек, �
 весов) выдаёт около 6,6 токена в секунду; internlm2.5-20B (~38 ГиБ) — около 5,0.
 Та же 14B в шестнадцати битах, с выносом за карту, — 0,92. У Qwen2.5-32B
 упакованный NF4 всё ещё ~16,6 ГиБ и на карту не влезает; overflow-путь везёт
-pinned-хвост с хоста и выдаёт 2,31 токена в секунду. Когда влезают оба
+pinned-хвост с хоста и выдаёт 2,31 токена в секунду. Тот же ПК, тот же
+Instruct, жадный дым, ctx 2048: llama.cpp Q4_K_M даёт **1,52 ток/с**
+(плато 64 токена; `llama-bench` tg64 **1,47**) — примерно **в 1,5 раза
+медленнее**. Протокол и цифры: [docs/eval-32b.md](docs/eval-32b.md),
+[docs/runs/llamacpp-h2/SUMMARY.txt](docs/runs/llamacpp-h2/SUMMARY.txt).
+Когда влезают оба
 варианта (3B), decode на упакованном пути уже быстрее; время до первого токена
 по-прежнему больше. Сжатие окупается, когда несжатая модель на карту не
 помещается.
@@ -418,6 +423,11 @@ transformers 5 больше не передаёт `cache_position`, и моде�
 | Средняя скорость выдачи, токен/с | — | 2,31 |
 | Проверка (Paris / Berlin / 323) | не запускалась | пройдена |
 
+На той же карте llama.cpp Q4_K_M Instruct (жадный дым, ctx 2048): **1,52 ток/с**
+decode, TTFT **1010 мс**, `nvidia-smi` **11 520 МиБ**. Это **в 1,5 раза медленнее**
+overflow NF4. Источник: [`docs/eval-32b.md`](docs/eval-32b.md),
+[`docs/runs/llamacpp-h2/SUMMARY.txt`](docs/runs/llamacpp-h2/SUMMARY.txt).
+
 Источник: живой прогон `C:\dev\models\runs\h2-qwen25-32b-20260914-234048`
 (`python -m gpu.lab.h2_trace --no-timing`). Короткая копия
 (`data_path.md`, `messages.json`, `gate.txt`) лежит в
@@ -442,6 +452,13 @@ NF4 на 16 599 МиБ **тоже** не влезает на карту 12 Ги�
 
 **Hard-12 не запускали.** Дым 3/3 — не качество. Двенадцать пунктов на этом
 пути — отдельная медленная пластина (`docs/eval-32b.md`).
+
+На той же карте и тех же трёх запросах llama.cpp Q4_K_M Instruct **проигрывает
+по decode**: **1,52 ток/с** против **2,31** (примерно **в 1,5 раза медленнее**;
+`llama-bench` tg64 **1,47**). Подтверждение:
+[`docs/eval-32b.md`](docs/eval-32b.md),
+[`docs/runs/llamacpp-h2/SUMMARY.txt`](docs/runs/llamacpp-h2/SUMMARY.txt).
+Это не сравнение с Ollama, Marlin или AWQ.
 
 Pageable H2D (~0,8 ток/с) — ошибка: `Tensor.is_pinned` это метод, поэтому
 `bool(arena.is_pinned)` всегда true, и образ хоста оставался pageable.
@@ -507,10 +524,12 @@ What is 17 times 19? Reply with the number only.
 - **На 32B упакованный NF4 всё ещё не влезает.** Продуктовый путь — overflow,
   не «все 16 599 МиБ в HBM». Резидентные веса 9 716 МиБ; 6 885 МиБ едут из
   pinned-RAM хоста. Пик `nvidia-smi` 11 933 включает рабочий стол. Выдача
-  **2,31 ток/с** — это CopyRing + TokenLoop + `chr_nf4_gemm`, не против Marlin /
-  llama.cpp / BF16 32B (не запускали). Дым 3/3 — не качество; hard-12 не
-  стартовали. Не цитировать pageable ~0,8 как дизайн H2. Последовательная
-  копия 277 мс — не измеренные 432 мс стены. `--codec auto` никогда не берёт VQ.
+  **2,31 ток/с** — это CopyRing + TokenLoop + `chr_nf4_gemm`. Тот же Instruct
+  в llama.cpp Q4_K_M на этой 3080 — **1,52 ток/с** decode, примерно **в 1,5
+  раза медленнее** ([docs/eval-32b.md](docs/eval-32b.md)). Дым 3/3 — не
+  качество; hard-12 не стартовали. Не цитировать pageable ~0,8 как дизайн H2.
+  Последовательная копия 277 мс — не измеренные 432 мс стены. `--codec auto`
+  никогда не берёт VQ.
 - **Скорость выдачи сравнивает два разных стека:** с одной стороны
   HuggingFace `generate` с плотными умножениями в BF16, с другой — наш цикл NF4
   с восстановлением весов внутри умножения. Приводятся оба, в обе стороны. На
@@ -523,14 +542,17 @@ What is 17 times 19? Reply with the number only.
   generate у BF16 не бежал, сравнивать скорость не с чем.
   На 32B NF4 overflow даёт 2,31 ток/с; generate у BF16 нет и нет
   полностью резидентного NF4.
-  **Не пишите, что deep-fold быстрее существующих 4-битных движков.** Живой
+  **Не пишите, что deep-fold быстрее существующих 4-битных движков вообще.**
+  Исключение на этой карте: matched llama.cpp Q4_K_M 32B Instruct — 1,52 ток/с
+  против 2,31 ([docs/eval-32b.md](docs/eval-32b.md),
+  [docs/runs/llamacpp-h2/](docs/runs/llamacpp-h2/)). Живой
   дымовой прогон bitsandbytes NF4 (те же три запроса, изолированный venv) —
   22,8 ток/с / 57 мс; наш парный NF4 — 28,7 ток/с / 92 мс. Это разные стеки
   (`Linear4bit` против `CompressedLinear` + `TokenLoop`), не сравнение ядер.
-  Marlin, AWQ, GPTQ/Marlin, ExLlamaV2, llama.cpp CUDA Q4 и vLLM не засекались.
-  Зафиксированная папка
+  Marlin, AWQ, GPTQ/Marlin, ExLlamaV2 и vLLM на 32B не засекались.
+  Трёхмиллиардная папка
   [`docs/runs/competitor-qwen25-3b/`](docs/runs/competitor-qwen25-3b/) остаётся
-  SKIP; живые tok/s в git не пишутся. Изолированные venv:
+  SKIP. Изолированные venv:
   [`docs/competitor-venvs.md`](docs/competitor-venvs.md). Счётчики Nsight в
   [`docs/runs/ncu/`](docs/runs/ncu/) — occupancy и трубы *нашего* ядра, не tok/s.
   Арифметика ядра против CPU-оракула NF4 —
@@ -680,11 +702,11 @@ python -m gpu.lab.h2_trace --no-timing
 | Методика лаборатории и чтение картинки | [docs/lab.md](docs/lab.md) |
 | CLI (`doctor` / `run`) | [docs/ux.md](docs/ux.md) |
 | Трудный eval (вопросы, ответы, время 3B/14B) | [docs/eval-hard-qwen25.md](docs/eval-hard-qwen25.md) |
-| Дым 32B + лист hard-12 (hard не гнали) | [docs/eval-32b.md](docs/eval-32b.md) |
+| Дым 32B, hard-12 не гнали; llama.cpp Q4_K_M в 1,5 раза медленнее | [docs/eval-32b.md](docs/eval-32b.md) |
 | Кольцо overflow H2 | [docs/plan-h2-ring.md](docs/plan-h2-ring.md) |
 | Счётчики Nsight GEMM (не tok/s) | [docs/runs/ncu/](docs/runs/ncu/) |
-| Матрица 4-битных конкурентов (все SKIP) | [docs/runs/competitor-qwen25-3b/](docs/runs/competitor-qwen25-3b/) |
-| Изолированные venv конкурентов (потом) | [docs/competitor-venvs.md](docs/competitor-venvs.md) |
+| Матрица 4-битных конкурентов (3B: SKIP; 32B llama.cpp снят) | [docs/runs/competitor-qwen25-3b/](docs/runs/competitor-qwen25-3b/) |
+| Изолированные venv конкурентов | [docs/competitor-venvs.md](docs/competitor-venvs.md) |
 | Оракул ядра против CPU NF4 | [gpu/nf4/verify.py](gpu/nf4/verify.py), [gpu/nf4/numerics.py](gpu/nf4/numerics.py) |
 | Бюджет памяти на 3080 12 ГБ | [docs/vram-3080.md](docs/vram-3080.md) |
 | Сжатие и проверка на процессоре | [docs/cpu-roundtrip.md](docs/cpu-roundtrip.md) |

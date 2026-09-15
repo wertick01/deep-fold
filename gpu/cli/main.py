@@ -257,6 +257,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     boot.add_argument("--chr-bin", help="path to the Go chr binary")
     boot.add_argument(
+        "--chr-only",
+        action="store_true",
+        help="build chr (fetch portable Go if needed); do not pip install",
+    )
+    boot.add_argument(
         "--dry-run",
         action="store_true",
         help="print the commands; never pip install",

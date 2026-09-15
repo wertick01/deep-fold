@@ -21,7 +21,7 @@ echo "Using $VENV_PY"
 "$VENV_PY" -m pip install torch --index-url "$TORCH_INDEX"
 "$VENV_PY" -m pip install -e ".[hub,chat]"
 
-"$VENV_PY" -m gpu.cli.go_toolchain
+"$VENV_PY" -m gpu.cli setup --chr-only
 
 "$VENV_PY" -m gpu.cli doctor
 echo

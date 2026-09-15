@@ -1181,6 +1181,8 @@ def test_parser_k5_commands() -> None:
     assert run_defaults.max_new_tokens == 64 and run_defaults.max_seq == 512
     setup = build_parser().parse_args(["setup", "--dry-run"])
     assert setup.dry_run is True
+    chr_only = build_parser().parse_args(["setup", "--chr-only"])
+    assert chr_only.chr_only is True
     live = build_parser().parse_args(["test", "--live"])
     assert live.live is True
 
@@ -1524,7 +1526,7 @@ def test_setup_dry_run_does_not_pip() -> None:
     text = out.getvalue() + err.getvalue()
     assert "torch" in text and "download.pytorch.org/whl/cu124" in text
     assert '".[hub,chat]"' in text or ".[hub,chat]" in text
-    assert "gpu.cli.go_toolchain" in text
+    assert "setup --chr-only" in text
 
 
 def test_setup_refuses_torch_gpu_without_pip() -> None:
@@ -1660,7 +1662,8 @@ def test_ensure_chr_fetches_portable_go_when_missing() -> None:
                 out.parent.mkdir(parents=True, exist_ok=True)
                 out.write_bytes(b"chr")
                 assert env is not None and env.get("CGO_ENABLED") == "0"
-                assert env.get("GOROOT")
+                assert not any(k.upper() == "GOROOT" for k in env)
+                assert env.get("GOTOOLCHAIN") == "local"
                 assert "gopath" in env.get("GOPATH", "").replace("\\", "/").lower()
                 return 0
 
@@ -1716,6 +1719,41 @@ def test_setup_calls_ensure_chr_when_missing() -> None:
         setup_mod.ensure_chr = orig_ensure  # type: ignore[assignment]
         doctor_mod.doctor = orig_doc  # type: ignore[assignment]
         setup_mod.prefix_is_protected = orig_prot  # type: ignore[assignment]
+
+
+def test_build_env_drops_goroot_for_portable_go() -> None:
+    previous = os.environ.get("GOROOT")
+    os.environ["GOROOT"] = r"C:\missing-go"
+    try:
+        env = go_tc._build_env(Path("go.exe"), True, Path("home"))
+    finally:
+        if previous is None:
+            os.environ.pop("GOROOT", None)
+        else:
+            os.environ["GOROOT"] = previous
+    assert not any(k.upper() == "GOROOT" for k in env)
+    assert env.get("GOTOOLCHAIN") == "local"
+    assert env.get("CGO_ENABLED") == "0"
+
+
+def test_setup_chr_only_skips_pip() -> None:
+    pip_cmds: list[object] = []
+    ensured: list[int] = []
+    orig_run = setup_mod._run
+    orig_ensure = setup_mod.ensure_chr
+    try:
+        setup_mod._run = lambda *a, **k: pip_cmds.append((a, k)) or 0  # type: ignore[assignment]
+        setup_mod.ensure_chr = lambda: ensured.append(1) or Path("chr")  # type: ignore[assignment]
+        err, out = io.StringIO(), io.StringIO()
+        with redirect_stderr(err), redirect_stdout(out):
+            code = main(["setup", "--chr-only"])
+        assert code == 0, err.getvalue()
+        assert pip_cmds == []
+        assert ensured == [1]
+        assert "chr" in out.getvalue()
+    finally:
+        setup_mod._run = orig_run  # type: ignore[assignment]
+        setup_mod.ensure_chr = orig_ensure  # type: ignore[assignment]
 
 
 def test_pull_unknown_id_does_not_open_files() -> None:

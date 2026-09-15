@@ -246,11 +246,25 @@ def resolve_go(home: Path) -> tuple[Path, bool]:
     return _fetch_go(home), True
 
 
+def _drop_env_key(env: dict[str, str], name: str) -> None:
+    """Windows env is case-insensitive; a leftover GOROOT breaks the zip toolchain."""
+    for key in [k for k in env if k.upper() == name.upper()]:
+        env.pop(key, None)
+
+
 def _build_env(go: Path, bundled: bool, home: Path) -> dict[str, str]:
+    """Portable go.exe infers GOROOT from its own path. Setting GOROOT to that
+    folder made Go 1.22 on Windows exit 2: ``cannot find GOROOT directory``.
+    """
+    del go
     env = os.environ.copy()
     env["CGO_ENABLED"] = "0"
+    if os.name == "nt" and "SYSTEMROOT" not in {k.upper() for k in env}:
+        env["SYSTEMROOT"] = os.environ.get("SYSTEMROOT", r"C:\Windows")
     if bundled:
-        env["GOROOT"] = str(go.parent.parent)
+        _drop_env_key(env, "GOROOT")
+        _drop_env_key(env, "GOROOT_FINAL")
+        env["GOTOOLCHAIN"] = "local"
         env["GOPATH"] = str(home / "toolchains" / "gopath")
         env["GOCACHE"] = str(home / "toolchains" / "gocache")
     return env
@@ -266,11 +280,12 @@ def ensure_chr(*, home: Path | None = None, repo: Path | None = None) -> Path:
     repo = Path(repo) if repo is not None else REPO
     dest = home / "bin" / _chr_name()
     go, bundled = resolve_go(home)
+    go = go.resolve() if go.exists() else go
     dest.parent.mkdir(parents=True, exist_ok=True)
     print(f"building chr with {go} -> {dest}", flush=True)
     code = _run(
-        [str(go), "build", "-o", str(dest), "./cmd/chr"],
-        cwd=str(repo),
+        [os.fspath(go), "build", "-o", os.fspath(dest), "./cmd/chr"],
+        cwd=os.fspath(repo),
         env=_build_env(go, bundled, home),
     )
     if code != 0:

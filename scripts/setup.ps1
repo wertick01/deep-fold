@@ -38,7 +38,7 @@ if ($LASTEXITCODE -ne 0) { throw "torch install failed (exit $LASTEXITCODE)" }
 if ($LASTEXITCODE -ne 0) { throw "deepfold extras install failed (exit $LASTEXITCODE)" }
 
 Write-Host "Building chr (PATH Go 1.22+ or portable Go 1.22 from go.dev)"
-& $VenvPy -m gpu.cli.go_toolchain
+& $VenvPy -m gpu.cli setup --chr-only
 if ($LASTEXITCODE -ne 0) { throw "chr build failed (exit $LASTEXITCODE)" }
 
 & $VenvPy -m gpu.cli doctor

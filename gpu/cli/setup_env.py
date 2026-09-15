@@ -34,7 +34,7 @@ def plan_lines(*, python: str | None = None) -> list[str]:
     return [
         f"{py} -m pip install torch --index-url {TORCH_INDEX}",
         f'{py} -m pip install -e ".[hub,chat]"',
-        f"{py} -m gpu.cli.go_toolchain",
+        f"{py} -m gpu.cli setup --chr-only",
         f"{py} -m gpu.cli doctor",
     ]
 
@@ -46,6 +46,17 @@ def _run(cmd: list[str], *, cwd: str | None = None) -> int:
 
 def setup(args: Namespace) -> int:
     dry = bool(getattr(args, "dry_run", False))
+    if bool(getattr(args, "chr_only", False)):
+        if dry:
+            print(f"{sys.executable} -m gpu.cli setup --chr-only")
+            return 0
+        try:
+            print(ensure_chr())
+            return 0
+        except GoToolchainError as exc:
+            _err(f"setup: {exc}")
+            return 1
+
     lines = plan_lines()
     if prefix_is_protected():
         if dry:

@@ -34,6 +34,7 @@ import os
 import struct
 import sys
 import tempfile
+import zipfile
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
@@ -44,6 +45,7 @@ if str(_REPO) not in sys.path:
 
 from gpu.cli import chat as chat_mod  # noqa: E402
 from gpu.cli import from_ollama as from_ollama_mod  # noqa: E402
+from gpu.cli import go_toolchain as go_tc  # noqa: E402
 from gpu.cli import hub as hub_mod  # noqa: E402
 from gpu.cli import messages, paths, run as run_mod  # noqa: E402
 from gpu.cli import selftest as selftest_mod  # noqa: E402
@@ -1521,6 +1523,7 @@ def test_setup_dry_run_does_not_pip() -> None:
     text = out.getvalue() + err.getvalue()
     assert "torch" in text and "download.pytorch.org/whl/cu124" in text
     assert '".[hub,chat]"' in text or ".[hub,chat]" in text
+    assert "gpu.cli.go_toolchain" in text
 
 
 def test_setup_refuses_torch_gpu_without_pip() -> None:
@@ -1540,6 +1543,178 @@ def test_setup_refuses_torch_gpu_without_pip() -> None:
     assert called == []
     assert "torch-gpu" in err.getvalue()
     assert "scripts/setup.ps1" in err.getvalue()
+
+
+def test_go_host_key_maps_common_machines() -> None:
+    assert go_tc.host_key("Windows", "AMD64") == ("windows", "amd64")
+    assert go_tc.host_key("Linux", "x86_64") == ("linux", "amd64")
+    assert go_tc.host_key("Darwin", "arm64") == ("darwin", "arm64")
+    try:
+        go_tc.host_key("FreeBSD", "amd64")
+    except go_tc.GoToolchainError as exc:
+        assert "portable Go" in str(exc)
+    else:
+        raise AssertionError("freebsd must not have a pinned archive")
+
+
+def test_go_version_at_least() -> None:
+    assert go_tc.go_version_at_least("go version go1.22.12 windows/amd64", 1, 22)
+    assert go_tc.go_version_at_least("go version go1.23.0 linux/amd64", 1, 22)
+    assert not go_tc.go_version_at_least("go version go1.21.13 linux/amd64", 1, 22)
+    assert not go_tc.go_version_at_least("not a version", 1, 22)
+
+
+def test_ensure_chr_skips_download_when_binary_exists() -> None:
+    downloaded: list[str] = []
+    original_find = go_tc.find_chr_bin
+    original_dl = go_tc._download
+    try:
+        go_tc.find_chr_bin = lambda explicit=None: Path("already")  # type: ignore[assignment]
+        go_tc._download = lambda url, dest: downloaded.append(url)  # type: ignore[assignment]
+        assert go_tc.ensure_chr() == Path("already")
+        assert downloaded == []
+    finally:
+        go_tc.find_chr_bin = original_find  # type: ignore[assignment]
+        go_tc._download = original_dl  # type: ignore[assignment]
+
+
+def test_ensure_chr_uses_path_go_without_download() -> None:
+    downloaded: list[str] = []
+    built: list[object] = []
+    with tempfile.TemporaryDirectory() as tmp:
+        home = Path(tmp) / "home"
+        repo = Path(tmp) / "repo"
+        repo.mkdir()
+        original_find = go_tc.find_chr_bin
+        original_which = go_tc._which_go
+        original_ver = go_tc._go_version
+        original_dl = go_tc._download
+        original_run = go_tc._run
+        try:
+            go_tc.find_chr_bin = lambda explicit=None: None  # type: ignore[assignment]
+            go_tc._which_go = lambda: "/opt/go/bin/go"  # type: ignore[assignment]
+            go_tc._go_version = (  # type: ignore[assignment]
+                lambda go: "go version go1.22.12 linux/amd64"
+            )
+            go_tc._download = lambda url, dest: downloaded.append(url)  # type: ignore[assignment]
+
+            def fake_run(cmd, *, cwd=None, env=None):
+                built.append((cmd, cwd, env))
+                out = Path(cmd[cmd.index("-o") + 1])
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(b"chr")
+                return 0
+
+            go_tc._run = fake_run  # type: ignore[assignment]
+            dest = go_tc.ensure_chr(home=home, repo=repo)
+            assert dest == home / "bin" / ("chr.exe" if os.name == "nt" else "chr")
+            assert dest.is_file()
+            assert downloaded == []
+            cmd, cwd, env = built[0]  # type: ignore[misc]
+            assert "./cmd/chr" in cmd and cwd == str(repo)
+            assert env is not None and env.get("CGO_ENABLED") == "0"
+            assert (repo / dest.name).is_file()
+        finally:
+            go_tc.find_chr_bin = original_find  # type: ignore[assignment]
+            go_tc._which_go = original_which  # type: ignore[assignment]
+            go_tc._go_version = original_ver  # type: ignore[assignment]
+            go_tc._download = original_dl  # type: ignore[assignment]
+            go_tc._run = original_run  # type: ignore[assignment]
+
+
+def test_ensure_chr_fetches_portable_go_when_missing() -> None:
+    import tarfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        home = Path(tmp) / "home"
+        repo = Path(tmp) / "repo"
+        repo.mkdir()
+        original_find = go_tc.find_chr_bin
+        original_which = go_tc._which_go
+        original_dl = go_tc._download
+        original_hash = go_tc._check_sha256
+        original_run = go_tc._run
+        try:
+            go_tc.find_chr_bin = lambda explicit=None: None  # type: ignore[assignment]
+            go_tc._which_go = lambda: None  # type: ignore[assignment]
+            go_tc._check_sha256 = lambda path, expected: None  # type: ignore[assignment]
+
+            def fake_download(url: str, dest: Path) -> None:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                inner = "go/bin/go.exe" if os.name == "nt" else "go/bin/go"
+                payload = b"dummy-go"
+                if dest.name.endswith(".zip"):
+                    with zipfile.ZipFile(dest, "w") as zf:
+                        zf.writestr(inner, payload)
+                    return
+                with tarfile.open(dest, "w:gz") as tf:
+                    info = tarfile.TarInfo(name=inner)
+                    info.size = len(payload)
+                    tf.addfile(info, io.BytesIO(payload))
+
+            go_tc._download = fake_download  # type: ignore[assignment]
+
+            def fake_run(cmd, *, cwd=None, env=None):
+                out = Path(cmd[cmd.index("-o") + 1])
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(b"chr")
+                assert env is not None and env.get("CGO_ENABLED") == "0"
+                assert env.get("GOROOT")
+                assert "gopath" in env.get("GOPATH", "").replace("\\", "/").lower()
+                return 0
+
+            go_tc._run = fake_run  # type: ignore[assignment]
+            dest = go_tc.ensure_chr(home=home, repo=repo)
+            assert go_tc._go_bin(go_tc.go_root(home)).is_file()
+            assert dest.is_file()
+            assert (repo / dest.name).is_file()
+        finally:
+            go_tc.find_chr_bin = original_find  # type: ignore[assignment]
+            go_tc._which_go = original_which  # type: ignore[assignment]
+            go_tc._download = original_dl  # type: ignore[assignment]
+            go_tc._check_sha256 = original_hash  # type: ignore[assignment]
+            go_tc._run = original_run  # type: ignore[assignment]
+
+
+def test_sha256_mismatch_deletes_archive() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        blob = Path(tmp) / "go.zip"
+        blob.write_bytes(b"nope")
+        try:
+            go_tc._check_sha256(blob, "0" * 64)
+        except go_tc.GoToolchainError as exc:
+            assert "SHA-256" in str(exc)
+        else:
+            raise AssertionError("expected hash error")
+        assert not blob.exists()
+
+
+def test_setup_calls_ensure_chr_when_missing() -> None:
+    from gpu.cli import doctor as doctor_mod
+
+    ensured: list[int] = []
+    pip_cmds: list[object] = []
+    orig_run = setup_mod._run
+    orig_find = setup_mod.find_chr_bin
+    orig_ensure = setup_mod.ensure_chr
+    orig_doc = doctor_mod.doctor
+    orig_prot = setup_mod.prefix_is_protected
+    try:
+        setup_mod.prefix_is_protected = lambda prefix=None: False  # type: ignore[assignment]
+        setup_mod._run = lambda *a, **k: pip_cmds.append((a, k)) or 0  # type: ignore[assignment]
+        setup_mod.find_chr_bin = lambda explicit=None: None  # type: ignore[assignment]
+        setup_mod.ensure_chr = lambda: ensured.append(1) or Path("chr")  # type: ignore[assignment]
+        doctor_mod.doctor = lambda args: 0  # type: ignore[assignment]
+        code = main(["setup"])
+        assert code == 0
+        assert ensured == [1]
+        assert pip_cmds
+    finally:
+        setup_mod._run = orig_run  # type: ignore[assignment]
+        setup_mod.find_chr_bin = orig_find  # type: ignore[assignment]
+        setup_mod.ensure_chr = orig_ensure  # type: ignore[assignment]
+        doctor_mod.doctor = orig_doc  # type: ignore[assignment]
+        setup_mod.prefix_is_protected = orig_prot  # type: ignore[assignment]
 
 
 def test_pull_unknown_id_does_not_open_files() -> None:

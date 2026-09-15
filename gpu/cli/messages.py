@@ -195,13 +195,15 @@ chr compress on this Mac is supported; copy the .chr to a CUDA Ampere/Ada machin
 
 MISSING_CHR = """\
 chr (Go compressor) was not found. Deepfold does not pack weights in Python.
-Put chr.exe on PATH, set DEEPFOLD_CHR_BIN, or from a checkout:
+Run deepfold setup (fetches portable Go 1.22 from go.dev if needed),
+put chr.exe on PATH, set DEEPFOLD_CHR_BIN, or from a checkout:
 
   go build -o chr.exe ./cmd/chr"""
 
 MISSING_CHR_POSIX = """\
 chr (Go compressor) was not found. Deepfold does not pack weights in Python.
-Put chr on PATH, set DEEPFOLD_CHR_BIN, or from a checkout:
+Run deepfold setup (fetches portable Go 1.22 from go.dev if needed),
+put chr on PATH, set DEEPFOLD_CHR_BIN, or from a checkout:
 
   go build -o chr ./cmd/chr"""
 

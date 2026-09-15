@@ -12,7 +12,9 @@ Ada (RTX 40xx, `sm_89`) и A100 (`sm_80`) могут генерировать, �
 напишет `experimental`. Turing, Hopper, Blackwell, AMD и macOS для generate
 не подходят.
 
-Программа **не ставит** драйвер NVIDIA, Python, Go и компилятор CUDA.
+Программа **не ставит** драйвер NVIDIA, Python и компилятор CUDA.
+Если нет `chr`, setup скачивает переносной Go 1.22 с go.dev в
+`$DEEPFOLD_HOME/toolchains` (не системная установка) и собирает компрессор.
 Красный `doctor` — нормальный отказ установки, не баг ядра.
 
 Справка CLI (`-h`) на английском; ниже она вставлена как есть. После
@@ -58,7 +60,7 @@ source .venv/bin/activate
 |---|---|---|
 | Драйвер NVIDIA (Ampere или Ada) | GPU | `nvidia-smi` печатает имя карты |
 | Python 3.11 или 3.12 | рантайм | Windows: `py -3.11 --version`; Linux: `python3 --version` |
-| Go 1.22+ | сборка компрессора `chr` | `go version` |
+| Go 1.22+ (необязательно) | компрессор `chr`; setup сам скачает с go.dev, если его нет | `go version`, либо пропустить — `scripts/setup.*` / `deepfold setup` |
 | Windows: MSVC Build Tools | JIT ядра, если нет готового `.pyd` | `cl` после `vcvars64.bat` |
 | Linux: `g++` и `nvcc` | JIT fatbinary (~1 мин при первом запуске) | `nvcc --version` |
 | Место на диске | 3B ≈ 6 ГБ BF16 + потом `.chr` | для дыма хватит 3B |
@@ -71,8 +73,8 @@ source .venv/bin/activate
 ## 2. Поставить (один раз)
 
 Скрипт создаёт `.venv`, ставит **CUDA**-torch с индекса `cu124` (не обычный
-PyPI: там чаще CPU-колесо), пакет `deepfold[hub,chat]`, собирает `chr` и
-вызывает `doctor`.
+PyPI: там чаще CPU-колесо), пакет `deepfold[hub,chat]`, собирает `chr`
+(Go 1.22+ с PATH или переносной Go 1.22 с go.dev) и вызывает `doctor`.
 
 **Windows (PowerShell):**
 
@@ -550,7 +552,7 @@ deepfold chat --model "$DEEPFOLD_MODEL"
 | Симптом | Что обычно |
 |---|---|
 | `doctor` код 2, torch cpu | колесо с PyPI; нужен индекс cu124, как в `scripts/setup.*` |
-| `doctor` код 2, нет chr | `go build -o chr.exe ./cmd/chr` (Linux: `go build -o chr ./cmd/chr`) |
+| `doctor` код 2, нет chr | Снова `deepfold setup` или `python -m gpu.cli.go_toolchain` (нужен доступ к go.dev). Либо `go build -o chr.exe ./cmd/chr` |
 | `doctor` код 2, нет ядра | нет `.pyd`/`.so` и нет `cl`/`g++`+`nvcc` для JIT |
 | `doctor` код 3 на Ada | баг старого контракта; после K4 так быть не должно |
 | `chat` «needs a TTY» | запуск из пайпа / IDE без TTY; возьмите окно терминала или `run --prompt` |

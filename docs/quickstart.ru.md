@@ -35,10 +35,11 @@ source .venv/bin/activate
 deepfold doctor
 ```
 
-Нужны заранее: драйвер NVIDIA (Ampere или Ada), Python 3.11+, Go 1.22+,
-на Windows — MSVC Build Tools, на Linux — `g++` и `nvcc`. Скрипт **не** ставит
-драйвер. Код `doctor`: 0 — можно генерировать; 2 — карта подходящая, install
-неполный; 3 — этот класс машины generate не умеет.
+Нужны заранее: драйвер NVIDIA (Ampere или Ada), Python 3.11+.
+Go 1.22+ необязателен: setup сам скачает переносной Go с go.dev, если нет
+`chr`. На Windows — MSVC Build Tools, на Linux — `g++` и `nvcc`. Скрипт **не**
+ставит драйвер. Код `doctor`: 0 — можно генерировать; 2 — карта подходящая,
+install неполный; 3 — этот класс машины generate не умеет.
 
 ---
 

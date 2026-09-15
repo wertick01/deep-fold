@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Neighbor install (Linux). Creates repo-local .venv with CUDA torch.
 # Does not install the NVIDIA driver. No published Linux tok/s.
+# If chr is missing, Python fetches portable Go 1.22 from go.dev.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -20,11 +21,7 @@ echo "Using $VENV_PY"
 "$VENV_PY" -m pip install torch --index-url "$TORCH_INDEX"
 "$VENV_PY" -m pip install -e ".[hub,chat]"
 
-if command -v go >/dev/null 2>&1; then
-  go build -o chr ./cmd/chr
-else
-  echo "Go not on PATH: skip chr build. Install Go 1.22+ and re-run, or set DEEPFOLD_CHR_BIN."
-fi
+"$VENV_PY" -m gpu.cli.go_toolchain
 
 "$VENV_PY" -m gpu.cli doctor
 echo

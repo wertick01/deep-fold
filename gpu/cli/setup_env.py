@@ -6,13 +6,12 @@ never pip-installs into conda env ``torch-gpu``.
 
 from __future__ import annotations
 
-import os
-import shutil
 import subprocess
 import sys
 from argparse import Namespace
 
 from . import messages
+from .go_toolchain import GoToolchainError, ensure_chr
 from .paths import REPO, find_chr_bin
 
 __all__ = ["TORCH_INDEX", "plan_lines", "prefix_is_protected", "setup"]
@@ -32,11 +31,10 @@ def prefix_is_protected(prefix: str | None = None) -> bool:
 
 def plan_lines(*, python: str | None = None) -> list[str]:
     py = python or sys.executable
-    chr_name = "chr.exe" if os.name == "nt" else "chr"
     return [
         f"{py} -m pip install torch --index-url {TORCH_INDEX}",
         f'{py} -m pip install -e ".[hub,chat]"',
-        f"go build -o {chr_name} ./cmd/chr",
+        f"{py} -m gpu.cli.go_toolchain",
         f"{py} -m gpu.cli doctor",
     ]
 
@@ -76,19 +74,12 @@ def setup(args: Namespace) -> int:
         _err("setup: pip install -e \".[hub,chat]\" failed")
         return code
 
-    chr_name = "chr.exe" if os.name == "nt" else "chr"
-    if find_chr_bin() is None:
-        go = shutil.which("go")
-        if go is None:
-            _err(
-                "setup: Go is not on PATH and chr was not found. "
-                "Install Go 1.22+ or set DEEPFOLD_CHR_BIN."
-            )
+    if find_chr_bin(getattr(args, "chr_bin", None)) is None:
+        try:
+            ensure_chr()
+        except GoToolchainError as exc:
+            _err(f"setup: {exc}")
             return 1
-        code = _run([go, "build", "-o", chr_name, "./cmd/chr"], cwd=str(REPO))
-        if code != 0:
-            _err("setup: go build chr failed")
-            return code
 
     from . import doctor as doctor_mod
 

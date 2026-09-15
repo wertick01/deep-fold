@@ -88,8 +88,9 @@ Neighbor machines: [`install.md`](install.md) / [`install.ru.md`](install.ru.md)
 (`scripts/setup.ps1` / `scripts/setup.sh`). This 3080 already has conda
 `torch-gpu` — do not `deepfold setup` into that env.
 
-No Jupyter. Conda/pip for PyTorch **with CUDA**, `go build` for `chr` until a
-binary is attached to a release, then `doctor` and `run`. The Ampere kernel
+No Jupyter. Conda/pip for PyTorch **with CUDA**, then `chr` (PATH Go 1.22+
+or a portable Go 1.22 from go.dev during setup), then `doctor` and `run`. The
+Ampere kernel
 (`sm_80` / `sm_86` / `sm_89` plus PTX `compute_80`) still needs either a built
 `chr_nf4_ext` or a host compiler (`cl.exe` / `g++`) plus `nvcc` for a one-time
 JIT. On this 3080 the prebuilt sm_86 `.pyd` is enough until you rebuild.
@@ -128,7 +129,8 @@ JIT of the fatbinary on a neighbor box takes about a minute the first time.
 
 `pip install -e .` compiles no CUDA: the kernel is a prebuilt sidecar or a JIT
 that doctor announces first. We do **not** install the NVIDIA driver, CUDA,
-Visual Studio Build Tools or Go, and the default PyPI `torch` is usually the
+or Visual Studio Build Tools. Missing `chr` is filled by a portable Go 1.22
+from go.dev (`$DEEPFOLD_HOME/toolchains`). The default PyPI `torch` is usually the
 CPU wheel — doctor catches that and prints the CUDA 12.4 index URL. A red
 doctor is the installer working, not a product bug.
 

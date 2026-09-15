@@ -246,7 +246,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="install CUDA torch + build chr in this interpreter (not torch-gpu)",
         description=(
             "Catch-up inside an existing venv. Refuses conda env torch-gpu. "
-            "A neighbor PC should run scripts/setup.ps1 or scripts/setup.sh first."
+            "A neighbor PC should run scripts/setup.ps1 or scripts/setup.sh first. "
+            "If chr is missing, fetches portable Go 1.22 from go.dev and builds it."
         ),
     )
     boot.add_argument("--chr-bin", help="path to the Go chr binary")

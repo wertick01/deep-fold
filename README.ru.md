@@ -572,7 +572,8 @@ What is 17 times 19? Reply with the number only.
 - **Generate — семейство Ampere.** sm_86 (RTX 3080) — измеренная пластина.
   A100 (`sm_80`) и Ada (`sm_89`) генерируют как experimental. Turing / Hopper /
   Blackwell — именованный отказ, не порт. «Два клика, все ОС» — не утверждение:
-  CUDA, компилятор, Go и дерево HuggingFace ставит пользователь; Linux tok/s не
+  CUDA, компилятор и дерево HuggingFace ставит пользователь; Go 1.22 для `chr`
+  setup скачивает с go.dev, если его нет. Linux tok/s не
   опубликованы.
 - **Лаборатория умеет рисовать синтетическую картинку** (`--dry-plot`), её CSV
   помечены как `FIXTURE`. В таблицах выше нет ничего из этой заготовки.
@@ -629,7 +630,8 @@ deepfold chat --model <этот каталог>
 `vocab_size`).
 
 Это **не** «два клика на любой ОС». `doctor` / `run` не ставят драйвер
-NVIDIA, CUDA-колесо PyTorch, MSVC/`nvcc`, Go и дерево HuggingFace. macOS
+NVIDIA, CUDA-колесо PyTorch, MSVC/`nvcc` и дерево HuggingFace. Нет `chr` —
+setup скачивает переносной Go 1.22 с go.dev. macOS
 сжимает и не генерирует. Linux может загрузить `.so`; **опубликованных Linux
 tok/s нет**. Turing, Hopper и Blackwell **отказывают generate**. Образ ядра —
 `sm_80/sm_86/sm_89` плюс PTX `compute_80`.

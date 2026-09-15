@@ -35,10 +35,11 @@ source .venv/bin/activate
 deepfold doctor
 ```
 
-You already need: NVIDIA driver (Ampere or Ada), Python 3.11+, Go 1.22+,
-MSVC Build Tools on Windows, `g++` and `nvcc` on Linux. The script does **not**
-install the driver. `doctor` 0 = generate possible; 2 = this card could run,
-install incomplete; 3 = this machine class cannot generate.
+You already need: NVIDIA driver (Ampere or Ada), Python 3.11+.
+Go 1.22+ is optional — setup fetches a portable copy from go.dev when `chr`
+is missing. MSVC Build Tools on Windows, `g++` and `nvcc` on Linux. The
+script does **not** install the driver. `doctor` 0 = generate possible; 2 =
+this card could run, install incomplete; 3 = this machine class cannot generate.
 
 ---
 

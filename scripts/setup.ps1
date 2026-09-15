@@ -1,5 +1,6 @@
 # Neighbor install (Windows). Creates repo-local .venv with CUDA torch.
 # Does not touch conda env torch-gpu. Does not install the NVIDIA driver.
+# If chr is missing, Python fetches portable Go 1.22 from go.dev (not MSI).
 #
 #   Set-ExecutionPolicy -Scope Process Bypass
 #   powershell -File scripts/setup.ps1
@@ -36,12 +37,9 @@ if ($LASTEXITCODE -ne 0) { throw "torch install failed (exit $LASTEXITCODE)" }
 & $VenvPy -m pip install -e ".[hub,chat]"
 if ($LASTEXITCODE -ne 0) { throw "deepfold extras install failed (exit $LASTEXITCODE)" }
 
-if (Get-Command go -ErrorAction SilentlyContinue) {
-    & go build -o chr.exe ./cmd/chr
-    if ($LASTEXITCODE -ne 0) { throw "go build chr.exe failed (exit $LASTEXITCODE)" }
-} else {
-    Write-Host "Go not on PATH: skip chr build. Install Go 1.22+ and re-run, or set DEEPFOLD_CHR_BIN."
-}
+Write-Host "Building chr (PATH Go 1.22+ or portable Go 1.22 from go.dev)"
+& $VenvPy -m gpu.cli.go_toolchain
+if ($LASTEXITCODE -ne 0) { throw "chr build failed (exit $LASTEXITCODE)" }
 
 & $VenvPy -m gpu.cli doctor
 if ($LASTEXITCODE -ne 0) {

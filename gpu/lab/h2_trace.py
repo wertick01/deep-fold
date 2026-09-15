@@ -81,6 +81,11 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="3B canary cap: pin + 4*(2*gate), even if packed NF4 fits.",
     )
+    p.add_argument(
+        "--residency",
+        default="D",
+        help="overflow residency policy (default D)",
+    )
     return p
 
 
@@ -94,12 +99,12 @@ def _out_dir(explicit: str) -> Path:
     return dest
 
 
-def _plan_from_chr(chr_path: str, cap_bytes: int) -> tuple[dict, dict]:
+def _plan_from_chr(chr_path: str, cap_bytes: int, policy: str = "D") -> tuple[dict, dict]:
     from gpu.chr0 import load_header, quantized_codec
 
     hdr = load_header(chr_path)
     descs = descs_from_header(hdr)
-    plan = plan_residency(descs, int(cap_bytes))
+    plan = plan_residency(descs, int(cap_bytes), policy=policy)
     summary = summarize_residency(descs, plan)
     header = {
         "codec": quantized_codec(hdr),
@@ -173,7 +178,7 @@ def run_h2_trace(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        residency, header = _plan_from_chr(args.chr_path, cap)
+        residency, header = _plan_from_chr(args.chr_path, cap, getattr(args, "residency", "D"))
     except Exception as exc:  # noqa: BLE001
         notes.append(f"plan failed: {type(exc).__name__}: {exc}")
         dump_json(out / "summary.json", snap)
@@ -220,6 +225,7 @@ def run_h2_trace(args: argparse.Namespace) -> int:
             trust_remote_code=args.trust_remote_code,
             strict=True,
             max_resident_bytes=cap,
+            residency_policy=getattr(args, "residency", "D"),
         )
         torch.cuda.synchronize()
         load_s = time.perf_counter() - t_load

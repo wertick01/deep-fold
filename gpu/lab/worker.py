@@ -60,6 +60,11 @@ def _parser() -> argparse.ArgumentParser:
             "kind=ppl runs teacher-forced NLL instead of generate."
         ),
     )
+    parser.add_argument(
+        "--residency",
+        default="D",
+        help="NF4 overflow residency policy (default D)",
+    )
     return parser
 
 
@@ -109,6 +114,7 @@ def main(argv: list[str] | None = None) -> int:
         run_nf4(
             chr_path=args.chr_path,
             graphs=args.graphs,
+            residency_policy=getattr(args, "residency", "D"),
             **common,
         )
     return 0

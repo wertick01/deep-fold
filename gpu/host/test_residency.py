@@ -23,6 +23,7 @@ from gpu.host.host_image import (  # noqa: E402
 )
 from gpu.host.residency import (  # noqa: E402
     DEFAULT_POLICY,
+    HOST_EMBED_POLICY,
     KV_BYTES_PER_TOKEN_32B,
     MIB,
     PIN_KINDS,
@@ -31,12 +32,14 @@ from gpu.host.residency import (  # noqa: E402
     CapTooSmallError,
     WeightDesc,
     descs_from_qwen,
+    embeddings_tied,
     mlp_slot_nbytes,
     nf4_nbytes,
     overflow_resident_cap,
     pin_nbytes,
     plan_residency,
     resident_cap_bytes,
+    stride_pair_layer_ids,
     summarize_residency,
 )
 
@@ -419,8 +422,10 @@ def test_default_policy_is_d() -> None:
     )
 
 
-def _assert_pin_and_pairs(descs, plan, label: str) -> None:
-    pin_descs = [d for d in descs if d.kind in PIN_KINDS]
+def _assert_pin_and_pairs(descs, plan, label: str, *, pin_embed: bool = True) -> None:
+    pin_descs = [
+        d for d in descs if d.kind in PIN_KINDS and (pin_embed or d.kind != "embed")
+    ]
     check(
         f"{label} pin set DEVICE",
         all(d.name in plan.resident for d in pin_descs),
@@ -444,16 +449,35 @@ def test_extra_policies_pin_and_pairs_overflow_cap() -> None:
     check("cap is live 32B helper", cap == 10310189056, f"{cap}")
     d_plan = plan_residency(descs, cap, policy="D")
     for name in sorted(POLICIES):
+        host_embed = name == HOST_EMBED_POLICY
+        if host_embed and embeddings_tied(descs):
+            try:
+                plan_residency(descs, cap, policy=name)
+            except ValueError as exc:
+                check(f"{name} refuses tied", "tied" in str(exc).lower(), str(exc)[:120])
+                continue
+            check(f"{name} refuses tied", False, "no error")
+            continue
         plan = plan_residency(descs, cap, policy=name)
-        _assert_pin_and_pairs(descs, plan, name)
+        _assert_pin_and_pairs(descs, plan, name, pin_embed=not host_embed)
         check(
             f"{name} no pin kind on tape",
             not any(
-                next(d.kind for d in descs if d.name == n) in PIN_KINDS
+                next(d.kind for d in descs if d.name == n)
+                in (PIN_KINDS - ({"embed"} if host_embed else set()))
                 for n in plan.streamed
             ),
             "",
         )
+        if host_embed:
+            embed_name = next(d.name for d in descs if d.kind == "embed")
+            check(
+                f"{name} embed CPU not tape",
+                embed_name in plan.cpu
+                and embed_name not in plan.resident
+                and embed_name not in plan.streamed,
+                "",
+            )
     only = plan_residency(descs, cap, policy="downs_only")
     inter = plan_residency(descs, cap, policy="interleaved_down")
     check(
@@ -595,6 +619,18 @@ def test_policies_pairs_not_split_on_toy() -> None:
     gate_n = nf4_nbytes(inter, hidden)
     cap = pin + 3 * gate_n
     for name in sorted(POLICIES):
+        if name == HOST_EMBED_POLICY:
+            try:
+                plan_residency(descs, cap, policy=name)
+            except ValueError as exc:
+                check(
+                    "toy D_host_embed refuses tied",
+                    "tied" in str(exc).lower(),
+                    str(exc)[:120],
+                )
+                continue
+            check("toy D_host_embed refuses tied", False, "no error")
+            continue
         plan = plan_residency(descs, cap, policy=name)
         _assert_pin_and_pairs(descs, plan, f"toy {name}")
         check(f"toy {name} q DEVICE", _name(0, "q") in plan.resident, "")
@@ -608,6 +644,12 @@ def test_policies_cap_below_pin_raises() -> None:
             plan_residency(descs, pin - 1, policy=name)
         except CapTooSmallError:
             check(f"{name} cap < pin raises", True, "")
+            continue
+        except ValueError as exc:
+            if name == HOST_EMBED_POLICY and "tied" in str(exc).lower():
+                check(f"{name} tied refuses before cap", True, str(exc)[:80])
+                continue
+            check(f"{name} cap < pin raises", False, str(exc)[:120])
             continue
         check(f"{name} cap < pin raises", False, "no error")
 
@@ -646,6 +688,169 @@ def test_h2_place_table_rows() -> None:
         "wait" in pf_story.lower() or "all-resident" in pf_story.lower(),
         pf_story,
     )
+
+
+def test_pairs_stride_32b_overflow_who() -> None:
+    descs = descs_from_qwen(QWEN_32B)
+    cap = overflow_resident_cap(12288, 2048, descs)
+    d_plan = plan_residency(descs, cap, policy="D")
+    s_plan = plan_residency(descs, cap, policy="pairs_stride")
+    want = list(range(3, 64, 4))
+    check("stride ids 3,7,...,63", stride_pair_layer_ids(descs) == want, str(want[:4]))
+    check("stride is 16 layers", len(want) == 16, f"{len(want)}")
+    s_s = summarize_residency(descs, s_plan)
+    d_s = summarize_residency(descs, d_plan)
+    pin_descs = [d for d in descs if d.kind in PIN_KINDS]
+    check(
+        "pairs_stride pin qkvo+embed+lm_head DEVICE",
+        all(d.name in s_plan.resident for d in pin_descs),
+        "",
+    )
+    check(
+        "pairs_stride all 64 down HOST",
+        s_s["kinds"]["down"]["host"]["n"] == 64
+        and s_s["host_layers"]["down"] == list(range(64)),
+        str(s_s["host_layers"]["down"][:3]),
+    )
+    check(
+        "pairs_stride gate WHO is every 4th",
+        s_s["host_layers"]["gate"] == want and s_s["host_layers"]["up"] == want,
+        str(s_s["host_layers"]["gate"]),
+    )
+    check(
+        "pairs_stride n_host pairs == D",
+        s_s["kinds"]["gate"]["host"]["n"] == d_s["kinds"]["gate"]["host"]["n"] == 16,
+        f"{s_s['kinds']['gate']['host']['n']} vs {d_s['kinds']['gate']['host']['n']}",
+    )
+    check(
+        "pairs_stride streamed_bytes == D",
+        s_plan.streamed_bytes == d_plan.streamed_bytes,
+        f"{s_plan.streamed_bytes} vs {d_plan.streamed_bytes}",
+    )
+    check(
+        "pairs_stride n_streamed == D (96)",
+        len(s_plan.streamed) == len(d_plan.streamed) == 96,
+        f"{len(s_plan.streamed)} vs {len(d_plan.streamed)}",
+    )
+    check(
+        "pairs_stride WHO != D tail 48..63",
+        s_s["host_layers"]["gate"] != d_s["host_layers"]["gate"],
+        "",
+    )
+    check("pairs_stride cpu empty", s_plan.cpu == frozenset(), str(s_plan.cpu))
+    i3 = s_plan.streamed.index(_name(3, "gate"))
+    check(
+        "L3 tape gate,up,down",
+        s_plan.streamed[i3 : i3 + 3]
+        == (_name(3, "gate"), _name(3, "up"), _name(3, "down")),
+        str(s_plan.streamed[i3 : i3 + 3]),
+    )
+    check("L0 gate DEVICE under stride", _name(0, "gate") in s_plan.resident, "")
+    check("L4 gate DEVICE (not stride)", _name(4, "gate") in s_plan.resident, "")
+
+
+def test_host_embed_32b_refill_and_tied_3b() -> None:
+    descs = descs_from_qwen(QWEN_32B)
+    cap = overflow_resident_cap(12288, 2048, descs)
+    d_plan = plan_residency(descs, cap, policy="D")
+    he = plan_residency(descs, cap, policy=HOST_EMBED_POLICY)
+    he_pin = plan_residency(descs, cap, policy="D", pin_embed=False)
+    embed_name = next(d.name for d in descs if d.kind == "embed")
+    embed_n = next(d.nbytes for d in descs if d.kind == "embed")
+    he_s = summarize_residency(descs, he)
+    d_s = summarize_residency(descs, d_plan)
+    pin_no_embed = [d for d in descs if d.kind in PIN_KINDS and d.kind != "embed"]
+    check(
+        "D_host_embed == pin_embed=False",
+        he.streamed == he_pin.streamed
+        and he.resident == he_pin.resident
+        and he.cpu == he_pin.cpu,
+        "",
+    )
+    check(
+        "host-embed embed in cpu",
+        embed_name in he.cpu and len(he.cpu) == 1,
+        str(he.cpu),
+    )
+    check(
+        "host-embed embed not DEVICE",
+        embed_name not in he.resident,
+        "",
+    )
+    check(
+        "host-embed embed not on tape",
+        embed_name not in he.streamed,
+        "",
+    )
+    check(
+        "host-embed qkvo+lm_head DEVICE",
+        all(d.name in he.resident for d in pin_no_embed),
+        "",
+    )
+    check(
+        "host-embed kinds embed cpu n=1",
+        he_s["kinds"]["embed"]["cpu"]["n"] == 1
+        and he_s["kinds"]["embed"]["host"]["n"] == 0
+        and he_s["kinds"]["embed"]["device"]["n"] == 0,
+        str(he_s["kinds"]["embed"]),
+    )
+    # D: 64 downs + 16 pairs. Refill 2 pairs + 1 down → 63 downs + 14 pairs.
+    check(
+        "host-embed 63 HOST downs (1 refilled)",
+        he_s["kinds"]["down"]["host"]["n"] == 63
+        and 0 not in he_s["host_layers"]["down"]
+        and _name(0, "down") in he.resident,
+        str(he_s["host_layers"]["down"][:3]),
+    )
+    check(
+        "host-embed 14 HOST pairs (2 refilled)",
+        he_s["kinds"]["gate"]["host"]["n"] == 14
+        and he_s["host_layers"]["gate"] == list(range(50, 64)),
+        str(he_s["host_layers"]["gate"][:3]),
+    )
+    check(
+        "host-embed n_streamed is D minus 5",
+        len(he.streamed) == len(d_plan.streamed) - 5,
+        f"{len(he.streamed)} vs {len(d_plan.streamed)}",
+    )
+    want_bytes = d_plan.streamed_bytes - (2 * 2 * GATE_NBYTES) - DOWN_NBYTES
+    check(
+        "host-embed streamed_bytes D minus 2 pairs + 1 down",
+        he.streamed_bytes == want_bytes,
+        f"{he.streamed_bytes} vs {want_bytes}",
+    )
+    check(
+        "host-embed names partition with cpu",
+        he.resident.isdisjoint(he.streamed)
+        and he.resident.isdisjoint(he.cpu)
+        and set(he.streamed).isdisjoint(he.cpu)
+        and he.resident | set(he.streamed) | he.cpu == {d.name for d in descs},
+        "",
+    )
+    check(
+        "refill bytes under embed nbytes",
+        (2 * 2 * GATE_NBYTES + DOWN_NBYTES) < embed_n,
+        f"5*mlp={2 * 2 * GATE_NBYTES + DOWN_NBYTES} embed={embed_n}",
+    )
+    check("D host layers still tail 48..63", d_s["host_layers"]["gate"] == list(range(48, 64)), "")
+    no_refill = plan_residency(descs, cap, policy="D", pin_embed=False, refill_embed=False)
+    nr_s = summarize_residency(descs, no_refill)
+    check(
+        "no-refill MLP WHO == D",
+        nr_s["host_layers"]["gate"] == d_s["host_layers"]["gate"]
+        and nr_s["host_layers"]["down"] == d_s["host_layers"]["down"]
+        and embed_name in no_refill.cpu,
+        str(nr_s["host_layers"]["gate"][:3]),
+    )
+    descs3 = descs_from_qwen(QWEN_3B)
+    check("3B embeddings_tied", embeddings_tied(descs3), "")
+    check("32B not tied", not embeddings_tied(descs), "")
+    try:
+        plan_residency(descs3, overflow_resident_cap(12288, 512, descs3), policy=HOST_EMBED_POLICY)
+    except ValueError as exc:
+        check("3B host-embed refuses tied", "tied" in str(exc).lower(), str(exc)[:160])
+    else:
+        check("3B host-embed refuses tied", False, "no error")
 
 
 def test_host_image_roundtrip_views() -> None:
@@ -708,6 +913,8 @@ TESTS = [
     test_policies_pairs_not_split_on_toy,
     test_policies_cap_below_pin_raises,
     test_h2_place_table_rows,
+    test_pairs_stride_32b_overflow_who,
+    test_host_embed_32b_refill_and_tied_3b,
     test_host_image_roundtrip_views,
 ]
 

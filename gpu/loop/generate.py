@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Sequence
+from typing import Callable, Literal, Sequence
 
 import torch
 import torch.nn.functional as F
@@ -40,6 +40,7 @@ __all__ = [
     "TokenLoop",
     "Generation",
     "PACKERS",
+    "PREFILL_HOLD_SUPERCHUNK",
     "rms_norm_exact",
     "split_concat_qkv",
     "split_internlm_wqkv",
@@ -47,6 +48,8 @@ __all__ = [
 ]
 
 MIB = 1024 * 1024
+#: Superchunk width for ``prefill_mode="hold"``. See docs/plan-h2-accel.md §B.
+PREFILL_HOLD_SUPERCHUNK = 256
 
 
 # --------------------------------------------------------------------------- #
@@ -296,6 +299,7 @@ class TokenLoop:
         plan=None,
         slots=None,
         ring_timing: bool = False,
+        prefill_mode: Literal["chunk", "hold"] = "chunk",
     ) -> None:
         from gpu.graphs import IMPLEMENTED_FAMILIES, refuse
 
@@ -409,6 +413,9 @@ class TokenLoop:
         self.prefill_chunk = min(
             linear_max_n(self._groups[0].gemms[0].codec, LIVE_MAX_N), self.max_seq
         )
+        if prefill_mode not in ("chunk", "hold"):
+            raise ValueError(f"prefill_mode={prefill_mode!r}; expected 'chunk' or 'hold'")
+        self.prefill_mode = prefill_mode
 
     # --- setup ------------------------------------------------------------
     def _build_groups(self) -> list[GemmGroup]:
@@ -688,6 +695,8 @@ class TokenLoop:
         sin: torch.Tensor,
         mask: torch.Tensor,
     ) -> torch.Tensor:
+        if self.prefill_mode == "hold":
+            return self._prefill_layers_hold(x, start_pos, n, seq, cos, sin, mask)
         kv, eps = self.kv, self.eps
         rms, hd, n_kv = self.rms, self.head_dim, self.n_kv
         pack = self._pack
@@ -721,6 +730,108 @@ class TokenLoop:
             if ring is not None:
                 ring.prefetch()
             x = x.add_(g_down.run(silu(gate) * up)[0])
+        return x
+
+    def _prefill_layers_hold(
+        self,
+        x: torch.Tensor,
+        start_pos: int,
+        n: int,
+        seq: int,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Attention LTR per ``prefill_chunk``; one H2D per HOST MLP matrix.
+
+        docs/plan-h2-accel.md §B: do not keep a full ``[T, intermediate]`` —
+        the caller walks superchunks of :data:`PREFILL_HOLD_SUPERCHUNK`.
+        """
+        from .graph import nf4_gemm
+
+        kv, eps = self.kv, self.eps
+        rms, hd, n_kv = self.rms, self.head_dim, self.n_kv
+        pack = self._pack
+        n_q = self.n_q
+        attend = self._attend
+        silu = F.silu
+        norm1, norm2, layers = self._norm1, self._norm2, self._layer
+        ring = self._ring
+        gemm_n = max(1, self.prefill_chunk)
+
+        def _eager(grp):
+            return getattr(grp, "eager", grp)
+
+        def _ranges() -> list[tuple[int, int]]:
+            return [(lo, min(lo + gemm_n, n)) for lo in range(0, n, gemm_n)]
+
+        def _nf4(g: Gemm, packed: torch.Tensor, scale: torch.Tensor, x_n: torch.Tensor):
+            y = nf4_gemm(packed, scale, x_n.t(), g.M, g.K, g.K_pad).t()
+            if g.bias is not None:
+                y = y.add_(g.bias)
+            return y
+
+        def _hold_member(g: Gemm, xs: list[torch.Tensor]) -> list[torch.Tensor]:
+            if g.home != "host":
+                return [_nf4(g, g.packed, g.scale, xc) for xc in xs]
+            if ring is None:
+                raise RuntimeError(f"{g.name}: host-resident GEMM needs CopyRing")
+            packed, scale = ring.bind_hold(g)
+            outs: list[torch.Tensor] = []
+            for xc in xs:
+                ring.gemm_hold()
+                outs.append(_nf4(g, packed, scale, xc))
+            ring.release_hold(g)
+            return outs
+
+        for li, (g_qkv, g_o, g_gu, g_down) in enumerate(layers):
+            if ring is not None:
+                ring.prefetch()
+            for lo, hi in _ranges():
+                cn = hi - lo
+                x_c = x[lo:hi]
+                h = rms(x_c, norm1[li], eps)
+                if pack is not None:
+                    q, k, v = pack(g_qkv.run(h)[0], n_q, n_kv, hd)
+                else:
+                    q, k, v = g_qkv.run(h)
+                    q = q.reshape(cn, n_q, hd)
+                    k = k.reshape(cn, n_kv, hd)
+                    v = v.reshape(cn, n_kv, hd)
+                q = _rope(q, cos[lo:hi], sin[lo:hi])
+                k = _rope(k, cos[lo:hi], sin[lo:hi])
+                kv.write(li, start_pos + lo, k, v)
+                seq_c = start_pos + hi
+                k_all, v_all = kv.view(li, seq_c)
+                mask_c = mask[:, :, lo:hi, :seq_c]
+                x_c.add_(g_o.run(attend(q, k_all, v_all, cn, mask_c))[0])
+
+            if ring is not None:
+                ring.prefetch()
+            h = rms(x, norm2[li], eps)
+            h_chunks = [h[lo:hi] for lo, hi in _ranges()]
+            gu = _eager(g_gu)
+            dn = _eager(g_down)
+            gate_g, up_g = gu.gemms
+            down_g = dn.gemms[0]
+            if gate_g.home != "host" and up_g.home != "host":
+                down_ins = []
+                for hc in h_chunks:
+                    gate, up = g_gu.run(hc)
+                    down_ins.append(silu(gate) * up)
+            else:
+                gate_outs = _hold_member(gate_g, h_chunks)
+                up_outs = _hold_member(up_g, h_chunks)
+                down_ins = [silu(ga) * ua for ga, ua in zip(gate_outs, up_outs)]
+
+            if ring is not None:
+                ring.prefetch()
+            if down_g.home == "host":
+                downs = _hold_member(down_g, down_ins)
+            else:
+                downs = [g_down.run(d)[0] for d in down_ins]
+            for (lo, hi), d in zip(_ranges(), downs):
+                x[lo:hi].add_(d)
         return x
 
     def _prefetch_next_token(self, n: int) -> None:
@@ -778,13 +889,18 @@ class TokenLoop:
         """Walk the prompt once, filling KV slots ``0..len-1``.
 
         Chunked by :attr:`prefill_chunk`, which is ``1`` while the kernel is
-        decode-only. One pass either way: no prompt token is ever recomputed.
+        decode-only. ``prefill_mode="hold"`` walks
+        :data:`PREFILL_HOLD_SUPERCHUNK` so each HOST MLP matrix is H2D once
+        per superchunk. One pass either way: no prompt token is ever recomputed.
         """
         ids = ids.reshape(-1).to(self.device, torch.long)
         n = int(ids.numel())
         if n == 0:
             raise ValueError("empty prompt")
-        step = max(1, self.prefill_chunk)
+        if self.prefill_mode == "hold":
+            step = max(1, min(PREFILL_HOLD_SUPERCHUNK, self.max_seq))
+        else:
+            step = max(1, self.prefill_chunk)
         out = None
         for lo in range(0, n, step):
             hi = min(lo + step, n)
@@ -885,6 +1001,7 @@ class TokenLoop:
             "n_q": self.n_q,
             "n_kv": self.n_kv,
             "prefill_chunk": self.prefill_chunk,
+            "prefill_mode": self.prefill_mode,
             "graph_mode": self.graph_mode,
             "graph_error": self.graph_error,
             "overlap": self.overlap,
@@ -908,8 +1025,17 @@ class TokenLoop:
         *,
         stop: Sequence[int] = (),
         on_token: Callable[[int], None] | None = None,
+        speculate: int = 1,
+        draft: str = "none",
     ) -> Generation:
-        """Greedy. Prefill and decode are timed separately and never averaged."""
+        """Greedy. Prefill and decode are timed separately and never averaged.
+
+        ``speculate <= 1`` or ``draft == "none"`` is the ``step()`` loop.
+        ``draft == "lookup"`` and ``speculate >= 2`` is n-gram draft + greedy
+        verify (:mod:`gpu.loop.speculate`); no second model.
+        """
+        if draft not in ("none", "lookup"):
+            raise ValueError(f"draft={draft!r}; expected 'none' or 'lookup'")
         self.reset()
         self._capture_decode_glue()
         ids = prompt_ids.reshape(-1).to(self.device, torch.long)
@@ -933,18 +1059,32 @@ class TokenLoop:
         t1 = time.perf_counter()
         out.prefill_ms = (t1 - t0) * 1000.0
 
-        for i in range(max_new_tokens):
-            out.tokens.append(token)
-            if on_token is not None:
-                on_token(token)
-            if token in stop_set:
-                out.stop_token = token
-                break
-            if i + 1 == max_new_tokens or self.kv.seq_len >= self.max_seq:
-                break
-            logits = self.step(token)
-            out.decode_steps += 1
-            token = int(logits.argmax())
+        if int(speculate) <= 1 or draft == "none":
+            for i in range(max_new_tokens):
+                out.tokens.append(token)
+                if on_token is not None:
+                    on_token(token)
+                if token in stop_set:
+                    out.stop_token = token
+                    break
+                if i + 1 == max_new_tokens or self.kv.seq_len >= self.max_seq:
+                    break
+                logits = self.step(token)
+                out.decode_steps += 1
+                token = int(logits.argmax())
+        else:
+            from .speculate import spec_lookup_generate
+
+            spec_lookup_generate(
+                self,
+                out,
+                ids,
+                logits,
+                max_new_tokens,
+                stop_set,
+                on_token,
+                int(speculate),
+            )
         torch.cuda.synchronize()
         out.decode_ms = (time.perf_counter() - t1) * 1000.0
         if ring is not None:

@@ -4,9 +4,11 @@ Policy D (docs/plan-h2-ring.md): not a resident prefix of whole blocks (A),
 not LRU. Embed, lm_head and every attention matrix (q/k/v/o/qkv) are pinned.
 Overflow is every ``down``, then tail ``gate+up`` pairs of the same layer.
 
-Named extras (``plan_residency(..., policy=)``) are CPU comparison only.
-Load / CLI keep default ``D``. Tape order is TokenLoop consume order of HOST
-names, not eviction order.
+Named extras (``plan_residency(..., policy=)``) are CPU comparison unless
+load passes ``residency_policy``. Load / CLI keep default ``D`` (embed DEVICE).
+``pairs_stride`` and ``D_host_embed`` are Accel-3 loadable policies. Tape order
+is TokenLoop consume order of HOST names, not eviction order. Embed on CPU
+(host-embed) is not a tape slot.
 
 ``cap_bytes`` is explicit (``max_resident_bytes``). Do not pass codec leftover:
 that budget has no slots. The optional helper subtracts runtime overhead, KV
@@ -21,6 +23,7 @@ from typing import Iterable, Mapping, Sequence
 __all__ = [
     "DEFAULT_POLICY",
     "GROUP_SIZE",
+    "HOST_EMBED_POLICY",
     "KV_BYTES_PER_TOKEN_32B",
     "MIB",
     "PIN_KINDS",
@@ -31,13 +34,17 @@ __all__ = [
     "WeightDesc",
     "descs_from_header",
     "descs_from_qwen",
+    "embeddings_tied",
     "nf4_nbytes",
+    "pin_kinds",
     "pin_nbytes",
     "mlp_slot_nbytes",
     "overflow_cap_from_chr",
     "overflow_resident_cap",
     "plan_residency",
     "resident_cap_bytes",
+    "stride_pair_layer_ids",
+    "stride_pair_layers",
     "summarize_residency",
 ]
 
@@ -50,12 +57,26 @@ KV_BYTES_PER_TOKEN_32B = 256 * 1024
 
 PIN_KINDS = frozenset({"embed", "lm_head", "q", "k", "v", "o", "qkv"})
 DEFAULT_POLICY = "D"
+HOST_EMBED_POLICY = "D_host_embed"
 # D / downs_only: downs then pairs if still over. interleaved_down: head-first
 # downs (WHO differs only when some downs stay DEVICE). pairs_first: negative
 # control. all_mlp: every gate+up+down HOST (more bytes, not a candidate).
+# pairs_stride: D downs, then gate+up on layers 3,7,11,... (every 4th).
+# D_host_embed: D WHO then embed on CPU (not tape) and refill 2 pairs + 1 down.
 POLICIES = frozenset(
-    {"D", "downs_only", "pairs_first", "interleaved_down", "all_mlp"}
+    {
+        "D",
+        "downs_only",
+        "pairs_first",
+        "interleaved_down",
+        "all_mlp",
+        "pairs_stride",
+        HOST_EMBED_POLICY,
+    }
 )
+# After unpinning embed, put this much MLP back on DEVICE (whole pairs).
+_REFILL_PAIRS = 2
+_REFILL_DOWNS = 1
 _EVICT_DOWN = "down"
 _PAIR_KINDS = ("gate", "up")
 _ALL_KINDS = PIN_KINDS | frozenset({"gate", "up", "down"})
@@ -95,13 +116,17 @@ class WeightDesc:
 
 @dataclass(frozen=True)
 class ResidencyPlan:
-    """DEVICE vs HOST names after policy D. ``streamed`` is the prefetch tape."""
+    """DEVICE vs HOST names after a residency policy. ``streamed`` is the tape.
+
+    ``cpu`` is packed-on-CPU, not CopyRing (host-embed). Empty for policy D.
+    """
 
     resident: frozenset[str]
     streamed: tuple[str, ...]
     slot_nbytes: int
     resident_bytes: int
     streamed_bytes: int
+    cpu: frozenset[str] = frozenset()
 
 
 def k_pad(k: int) -> int:
@@ -122,9 +147,32 @@ def nf4_nbytes(m: int, k: int) -> int:
     return packed + scale
 
 
-def pin_nbytes(descs: Sequence[WeightDesc]) -> int:
-    """Bytes that policy D never streams: embed + lm_head + qkvo."""
-    return sum(int(d.nbytes) for d in descs if d.kind in PIN_KINDS)
+def pin_kinds(*, pin_embed: bool = True) -> frozenset[str]:
+    """DEVICE pin set. Host-embed drops ``embed`` (CPU, not tape)."""
+    return PIN_KINDS if pin_embed else (PIN_KINDS - {"embed"})
+
+
+def pin_nbytes(descs: Sequence[WeightDesc], *, pin_embed: bool = True) -> int:
+    """Bytes that stay DEVICE: lm_head + qkvo, plus embed unless host-embed."""
+    kinds = pin_kinds(pin_embed=pin_embed)
+    return sum(int(d.nbytes) for d in descs if d.kind in kinds)
+
+
+def embeddings_tied(descs: Sequence[WeightDesc]) -> bool:
+    """No separate ``lm_head`` tensor: packed embed is shared (Qwen2.5-3B)."""
+    kinds = {d.kind for d in descs}
+    return "embed" in kinds and "lm_head" not in kinds
+
+
+def stride_pair_layer_ids(descs: Sequence[WeightDesc]) -> list[int]:
+    """Every 4th layer ending at 3,7,11,...,63 (``layer % 4 == 3``)."""
+    layers = sorted(
+        {int(d.layer) for d in descs if d.kind in _PAIR_KINDS and d.layer is not None}
+    )
+    return [i for i in layers if i % 4 == 3]
+
+
+stride_pair_layers = stride_pair_layer_ids
 
 
 def mlp_slot_nbytes(descs: Sequence[WeightDesc]) -> int:
@@ -324,6 +372,95 @@ def _evict_pairs(
     return resident_bytes
 
 
+def _pair_of(descs: Sequence[WeightDesc]) -> dict[int | None, list[WeightDesc]]:
+    pair_of: dict[int | None, list[WeightDesc]] = {}
+    for d in descs:
+        if d.kind in _PAIR_KINDS:
+            pair_of.setdefault(d.layer, []).append(d)
+    return pair_of
+
+
+def _evict_pairs_stride(
+    descs: Sequence[WeightDesc],
+    host: set[str],
+    resident_bytes: int,
+    cap: int,
+    *,
+    stop_at_cap: bool = True,
+) -> int:
+    """Whole ``gate+up`` on stride layers 3,7,... then leftover tail-first."""
+    pair_of = _pair_of(descs)
+    stride = [L for L in stride_pair_layer_ids(descs) if L in pair_of]
+    stride_set = set(stride)
+    leftover = [L for L in _layer_ids(pair_of, tail_first=True) if L not in stride_set]
+    for layer in stride + leftover:
+        if stop_at_cap and resident_bytes <= cap:
+            break
+        for d in pair_of[layer]:
+            if d.name in host:
+                continue
+            host.add(d.name)
+            resident_bytes -= int(d.nbytes)
+    return resident_bytes
+
+
+def _resident_bytes(
+    descs: Sequence[WeightDesc], host: set[str], cpu: set[str]
+) -> int:
+    return sum(
+        int(d.nbytes) for d in descs if d.name not in host and d.name not in cpu
+    )
+
+
+def _refill_mlp(
+    descs: Sequence[WeightDesc],
+    host: set[str],
+    cpu: set[str],
+    cap: int,
+    *,
+    n_pairs: int = _REFILL_PAIRS,
+    n_downs: int = _REFILL_DOWNS,
+) -> None:
+    """Move whole HOST pairs, then downs, back to DEVICE while they fit in cap."""
+    pair_of = _pair_of(descs)
+    host_pair_layers = sorted(
+        L
+        for L, sides in pair_of.items()
+        if L is not None and sides and all(d.name in host for d in sides)
+    )
+    restored = 0
+    for layer in host_pair_layers:
+        if restored >= n_pairs:
+            break
+        sides = pair_of[layer]
+        cost = sum(int(d.nbytes) for d in sides)
+        if _resident_bytes(descs, host, cpu) + cost > cap:
+            continue
+        for d in sides:
+            host.discard(d.name)
+        restored += 1
+    downs = sorted(
+        (d for d in descs if d.kind == _EVICT_DOWN and d.name in host),
+        key=lambda d: d.layer if d.layer is not None else -1,
+    )
+    restored_d = 0
+    for d in downs:
+        if restored_d >= n_downs:
+            break
+        if _resident_bytes(descs, host, cpu) + int(d.nbytes) > cap:
+            continue
+        host.discard(d.name)
+        restored_d += 1
+
+
+def _embed_to_cpu(descs: Sequence[WeightDesc], host: set[str], cpu: set[str]) -> None:
+    for d in descs:
+        if d.kind != "embed":
+            continue
+        host.discard(d.name)
+        cpu.add(d.name)
+
+
 def _streamed_tape(descs: Sequence[WeightDesc], host: set[str]) -> tuple[str, ...]:
     """L0..L{n-1} ``q,k,v,o,gate,up,down`` (HOST only), then lm_head if HOST."""
     by_layer: dict[int, dict[str, str]] = {}
@@ -360,13 +497,19 @@ def plan_residency(
     max_resident_bytes: int,
     *,
     policy: str = DEFAULT_POLICY,
+    pin_embed: bool = True,
+    refill_embed: bool = True,
 ) -> ResidencyPlan:
-    """Pin qkvo/embed/lm_head; evict MLP under ``policy`` (default ``D``).
+    """Pin qkvo/lm_head (and embed unless host-embed); evict MLP under ``policy``.
 
     ``D`` / ``downs_only``: tail-first ``down``, then tail ``gate+up`` pairs
     only if still over cap. ``interleaved_down``: head-first downs, then tail
     pairs. ``pairs_first``: tail pairs, then tail-first downs. ``all_mlp``:
     every down and every pair (more HOST bytes; comparison only).
+    ``pairs_stride``: D downs, then pairs on layers 3,7,11,... until cap.
+    ``D_host_embed`` or ``pin_embed=False``: embed is CPU, not DEVICE and not
+    CopyRing tape; refill restores 2 whole gate+up pairs and 1 down.
+    Tied embeddings (no ``lm_head`` desc) refuse host-embed.
     """
     if not descs:
         return ResidencyPlan(frozenset(), (), 0, 0, 0)
@@ -383,29 +526,51 @@ def plan_residency(
             f"{sorted(POLICIES)}"
         )
 
+    host_embed = (policy == HOST_EMBED_POLICY) or (not pin_embed)
+    evict_policy = "D" if policy == HOST_EMBED_POLICY else policy
+    if host_embed and embeddings_tied(descs):
+        raise ValueError(
+            "host-embed: tied embeddings share one packed table; refusing to "
+            "put embed on CPU while lm_head stays DEVICE (3B)."
+        )
+
     cap = int(max_resident_bytes)
-    pin = pin_nbytes(descs)
+    pin = pin_nbytes(descs, pin_embed=not host_embed)
+    pin_set = pin_kinds(pin_embed=not host_embed)
     if cap < pin:
         raise CapTooSmallError(
             f"max_resident_bytes={cap} is below the pin set ({pin} bytes: "
-            "embed + lm_head + qkvo). Attention and embeddings stay DEVICE; "
-            "raise the cap, do not break that invariant."
+            + ("lm_head + qkvo" if host_embed else "embed + lm_head + qkvo")
+            + "). Attention stays DEVICE; raise the cap, do not break that invariant."
         )
 
     host: set[str] = set()
     resident_bytes = sum(int(d.nbytes) for d in descs)
-    evict_all = policy == "all_mlp"
-    downs_tail = policy != "interleaved_down"
+    evict_all = evict_policy == "all_mlp"
+    downs_tail = evict_policy != "interleaved_down"
 
-    if policy == "pairs_first":
+    if evict_policy == "pairs_first":
         resident_bytes = _evict_pairs(
             descs, host, resident_bytes, cap, tail_first=True
         )
         resident_bytes = _evict_downs(
             descs, host, resident_bytes, cap, tail_first=True
         )
+    elif evict_policy == "pairs_stride":
+        # Downs like D, then every-4th gate+up until cap (leftover tail-first).
+        resident_bytes = _evict_downs(
+            descs,
+            host,
+            resident_bytes,
+            cap,
+            tail_first=True,
+            stop_at_cap=True,
+        )
+        resident_bytes = _evict_pairs_stride(
+            descs, host, resident_bytes, cap, stop_at_cap=True
+        )
     else:
-        # D, downs_only, interleaved_down, all_mlp: downs before pairs.
+        # D, downs_only, interleaved_down, all_mlp, D_host_embed: downs before pairs.
         # downs_only == D: never touch pairs unless every down still leaves
         # resident > cap (on 32B overflow that is required, so WHO matches D).
         resident_bytes = _evict_downs(
@@ -425,11 +590,18 @@ def plan_residency(
             stop_at_cap=not evict_all,
         )
 
-    if any(d.kind in PIN_KINDS and d.name in host for d in descs):
+    cpu: set[str] = set()
+    if host_embed:
+        _embed_to_cpu(descs, host, cpu)
+        if refill_embed:
+            _refill_mlp(descs, host, cpu, cap)
+
+    if any(d.kind in pin_set and d.name in host for d in descs):
         raise CapTooSmallError(
             f"max_resident_bytes={cap} would stream a pinned matrix "
             "(embed / lm_head / qkvo); raise the cap."
         )
+    resident_bytes = _resident_bytes(descs, host, cpu)
     if resident_bytes > cap:
         raise CapTooSmallError(
             f"max_resident_bytes={cap} still short after evicting every down "
@@ -437,9 +609,11 @@ def plan_residency(
         )
 
     streamed = _streamed_tape(descs, host)
-    resident = frozenset(d.name for d in descs if d.name not in host)
+    resident = frozenset(
+        d.name for d in descs if d.name not in host and d.name not in cpu
+    )
     streamed_bytes = sum(int(d.nbytes) for d in descs if d.name in host)
-    resident_bytes = sum(int(d.nbytes) for d in descs if d.name not in host)
+    resident_bytes = sum(int(d.nbytes) for d in descs if d.name in resident)
     slot_nbytes = max((int(d.nbytes) for d in descs if d.name in host), default=0)
     return ResidencyPlan(
         resident=resident,
@@ -447,22 +621,35 @@ def plan_residency(
         slot_nbytes=slot_nbytes,
         resident_bytes=resident_bytes,
         streamed_bytes=streamed_bytes,
+        cpu=frozenset(cpu),
     )
 
 
 def summarize_residency(descs: Sequence[WeightDesc], plan: ResidencyPlan) -> dict:
-    """Kind counts and bytes on DEVICE vs HOST. Tape order is ``plan.streamed``."""
+    """Kind counts and bytes on DEVICE vs HOST tape vs CPU. Tape is ``plan.streamed``."""
+    cpu = plan.cpu
     kinds: dict[str, dict[str, dict[str, int]]] = {}
     for d in descs:
-        home = "device" if d.name in plan.resident else "host"
+        if d.name in plan.resident:
+            home = "device"
+        elif d.name in cpu:
+            home = "cpu"
+        else:
+            home = "host"
         slot = kinds.setdefault(
-            d.kind, {"device": {"n": 0, "bytes": 0}, "host": {"n": 0, "bytes": 0}}
+            d.kind,
+            {
+                "device": {"n": 0, "bytes": 0},
+                "host": {"n": 0, "bytes": 0},
+                "cpu": {"n": 0, "bytes": 0},
+            },
         )
         slot[home]["n"] += 1
         slot[home]["bytes"] += int(d.nbytes)
     host_layers: dict[str, list[int]] = {"down": [], "gate": [], "up": []}
+    streamed_set = set(plan.streamed)
     for d in descs:
-        if d.name in plan.resident or d.kind not in host_layers or d.layer is None:
+        if d.name not in streamed_set or d.kind not in host_layers or d.layer is None:
             continue
         host_layers[d.kind].append(int(d.layer))
     for kind in host_layers:
@@ -470,10 +657,12 @@ def summarize_residency(descs: Sequence[WeightDesc], plan: ResidencyPlan) -> dic
     return {
         "n_resident": len(plan.resident),
         "n_streamed": len(plan.streamed),
+        "n_cpu": len(cpu),
         "resident_bytes": int(plan.resident_bytes),
         "streamed_bytes": int(plan.streamed_bytes),
         "slot_nbytes": int(plan.slot_nbytes),
         "kinds": kinds,
         "host_layers": host_layers,
         "streamed": list(plan.streamed),
+        "cpu": sorted(cpu),
     }

@@ -153,6 +153,7 @@ def _spawn_session(
     items_json: str | Path | None = None,
     conversation: str = "independent",
     plate: str = "hard",
+    residency_policy: str = "D",
 ) -> LabSession:
     """Child process loads the model, records, exits; this process never holds it."""
     parent = Path(out_dir) if out_dir is not None else Path(tempfile.mkdtemp(prefix="lab-iso-"))
@@ -192,6 +193,8 @@ def _spawn_session(
         cmd.append("--no-graphs")
     if not verbose:
         cmd.append("--quiet")
+    if residency_policy and residency_policy != "D":
+        cmd.extend(["--residency", str(residency_policy)])
     env = os.environ.copy()
     env["PYTHONPATH"] = str(_REPO) + os.pathsep + env.get("PYTHONPATH", "")
     print(f"[isolated {codec}] {' '.join(cmd)}", flush=True)
@@ -780,6 +783,7 @@ def run_nf4(
     conversation: str = "independent",
     items_json: str | Path | None = None,
     plate: str = "hard",
+    residency_policy: str = "D",
 ) -> LabSession:
     """Our driver: ``load_model`` + ``TokenLoop``, greedy, one forward per token.
 
@@ -807,6 +811,7 @@ def run_nf4(
             items_json=items_json,
             conversation=conversation,
             plate=plate,
+            residency_policy=residency_policy,
         )
     import torch
 
@@ -849,6 +854,7 @@ def run_nf4(
             trust_remote_code=trust_remote_code,
             strict=False,
             max_resident_bytes=cap,
+            residency_policy=residency_policy,
         )
         torch.cuda.synchronize()
         load_s = time.perf_counter() - t_load

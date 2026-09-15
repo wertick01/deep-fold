@@ -15,7 +15,7 @@ Smoke Paris / Berlin / 323 **не** измеряет качество. Tok/s с 
 **Windows**
 
 ```powershell
-git clone <адрес-репозитория>
+git clone https://github.com/wertick01/deep-fold.git
 cd deep-fold
 Set-ExecutionPolicy -Scope Process Bypass
 powershell -File scripts\setup.ps1
@@ -26,7 +26,7 @@ deepfold doctor
 **Linux**
 
 ```bash
-git clone <адрес-репозитория>
+git clone https://github.com/wertick01/deep-fold.git
 cd deep-fold
 bash scripts/setup.sh
 source .venv/bin/activate

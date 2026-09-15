@@ -24,7 +24,7 @@ Ada (RTX 40xx, `sm_89`) и A100 (`sm_80`) могут генерировать, �
 ## Минимальный путь (соседний ПК)
 
 ```powershell
-git clone <адрес-репозитория>
+git clone https://github.com/wertick01/deep-fold.git
 cd deep-fold
 Set-ExecutionPolicy -Scope Process Bypass
 powershell -File scripts\setup.ps1
@@ -37,7 +37,7 @@ deepfold chat --model <каталог, который напечатал pull>
 Linux вместо двух строк setup:
 
 ```bash
-git clone <адрес-репозитория>
+git clone https://github.com/wertick01/deep-fold.git
 cd deep-fold
 bash scripts/setup.sh
 source .venv/bin/activate
@@ -73,7 +73,7 @@ PyPI: там чаще CPU-колесо), пакет `deepfold[hub,chat]`, соб
 **Windows (PowerShell):**
 
 ```powershell
-cd <каталог-репозитория>
+cd deep-fold
 Set-ExecutionPolicy -Scope Process Bypass
 powershell -File scripts\setup.ps1
 .\.venv\Scripts\Activate.ps1
@@ -82,7 +82,7 @@ powershell -File scripts\setup.ps1
 **Linux:**
 
 ```bash
-cd <каталог-репозитория>
+cd deep-fold
 bash scripts/setup.sh
 source .venv/bin/activate
 ```

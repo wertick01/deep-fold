@@ -15,7 +15,7 @@ author’s 3080 tok/s on another card.
 **Windows**
 
 ```powershell
-git clone <repo-url>
+git clone https://github.com/wertick01/deep-fold.git
 cd deep-fold
 Set-ExecutionPolicy -Scope Process Bypass
 powershell -File scripts\setup.ps1
@@ -26,7 +26,7 @@ deepfold doctor
 **Linux**
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/wertick01/deep-fold.git
 cd deep-fold
 bash scripts/setup.sh
 source .venv/bin/activate

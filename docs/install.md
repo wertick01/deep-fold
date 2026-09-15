@@ -23,7 +23,7 @@ are equivalent. Dumps below were captured from a live `python -m gpu.cli`.
 ## Shortest path (another PC)
 
 ```powershell
-git clone <repo-url>
+git clone https://github.com/wertick01/deep-fold.git
 cd deep-fold
 Set-ExecutionPolicy -Scope Process Bypass
 powershell -File scripts\setup.ps1
@@ -36,7 +36,7 @@ deepfold chat --model <directory printed by pull>
 Linux instead of the two setup lines:
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/wertick01/deep-fold.git
 cd deep-fold
 bash scripts/setup.sh
 source .venv/bin/activate
@@ -72,7 +72,7 @@ then runs `doctor`.
 **Windows (PowerShell):**
 
 ```powershell
-cd <repo>
+cd deep-fold
 Set-ExecutionPolicy -Scope Process Bypass
 powershell -File scripts\setup.ps1
 .\.venv\Scripts\Activate.ps1
@@ -81,7 +81,7 @@ powershell -File scripts\setup.ps1
 **Linux:**
 
 ```bash
-cd <repo>
+cd deep-fold
 bash scripts/setup.sh
 source .venv/bin/activate
 ```

@@ -29,7 +29,13 @@ from . import setup_env as setup_mod  # noqa: E402
 PROG = "deepfold"
 
 
-def _add_runtime_flags(p: argparse.ArgumentParser, *, with_prompt: bool) -> None:
+def _add_runtime_flags(
+    p: argparse.ArgumentParser,
+    *,
+    with_prompt: bool,
+    max_new_tokens: int = 64,
+    max_seq: int = 512,
+) -> None:
     p.add_argument("--model", help="HuggingFace directory (or $DEEPFOLD_MODEL)")
     p.add_argument("--chr", help="packed weights (or $DEEPFOLD_CHR, or a sibling)")
     p.add_argument(
@@ -44,10 +50,15 @@ def _add_runtime_flags(p: argparse.ArgumentParser, *, with_prompt: bool) -> None
     p.add_argument(
         "--max-new-tokens",
         type=int,
-        default=64,
-        help="tokens to generate per turn (default: 64)",
+        default=max_new_tokens,
+        help=f"tokens to generate per turn (default: {max_new_tokens})",
     )
-    p.add_argument("--max-seq", type=int, default=512, help="preallocated KV length")
+    p.add_argument(
+        "--max-seq",
+        type=int,
+        default=max_seq,
+        help=f"preallocated KV length (default: {max_seq})",
+    )
     p.add_argument(
         "--max-resident-mib",
         type=int,
@@ -154,11 +165,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="TTY chat session (history + streamed tokens)",
         description=(
             "Same load path as run, then a prompt_toolkit session. "
-            "Enter sends, Ctrl+J new line. Each turn prefills the whole chat. "
-            "Needs a TTY; scripts use run --prompt."
+            "Enter sends, Ctrl+J newline, Ctrl+C stops a reply. "
+            "Each turn prefills the whole chat from saved JSON. "
+            "--agent adds workspace tools (list/read/write/pytest); "
+            "writes and tests ask first. Needs a TTY; scripts use run --prompt."
         ),
     )
-    _add_runtime_flags(talk, with_prompt=False)
+    _add_runtime_flags(talk, with_prompt=False, max_new_tokens=256, max_seq=2048)
+    talk.add_argument(
+        "--new",
+        action="store_true",
+        help="start a new conversation (skip the saved-chat picker)",
+    )
+    talk.add_argument("--session", help="resume this saved chat id from $DEEPFOLD_HOME/chats")
+    talk.add_argument(
+        "--agent",
+        action="store_true",
+        help="enable workspace tools (list_dir, read_file, write_file, run_tests)",
+    )
+    talk.add_argument(
+        "--workspace",
+        default=None,
+        help="sandbox root for --agent (default: current directory)",
+    )
+    talk.add_argument(
+        "--max-tool-rounds",
+        type=int,
+        default=8,
+        help="max generate+tool cycles per user turn in --agent (default: 8)",
+    )
     talk.set_defaults(func=chat_mod.chat)
 
     ollama = sub.add_parser(

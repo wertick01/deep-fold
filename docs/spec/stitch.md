@@ -1,27 +1,27 @@
-# Стыки спек (волна 1, CPU)
+# Spec stitches (wave 1, CPU)
 
-Расхождения первой волны, **зафиксированные** перед кодом. Если спека модуля противоречит этой странице — побеждает эта страница.
+First-wave disagreements, **locked** before code. If a module spec contradicts this page — this page wins.
 
-GPU-волна: [stitch-gpu.md](stitch-gpu.md).
+GPU wave: [stitch-gpu.md](stitch-gpu.md).
 
-| Тема | Решение |
+| Topic | Decision |
 |---|---|
-| `inv_freq` / `rotary_emb` / `.sin` / `.cos` | **skip**, нет в `.chr`. Классификатор — [integrity-cli.md](integrity-cli.md) §3.1. |
-| `--chunk` дефолт | **262144** ([vq.md](vq.md) §8.3). Не 1048576. |
-| `--group-size` | nf4 только 64, vq только 8. |
-| Имена в `.chr` | без суффикса `.weight`; bias с `.bias`. |
-| Decode safetensors | всегда **F32**, один файл. |
-| Нормы / bias | `codec=bf16`, bit-exact к BF16-проекции orig. |
-| Linear / embed / lm_head | один `--codec` на файл (`nf4` или `vq`). |
-| Блобы | row-major, не Ampere fragment-major. |
-| Чтение файлов | `os.File.ReadAt`, без mmap, без CGO. |
-| JSON CHR0 | compact, `DisallowUnknownFields`, офсеты integer. |
-| `hidden_size` | ≥1; compress выводит из config или тензоров, не оставляет 0. |
-| RNG VQ | `math/rand/v2` PCG(seed, 0) на **каждую** матрицу заново. |
-| Полосы | `full_f32 > 256MiB`; unit-тесты не включают. |
-| Модуль Go | `chr` (не github-путь). Пакеты как в integrity-cli §5. |
+| `inv_freq` / `rotary_emb` / `.sin` / `.cos` | **skip**, not in `.chr`. Classifier — [integrity-cli.md](integrity-cli.md) §3.1. |
+| `--chunk` default | **262144** ([vq.md](vq.md) §8.3). Not 1048576. |
+| `--group-size` | nf4 64 only, vq 8 only. |
+| Names in `.chr` | no `.weight` suffix; bias keeps `.bias`. |
+| Decode safetensors | always **F32**, one file. |
+| Norms / bias | `codec=bf16`, bit-exact to the BF16 projection of orig. |
+| Linear / embed / lm_head | one `--codec` per file (`nf4` or `vq`). |
+| Blobs | row-major, not Ampere fragment-major. |
+| File reads | `os.File.ReadAt`, no mmap, no CGO. |
+| CHR0 JSON | compact, `DisallowUnknownFields`, integer offsets. |
+| `hidden_size` | ≥1; compress derives it from config or tensors, does not leave 0. |
+| VQ RNG | `math/rand/v2` PCG(seed, 0) **anew for every** matrix. |
+| Bands | `full_f32 > 256MiB`; unit tests do not include them. |
+| Go module | `chr` (not a github path). Packages as in integrity-cli §5. |
 
-Пакеты:
+Packages:
 
 ```
 chr/
@@ -34,4 +34,4 @@ chr/
   internal/verify/  # classify + metrics + compress/decode orchestration
 ```
 
-Классификатор живёт в `internal/verify` (или `internal/tensor`), один на compress и verify.
+The classifier lives in `internal/verify` (or `internal/tensor`), one for compress and verify.

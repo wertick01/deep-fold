@@ -35,6 +35,7 @@ def plan_lines(*, python: str | None = None) -> list[str]:
     chr_name = "chr.exe" if os.name == "nt" else "chr"
     return [
         f"{py} -m pip install torch --index-url {TORCH_INDEX}",
+        f'{py} -m pip install -e ".[hub,chat]"',
         f"go build -o {chr_name} ./cmd/chr",
         f"{py} -m gpu.cli doctor",
     ]
@@ -68,6 +69,11 @@ def setup(args: Namespace) -> int:
     code = _run([py, "-m", "pip", "install", "torch", "--index-url", TORCH_INDEX])
     if code != 0:
         _err("setup: pip install torch failed")
+        return code
+
+    code = _run([py, "-m", "pip", "install", "-e", ".[hub,chat]"], cwd=str(REPO))
+    if code != 0:
+        _err("setup: pip install -e \".[hub,chat]\" failed")
         return code
 
     chr_name = "chr.exe" if os.name == "nt" else "chr"

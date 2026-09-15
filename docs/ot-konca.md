@@ -1,111 +1,111 @@
-# С конца: как успеть разжать кусок и «убрать» его
+# From the end: how to finish decompressing a chunk and “put it away”
 
-Представим, что токен уже летит. Карточка должна разжать нужный кусок, посчитать, убрать. Если этот круг не влезает в долю миллисекунды — схема мёртвая, какой бы красивой ни была на бумаге.
+Imagine the token is already in flight. The card must decompress the needed chunk, compute, put it away. If this loop does not fit in a fraction of a millisecond — the schema is dead, however pretty it looks on paper.
 
-## Сколько есть времени
+## How much time there is
 
-Хороший чат — примерно **20 токенов в секунду**. Это **50 миллисекунд на токен**.
+A good chat is about **20 tokens per second**. That is **50 milliseconds per token**.
 
-У Llama 70B около **80 слоёв**. Значит на весь слой (разжать + посчитать + убрать) есть примерно **0,6 мс**. У 8B слоёв 32, карточка RTX 4090 выдаёт ~50 ток/с в FP16 — на слой выходит те же **полмиллисекунды**. Это не «хотелка», так устроена шина: слой 8B в FP16 весит ~0,5 ГБ, 4090 читает память со скоростью ~1000 ГБ/с, чтение как раз ~0,5 мс.
+Llama 70B has about **80 layers**. So for a whole layer (decompress + compute + put away) there is about **0.6 ms**. An 8B has 32 layers; an RTX 4090 delivers ~50 tok/s in FP16 — per layer that is the same **half millisecond**. This is not a “wish”; it is how the bus works: an 8B layer in FP16 weighs ~0.5 GB, a 4090 reads memory at ~1000 GB/s, the read is exactly ~0.5 ms.
 
-Слой 70B в «сыром» BF16 — **1,71 ГБ** (у 8B — 436 МБ). Просто прочитать 70B-слой с 4090: **~1,7 мс**. Уже больше бюджета на 20 ток/с. Поэтому большая модель в полном BF16 на одной потребительской карте и не летает.
+A 70B layer in “raw” BF16 is **1.71 GB** (8B — 436 MB). Just reading a 70B layer from a 4090: **~1.7 ms**. Already over the 20 tok/s budget. That is why a large model in full BF16 does not fly on a single consumer card.
 
-Дальше все способы меряем этой линейкой: **влезло в ~0,5 мс или нет**.
+From here every method is measured with this ruler: **did it fit in ~0.5 ms or not**.
 
-## «Вернуть обратно» — это не сжать заново
+## “Put it back” is not compress again
 
-Веса на инференсе **не меняются**. Сжатая копия уже лежит в памяти. Разжатый кусок — черновик.
+Weights do **not** change at inference. The compressed copy already sits in memory. The decompressed chunk is a scratch.
 
-Убрать его = выбросить буфер или забыть регистры. Это ноль наносекунд.
+Put it away = drop the buffer or forget the registers. That is zero nanoseconds.
 
-Сжать слой заново — отдельная работа, и она **медленнее**, чем разжать. Huffman на GPU (Unweight) пакует слой 8B примерно за **20 мс**; LZ4 на A100 — около **5 мс** на те же 436 МБ. Бюджет слоя — 0,3–0,6 мс. Даже «быстрая» упаковка опаздывает в десятки раз. На токен 70B выйдут секунды. Для чата это сразу нет.
+Compressing a layer again is separate work, and it is **slower** than decompressing. Huffman on GPU (Unweight) packs an 8B layer in about **20 ms**; LZ4 on an A100 — about **5 ms** for the same 436 MB. Layer budget is 0.3–0.6 ms. Even “fast” packing is tens of times late. On a 70B token that becomes seconds. For chat that is an immediate no.
 
-Если «вернуть» на диск или в оперативку по PCIe (~32 ГБ/с), слой 70B едет **~50 мс**. Токен будет думать секунды. Тоже нет.
+If we “return” to disk or RAM over PCIe (~32 GB/s), a 70B layer travels **~50 ms**. The token will think for seconds. Also no.
 
-Правильный круг с конца: разжал в черновик → посчитал → выбросил черновик. Ещё лучше: черновика в большой памяти нет вообще, числа появляются в регистрах и сразу идут в умножение.
+The correct loop from the end: decompress into scratch → compute → drop the scratch. Even better: there is no scratch in big memory at all; numbers appear in registers and go straight into the multiply.
 
-## Варианты, от худшего к лучшему
+## Options, worst to best
 
-### 1. Классический zip на весь слой
+### 1. Classic zip of the whole layer
 
-Разжать слой в видеопамять, потом считать, потом сжать обратно.
+Decompress the layer into video memory, then compute, then compress back.
 
-Разжатие + запись большого буфера + повторное чтение для умножения — шину гоняешь **дважды**, плюс сам zip. На жирных числах LZ4 почти не жмёт, а времени жрёт. ZipServ прямо измерил: отдельное разжатие занимает **в 1,5–3,5 раза дольше**, чем само умножение. На 4090 такие схемы дают около **0,17–0,28** скорости обычного BF16, то есть в 3–6 раз медленнее.
+Decompression + writing a large buffer + reading again for the multiply — you drive the bus **twice**, plus the zip itself. On fat numbers LZ4 barely compresses, and it eats time. ZipServ measured this directly: standalone decompression takes **1.5–3.5× longer** than the multiply itself. On a 4090 such schemes give about **0.17–0.28** of ordinary BF16 speed, i.e. 3–6× slower.
 
-Для чата: нет.
+For chat: no.
 
-### 2. Тащить кусок с RAM или SSD
+### 2. Haul a chunk from RAM or SSD
 
-Как «гетерохроматин». По PCIe слой 70B — те самые **55 мс**. Даже если разжатие бесплатное, поездка убивает бюджет в сто раз.
+Like “heterochromatin”. Over PCIe a 70B layer is those same **55 ms**. Even if decompression is free, the trip kills the budget a hundredfold.
 
-Для офлайн-пачки токенов (FlexGen) ещё терпимо. Для диалога — нет.
+For an offline batch of tokens (FlexGen) it is still tolerable. For dialogue — no.
 
-### 3. Шифр (AES)
+### 3. Cipher (AES)
 
-Расшифровать кусок с ключом. На видеокарте AES бывает быстрым (десятки–сотни ГБ/с в синтетике). Слой расшифруется, допустим, за миллисекунды.
+Decrypt a chunk with a key. On a GPU AES can be fast (tens–hundreds of GB/s in synthetic). The layer decrypts, say, in milliseconds.
 
-Но файл тот же размер. В видеопамяти он не ужался. Платим время, место не выигрываем.
+But the file is the same size. In video memory it did not shrink. We pay time and do not win space.
 
-Для нашей задачи: мимо.
+For our task: miss.
 
-### 4. Собрать слой из крошечного ключа (нейросеть-генератор)
+### 4. Assemble a layer from a tiny key (neural generator)
 
-Идея красивая: ключ 2 КБ, по координатам рисуем веса.
+Pretty idea: a 2 KB key, we draw weights from coordinates.
 
-Чтобы нарисовать слой из ~миллиарда чисел, ключ надо умножить на огромный случайный базис. При широком ключе это триллионы операций на слой — **секунды и часы**, не миллисекунды. Для чата нет. Имеет смысл только если веса **не собираем**, а сразу считаем в коротком виде (см. пункт 7).
+To draw a layer of ~a billion numbers, the key must be multiplied by a huge random basis. With a wide key that is trillions of operations per layer — **seconds and hours**, not milliseconds. For chat, no. It only makes sense if we **do not assemble** the weights, but compute immediately in short form (see item 7).
 
-### 5. Разжать слой целиком в видеопамять, но кодеком «под числа» (Huffman / DFloat11)
+### 5. Decompress the whole layer into video memory, but with a “numbers” codec (Huffman / DFloat11)
 
-Сжатая модель лежит в GPU. Перед слоем разжимаем его в черновик ~1,8 ГБ, считаем, черновик выбрасываем. Обратно ничего не пишем.
+The compressed model sits on the GPU. Before the layer we decompress it into a ~1.8 GB scratch, compute, drop the scratch. We write nothing back.
 
-Это уже живая схема, и Llama 405B так впихивают на узел из восьми карт. Но черновик большой, шину гладим лишний раз. На 4090 в среднем **в ~3,5 раза медленнее** обычного BF16. Для сервера «лишь бы влезло» — да. Для шустрого чата — слабо.
+This is already a live scheme, and Llama 405B is stuffed onto an eight-card node this way. But the scratch is large, we stroke the bus an extra time. On a 4090 on average **~3.5× slower** than ordinary BF16. For a server “as long as it fits” — yes. For snappy chat — weak.
 
-### 6. Разжать не слой, а маленький тайл, сразу в регистры (ZipServ)
+### 6. Decompress not a layer but a small tile, straight into registers (ZipServ)
 
-Карточка никогда не держит разжатый слой. Берёт сжатый кусочек, в регистрах собирает квадратик 64×64 (это **8 КБ**, в быструю память блока спокойно влезает), умножает, забывает.
+The card never holds a decompressed layer. It takes a compressed piece, in registers assembles a 64×64 square (that is **8 KB**, fits comfortably in the block’s fast memory), multiplies, forgets.
 
-«Убрать обратно» = конец такта ядра. Ноль стоимости.
+“Put it back” = end of the kernel tick. Zero cost.
 
-На 4090 такое умножение **быстрее** обычного BF16 (в среднем **~1,3×**, пик ~1,7×): по шине едет меньше байт, сборка прячется за ожиданием памяти. Один крупный слой 8B: **0,195 мс** против **0,215 мс** у обычного BF16 на A100. 70B худеет со 132 ГБ до **94 ГБ**. Качество = оригинал.
+On a 4090 that multiply is **faster** than ordinary BF16 (on average **~1.3×**, peak ~1.7×): fewer bytes travel the bus, assembly hides behind memory wait. One large 8B layer: **0.195 ms** vs **0.215 ms** for ordinary BF16 on an A100. 70B slims from 132 GB to **94 GB**. Quality = original.
 
-Это лучший ответ, если нельзя портить цифры.
+This is the best answer if we cannot spoil the numbers.
 
-### 7. Вообще не разжимать в BF16: считать в 4 битах или из книжки
+### 7. Do not decompress to BF16 at all: compute in 4 bits or from a codebook
 
-Тут «расшифровка» — подсмотреть шкалу или вектор из книжки, на 4–16 чисел, не на гигабайт.
+Here “decryption” is looking up a scale or a vector from a codebook, for 4–16 numbers, not a gigabyte.
 
-- **INT4 / Marlin.** По шине в 4 раза меньше. На decode почти **в 4 раза быстрее** BF16. 70B весит ~40 ГБ. Качество чуть ниже, для чата обычно ок.
-- **AQLM (книжка на группу из 8 весов).** ~2 бита. В чате **в 1,3–3 раза быстрее** FP16, смотря какой формат книжки. Книжка — тот самый ключ из модели, кусок выбирает индекс, «сшивается» на месте.
-- **BitNet.** Ещё плотнее, но модель так надо учить, не сжать готовый Llama за вечер.
+- **INT4 / Marlin.** 4× less on the bus. On decode almost **4× faster** than BF16. 70B weighs ~40 GB. Quality a bit lower; for chat usually OK.
+- **AQLM (codebook on a group of 8 weights).** ~2 bits. In chat **1.3–3× faster** than FP16, depending on the codebook format. The codebook is that same model key; the chunk picks an index and is “stitched” in place.
+- **BitNet.** Even denser, but the model has to be trained that way, not compress a ready Llama in an evening.
 
-«Вернуть обратно» не из чего: большого BF16-куска не было.
+There is nothing to “put back”: there was no large BF16 chunk.
 
-Для локального железа это и есть рабочий путь.
+For local hardware this is the working path.
 
-## Понятные числа на одной карточке (RTX 4090)
+## Clear numbers on one card (RTX 4090)
 
-На один слой 70B (~1,8 ГБ в BF16). Цель чата — **меньше ~0,6 мс**.
+Per one 70B layer (~1.8 GB in BF16). Chat target — **under ~0.6 ms**.
 
-| Как делаем | Что происходит с куском | Время порядка | Убрать обратно | Чат? |
+| How we do it | What happens to the chunk | Time order | Put back | Chat? |
 |---|---|---|---|---|
-| Сжать zip-ом заново после слоя | полный цикл архиватора | ~20 мс только сжатие | дорого | нет |
-| Привезти слой по PCIe | поездка 1,8 ГБ | ~55 мс | ещё хуже | нет |
-| Zip → большая память → считать | разжать весь слой | разжатие дольше умножения в 1,5–3,5 раза, итог в 3–6 раз медленнее BF16 | выбросить черновик | почти нет |
-| Huffman-слой в GPU (DFloat11) | черновик слоя, потом выброс | ~в 3,5 раза медленнее BF16 | выбросить | влезет, но медленно |
-| Тайл в регистрах (ZipServ) | 8 КБ, забыли | **быстрее** BF16 ~1,3× | забыть регистры | да, без потерь |
-| INT4, сразу считать | не собираем BF16 | **~4× быстрее** | нечего убирать | да |
-| Книжка AQLM ~2 бит | индекс → 8 чисел | **1,3–3× быстрее** FP16 | нечего убирать | да, чуть грубее |
+| Compress with zip again after the layer | full archiver cycle | ~20 ms compression alone | expensive | no |
+| Bring the layer over PCIe | 1.8 GB trip | ~55 ms | even worse | no |
+| Zip → big memory → compute | decompress the whole layer | decompression 1.5–3.5× longer than the multiply, overall 3–6× slower than BF16 | drop the scratch | almost no |
+| Huffman layer on GPU (DFloat11) | layer scratch, then drop | ~3.5× slower than BF16 | drop | fits, but slow |
+| Tile in registers (ZipServ) | 8 KB, forgot | **faster** than BF16 ~1.3× | forget registers | yes, lossless |
+| INT4, compute immediately | we do not assemble BF16 | **~4× faster** | nothing to put away | yes |
+| AQLM codebook ~2 bit | index → 8 numbers | **1.3–3× faster** than FP16 | nothing to put away | yes, a bit coarser |
 
-Для сравнения, та же 4090 в реальной жизни: Llama 8B Q4 ≈ **130 ток/с**, 8B FP16 ≈ **54 ток/с**, 70B Q4 на двух 4090 ≈ **19 ток/с**. Ускорение почти как «меньше байт по шине». Кто меньше возит — тот быстрее говорит.
+For comparison, the same 4090 in real life: Llama 8B Q4 ≈ **130 tok/s**, 8B FP16 ≈ **54 tok/s**, 70B Q4 on two 4090s ≈ **19 tok/s**. Speedup is almost “fewer bytes on the bus”. Whoever hauls less — talks faster.
 
-## Что из этого следует, если идти с конца
+## What follows if we go from the end
 
-Сначала выбираем **движение, которое успевает за полмиллисекунды**. Это не zip-файл и не «сжать обратно». Это либо тайл в регистрах, либо счёт в 4/2 битах.
+First we pick a **motion that makes the half-millisecond**. That is not a zip file and not “compress back”. It is either a tile in registers, or compute in 4/2 bits.
 
-Потом смотрим, чем заполнить видеопамять:
+Then we look at what to fill video memory with:
 
-- нельзя врать ни бита → ZipServ / DFloat11, живём на ~70% размера;
-- можно чуть соврать → INT4, и это и меньше, и быстрее;
-- совсем тесно → книжка на группы (AQLM) или не считать часть экспертов.
+- cannot lie about a single bit → ZipServ / DFloat11, we live at ~70% of size;
+- can lie a little → INT4, and that is both smaller and faster;
+- really tight → codebook on groups (AQLM) or skip some experts.
 
-Нарезка на куски нужна, чтобы разжимать **тайл**, не модель. Сошьётся по адресу `(слой, строка, столбец)` само. Общий ключ на слой, короткие индексы у групп — рибосома и кодоны. Уникальный архиватор на каждый кусок и обратная упаковка после работы — это как после каждой фразы заново переплетать книгу.
+Chunking is needed so we decompress a **tile**, not a model. It stitches itself by address `(layer, row, column)`. A shared key per layer, short indices on groups — ribosome and codons. A unique archiver per chunk and reverse packing after work — that is like rebinding the book after every sentence.

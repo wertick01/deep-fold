@@ -183,8 +183,8 @@ A corpus NLL adapter exists, but no WikiText perplexity result is published. The
 
 - Performance evidence comes from one GPU and one Windows environment. Other supported compute capabilities are experimental; no Linux throughput measurement is published.
 - The public model-download allowlist contains four models. Architecture inspection is broader than that list, but an accepted layout is not proof that an arbitrary checkpoint works.
-- Generation is greedy. `chat` reloads no weights between turns, but re-prefills the entire conversation and does not reuse the KV prefix across turns.
-- `--max-seq` defaults to 512. Longer contexts consume more KV memory; the current fit estimate uses a fixed runtime allowance and is not a guarantee for every context length or GPU workload.
+- Generation is greedy. `chat` reloads no weights between turns, but re-prefills the entire conversation and does not reuse the KV prefix across turns. Transcripts are JSON under `$DEEPFOLD_HOME/chats`.
+- `--max-seq` defaults to 512 for `run` and 2048 for `chat`. Longer contexts consume more KV memory; the current fit estimate uses a fixed runtime allowance and is not a guarantee for every context length or GPU workload.
 - Overflow depends on host RAM, pinning, PCIe performance, and platform-specific synchronization. The current placement policy and automatic eligibility are conservative heuristics.
 - VQ 2-bit remains explicit experimental tooling: its 3B chat canary failed. `--codec auto` selects NF4 or NF4 overflow, never VQ.
 - Newer 3B and competitor claims still need their complete public run artifacts. Broad quality and comparative performance claims remain unestablished.
@@ -234,7 +234,10 @@ The Linux install path is implemented. CPU CLI tests no longer require a Windows
 | Turing, Hopper, Blackwell | Generation rejected by the current capability gate |
 | AMD, macOS, CPU-only | No generation path; CPU compression is separate |
 
-If `deepfold` is not on PATH, use `python -m gpu.cli`. The `setup` subcommand updates the current interpreter; the shell scripts create the repository `.venv`. Full instructions: [English](docs/install.md), [Russian](docs/install.ru.md).
+If `deepfold` is not on PATH, use `python -m gpu.cli`. That is the expected
+command in conda env `torch-gpu`. The `setup` subcommand updates the current
+interpreter; the shell scripts create the repository `.venv`. Full
+instructions: [English](docs/install.md), [Russian](docs/install.ru.md).
 
 ## 6. Quickstart
 
@@ -274,12 +277,20 @@ python -m pip install -e ".[internlm]"
 |---|---|
 | Enter | Submit |
 | Ctrl+J | Insert a newline, subject to terminal key handling |
+| Ctrl+C | Stop the current reply; at an empty prompt, twice to quit |
 | `/help` | Show commands |
-| `/stats` | Show the last turn's timings |
+| `/stats` | Show the last turn's timings and why it stopped |
 | `/clear` | Clear conversation history and reset the cache |
+| `/new` | Start a new saved conversation |
+| `/chats` | List and resume a saved conversation |
+| `/copy` | Copy the last reply (or `/copy all` for the whole chat) |
+| `/save [path]` | Write the last reply to a UTF-8 file |
+| `/agent on` `/agent off` | Toggle workspace tools (list/read/write/pytest) |
 | `/quit` or `/exit` | Exit |
 
-`chat` requires a terminal. For scripts, use `run --prompt`; answer text goes to stdout and runtime diagnostics to stderr. Conversation history must fit within `--max-seq`; clear the history or restart with a suitable context budget when needed.
+`chat` requires a terminal. For scripts, use `run --prompt`; answer text goes to stdout and runtime diagnostics to stderr. Conversation history is JSON under `$DEEPFOLD_HOME/chats` and must fit within `--max-seq` (chat default 2048). Each turn re-prefills that history; the GPU KV cache is not reused across turns. Chat defaults to 256 new tokens per reply (`run` stays at 64). Clear the history, `/new`, or raise `--max-seq` when the context fills. Streamed replies render markdown (bold, lists, fenced code) and approximate `$...$` / `$$` LaTeX as Unicode; `/copy` still stores the raw model text.
+
+`--agent` (or `/agent on`) lets the model call `list_dir`, `read_file`, `write_file`, and `run_tests` inside `--workspace` (default: the current directory). Writes and pytest ask `allow this tool? [y/N]` first. There is no general shell. Qwen2.5-14B follows the tool JSON more reliably than 3B.
 
 ## 7. CLI and configuration
 

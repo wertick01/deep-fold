@@ -1,280 +1,280 @@
-# Можно ли засунуть большую модель в VRAM, как ДНК в хромосому?
+# Can you fit a large model into VRAM the way DNA fits into a chromosome?
 
-Человеческим языком, с конца (успеет ли разжаться кусок): [ot-konca.md](ot-konca.md).
-
----
-
-**Короткий ответ.** Да, но не ZIP-ом и не «в десять раз» без цены. Скалярный lossless выжимает ~**30%** — это слабый декодер. С **ключом** (кодовая книга, базис, латент) можно уйти к 2 битам/вес и даже к килобайту на игрушечных задачах. «Насколько угодно» при этом упирается не в цифры как таковые, а в принцип ящиков плюс лимит времени на разжатие: либо это уже не та модель, либо генерация весов дороже самого счёта. 70B в BF16 — 141 ГБ, lossless — 95 ГБ, RTX 4090 — 24 ГБ. На карту модель сажает квантование, векторная книга и дистилляция, не AES.
+In human language, from the end (will the piece decompress in time): [ot-konca.md](ot-konca.md).
 
 ---
 
-## 1. Что именно предлагается
+**Short answer.** Yes, but not with ZIP and not “10×” without a cost. Scalar lossless squeezes ~**30%** — that is a weak decoder. With a **key** (codebook, basis, latent) you can go to 2 bits/weight and even to a kilobyte on toy tasks. “As much as you want” then hits not the numbers as such, but the pigeonhole principle plus a time limit on decompression: either it is no longer the same model, or generating the weights costs more than the compute itself. 70B in BF16 is 141 GB, lossless — 95 GB, RTX 4090 — 24 GB. Quantization, a vector codebook, and distillation put the model on the card, not AES.
 
-Схема звучит так:
+---
 
-1. Сжать всю модель «как zip» и целиком уложить в VRAM.
-2. По мере хода токена по слоям распаковывать только активный участок.
-3. Отработавшее сразу сжимать обратно.
+## 1. What is actually being proposed
 
-Это очень похоже на то, как РНК-полимераза II проходит нуклеосому: ДНК локально разматывается, считывается, и уже протранскрибированный кусок снова наматывается на гистоны ([Kujirai et al., Science 2019](https://www.science.org/doi/10.1126/science.aau9904); [Filipovski et al., Science 2022](https://www.science.org/doi/10.1126/science.abo3851)).
+The scheme sounds like this:
 
-В инференсе трансформера действительно есть «полимераза»: токен идёт по слоям строго по порядку, слой N+1 не нужен, пока не посчитан слой N. Значит, **держать в развёрнутом виде всю сеть сразу не обязательно**. Этот факт уже эксплуатируют FlexGen, llama.cpp и DeepSpeed: веса слоёв стримят из RAM/SSD.
+1. Compress the entire model “like zip” and put it wholly into VRAM.
+2. As the token walks the layers, unpack only the active stretch.
+3. Immediately compress the finished stretch back.
 
-Но внутри слоя картина другая. GPU считает `Y = WX` тайлами, а не «слева направо по файлу». Классический ZIP — последовательный поток без нормального random access. Для матричного ядра нужен кодек, который умеет прыгать к конкретному тайлу и распаковывать его за константное время. Поэтому рабочие системы сжимают не «файл модели», а **экспоненты чисел** и декодируют **тайл прямо в регистры Tensor Core**.
+This is very similar to how RNA polymerase II passes a nucleosome: DNA is locally unwound, read, and the already-transcribed stretch is wound back onto histones ([Kujirai et al., Science 2019](https://www.science.org/doi/10.1126/science.aau9904); [Filipovski et al., Science 2022](https://www.science.org/doi/10.1126/science.abo3851)).
 
-Ещё одна поправка к шагу 3. Повторно сжимать отработавший слой бессмысленно: сжатая копия и так лежит в HBM. Распакованный буфер просто выбрасывают. «Рекомпакция» в биологии нужна, потому что компактная форма *и есть* исходник. В GPU исходник — сжатый тензор; развёртка — расходник.
+In transformer inference there really is a “polymerase”: the token walks layers strictly in order, layer N+1 is not needed until layer N is computed. So **you do not have to keep the entire net expanded at once**. FlexGen, llama.cpp, and DeepSpeed already exploit this fact: they stream layer weights from RAM/SSD.
+
+Inside a layer the picture is different. The GPU computes `Y = WX` in tiles, not “left to right through the file”. Classic ZIP is a sequential stream without proper random access. A matrix kernel needs a codec that can jump to a specific tile and decompress it in constant time. So working systems compress not “the model file” but **the exponents of the numbers** and decode **the tile straight into Tensor Core registers**.
+
+One more correction to step 3. Re-compressing a finished layer is pointless: the compressed copy already sits in HBM. You just drop the unpacked buffer. “Recompaction” is needed in biology because the compact form *is* the source. On a GPU the source is the compressed tensor; the expansion is a consumable.
 
 ```
-HBM (сжатые веса, всегда)
-        │  загрузить тайл
+HBM (compressed weights, always)
+        │  load tile
         ▼
-SRAM / регистры  ── распаковать ──► Tensor Core GEMM
+SRAM / registers  ── decompress ──► Tensor Core GEMM
         │
-        └── буфер выбросить; сжатая копия остаётся
+        └── drop the buffer; the compressed copy stays
 ```
 
-Это буквально слоган ZipServ: *load-compressed, compute-decompressed* ([Fan et al., ASPLOS 2026](https://arxiv.org/abs/2603.17435)).
+This is literally ZipServ’s slogan: *load-compressed, compute-decompressed* ([Fan et al., ASPLOS 2026](https://arxiv.org/abs/2603.17435)).
 
 ---
 
-## 2. Где аналогия с ДНК точная, а где ломается
+## 2. Where the DNA analogy is exact, and where it breaks
 
-| Хроматин | Плотная LLM | Что из этого следует |
+| Chromatin | Dense LLM | What follows |
 |---|---|---|
-| Геном сжаты в ядре ~10⁴ раз | Веса в BF16 уже близки к своему энтропийному пределу | 10⁴× из zip не будет |
-| Большинство генов молчит | В dense-модели **каждый** вес читается на **каждый** токен | Нельзя «не распутывать» большую часть сети |
-| Экспрессия гена — редкое событие | MoE: активна малая доля экспертов | MoE — настоящая «экспрессия генов» |
-| Горячие гены в эухроматине, холодные в гетерохроматине | PowerInfer: hot-нейроны в VRAM, cold — в RAM | Селективная резидентность важнее архивации |
-| Полимераза идёт вдоль гена | Слои идут вдоль токена | Стриминг слоёв — валидная идея |
-| Внутри нуклеосомы доступ почти линейный | GEMM читает веса тайлами, не потоком | Нужен tile-codec, не DEFLATE |
-| FACT/Spt6 помогают рекомпакции | Prefetch следующего слоя, пока считается текущий | Перекрытие I/O и compute |
-| Алфавит ДНК — 4 буквы, много повторов | Мантисса и знак BF16 — почти шум | Словарь LZ77 не находит повторов |
+| Genome compressed in the nucleus ~10⁴× | BF16 weights are already close to their entropy limit | 10⁴× from zip will not happen |
+| Most genes are silent | In a dense model **every** weight is read on **every** token | You cannot “leave most of the net un-unwound” |
+| Gene expression is a rare event | MoE: a small share of experts is active | MoE is real “gene expression” |
+| Hot genes in euchromatin, cold in heterochromatin | PowerInfer: hot neurons in VRAM, cold in RAM | Selective residency matters more than archiving |
+| Polymerase walks along the gene | Layers walk along the token | Layer streaming is a valid idea |
+| Inside a nucleosome, access is almost linear | GEMM reads weights in tiles, not as a stream | You need a tile-codec, not DEFLATE |
+| FACT/Spt6 help recompaction | Prefetch the next layer while the current one is computed | Overlap I/O and compute |
+| DNA alphabet is 4 letters, many repeats | BF16 mantissa and sign are almost noise | An LZ77 dictionary finds no repeats |
 
-Главный разрыв: ДНК можно так сильно сжать, потому что **большая часть последовательности в данный момент не читается**. Dense LLM на каждом токене читает все параметры. Сжатие тогда ограничено не «насколько ловко упаковать файл», а **сколько информации в числах вообще есть**.
+The main gap: DNA can be compressed so hard because **most of the sequence is not being read at a given moment**. A dense LLM reads all parameters on every token. Compression is then bounded not by “how cleverly you pack the file” but by **how much information is in the numbers at all**.
 
-Ближе всего к биологии не zip, а три вещи:
+Closest to biology is not zip, but three things:
 
-1. **Mixture-of-Experts.** Mixtral-8×7B хранит **46.7B**, считает **12.9B** (2 из 8 экспертов). DeepSeek-V3: 671B на диске, **37B активны** на токен (~5.5%). Память всё равно нужна почти на всех экспертов, если они резидентны; зато compute падает. Это и есть «транскрибировать не весь геном».
-2. **PowerInfer и LLM in a Flash.** Активации нейронов подчиняются степенному закону: маленькое ядро «горячих» почти всегда включено. Горячие кладут в VRAM, холодные считают на CPU ([Song et al.](https://arxiv.org/abs/2312.12456)). Apple идёт дальше: с флеша на токен читают ~**2%** FFN, модель может быть **в 2 раза больше DRAM** ([LLM in a Flash](https://arxiv.org/abs/2312.11514)).
-3. **Онлайн-декомпрессия тайла.** DFloat11, ZipServ, NeuZip, Unweight — локальное unwinding нуклеосомы перед счётом.
-
----
-
-## 3. Почему обычный ZIP почти бесполезен
-
-Интуиция «веса — куча чисел, zip их сожмёт» сталкивается с теоремой Шеннона.
-
-BF16 — это 1 бит знака + 8 бит экспоненты + 7 бит мантиссы. По измерениям на моделях от долей миллиарда до триллиона параметров:
-
-- знак ≈ 1 бит энтропии из 1 (честная монета);
-- мантисса ≈ 7 из 7 (почти максимум);
-- экспонента ≈ **2.6 бита из 8**.
-
-Итого ~**10.6 бит информации на 16 бит хранения** — треть бюджета пустая, и вся пустота сидит в экспоненте. Величины весов после обучения узко кучкуются около 2⁻⁷…2⁻⁶, поэтому из 256 возможных байт экспоненты живые считанные значения: IBM сообщает, что **12 значений покрывают 99.9%** ([ZipNN, IBM Research](https://research.ibm.com/blog/Zip-NN-AI-compression); [DFloat11](https://arxiv.org/abs/2504.11651); [Fergus Finn, 2026](https://fergusfinn.com/blog/weight-entropy/)).
-
-LZ77 (сердце zip/gzip/zstd как «словаря») ищет повторяющиеся *последовательности байт*. У обученных весов их почти нет. NVIDIA прямо пишет: на dense-чекипонтах LZ4 и Bitcomp дают **~1.00×**, а выигрыш дают только энтропийные кодеки (Huffman / ANS) — порядка **1.14–1.18×** на смешанном чекпоинте и около **1.3×**, если отделить экспоненту ([nvCOMP + PyTorch checkpoints](https://developer.nvidia.com/blog/cut-checkpoint-costs-with-about-30-lines-of-python-and-nvidia-nvcomp/)). ZipNN: словарные методы «hardly achieve any data reduction»; нужен Huffman по байту экспоненты ([arXiv:2411.05239](https://arxiv.org/abs/2411.05239)).
-
-Отсюда практический потолок **lossless для BF16: ~30%**, то есть модель занимает ~70% исходного размера. Это не эвристика одной статьи — это Шеннон по эмпирическому распределению. Выше можно забраться только если:
-
-- модель «чистая» (после округления/конвертации мантисса тоже редкая) — ZipNN на таких видел **>50%**;
-- сжимать *дельту* двух похожих моделей (чекпоинты, LoRA) — повторов гораздо больше;
-- сначала квантовать, потом ещё раз энтропийно упаковать кодовые индексы.
-
-На INT4/FP4 теоретический зазор до Шеннона иногда рисуют как «ещё 6–10×» ([Approaching Shannon Bound](https://arxiv.org/html/2606.15789v1)). Это энтропия *уже квантованных символов*, часто из-за нулей и перекоса гистограммы. Реализовать 10× на GPU-тайле, не убив скорость decode, пока не удалось; реалистичная добавка поверх квантования — **ещё ~10–30%**.
+1. **Mixture-of-Experts.** Mixtral-8×7B stores **46.7B**, computes **12.9B** (2 of 8 experts). DeepSeek-V3: 671B on disk, **37B active** per token (~5.5%). Memory is still needed for almost all experts if they are resident; compute drops. That is “do not transcribe the whole genome”.
+2. **PowerInfer and LLM in a Flash.** Neuron activations follow a power law: a small core of “hot” ones is almost always on. Hot ones go in VRAM, cold ones are computed on CPU ([Song et al.](https://arxiv.org/abs/2312.12456)). Apple goes further: from flash they read ~**2%** of FFN per token, the model can be **2× larger than DRAM** ([LLM in a Flash](https://arxiv.org/abs/2312.11514)).
+3. **Online tile decompression.** DFloat11, ZipServ, NeuZip, Unweight — local nucleosome unwinding before compute.
 
 ---
 
-## 4. Что уже построено — не писать с нуля
+## 3. Why ordinary ZIP is almost useless
 
-Идея «сжато лежит, распутывается по мере счёта» в 2024–2026 стала отдельным направлением. Ниже — готовые кирпичи.
+The intuition “weights are a pile of numbers, zip will compress them” hits Shannon’s theorem.
 
-### 4.1. Lossless, веса остаются сжатыми в GPU
+BF16 is 1 sign bit + 8 exponent bits + 7 mantissa bits. Measurements on models from fractions of a billion to a trillion parameters:
 
-| Система | Что делает | Экономия | Как распаковывает | Ссылка |
+- sign ≈ 1 bit of entropy out of 1 (fair coin);
+- mantissa ≈ 7 out of 7 (almost the maximum);
+- exponent ≈ **2.6 bits out of 8**.
+
+Total ~**10.6 bits of information per 16 bits of storage** — a third of the budget is empty, and all of that emptiness sits in the exponent. Weight magnitudes after training cluster tightly around 2⁻⁷…2⁻⁶, so of 256 possible exponent bytes only a handful of values are live: IBM reports that **12 values cover 99.9%** ([ZipNN, IBM Research](https://research.ibm.com/blog/Zip-NN-AI-compression); [DFloat11](https://arxiv.org/abs/2504.11651); [Fergus Finn, 2026](https://fergusfinn.com/blog/weight-entropy/)).
+
+LZ77 (the heart of zip/gzip/zstd as a “dictionary”) looks for repeating *byte sequences*. Trained weights have almost none. NVIDIA writes it outright: on dense checkpoints LZ4 and Bitcomp give **~1.00×**, and the win comes only from entropy codecs (Huffman / ANS) — about **1.14–1.18×** on a mixed checkpoint and about **1.3×** if you split off the exponent ([nvCOMP + PyTorch checkpoints](https://developer.nvidia.com/blog/cut-checkpoint-costs-with-about-30-lines-of-python-and-nvidia-nvcomp/)). ZipNN: dictionary methods “hardly achieve any data reduction”; you need Huffman over the exponent byte ([arXiv:2411.05239](https://arxiv.org/abs/2411.05239)).
+
+Hence the practical ceiling **lossless for BF16: ~30%**, i.e. the model occupies ~70% of the original size. This is not one paper’s heuristic — it is Shannon on the empirical distribution. You can go higher only if:
+
+- the model is “clean” (after rounding/conversion the mantissa is sparse too) — ZipNN saw **>50%** on those;
+- you compress the *delta* of two similar models (checkpoints, LoRA) — many more repeats;
+- you quantize first, then entropy-pack the code indices again.
+
+On INT4/FP4 the theoretical gap to Shannon is sometimes drawn as “another 6–10×” ([Approaching Shannon Bound](https://arxiv.org/html/2606.15789v1)). That is the entropy of *already quantized symbols*, often from zeros and histogram skew. Realizing 10× on a GPU tile without killing decode speed has not happened yet; a realistic add-on on top of quantization is **another ~10–30%**.
+
+---
+
+## 4. What is already built — do not write from scratch
+
+The idea “stored compressed, unwound as you compute” became its own line of work in 2024–2026. Ready bricks below.
+
+### 4.1. Lossless, weights stay compressed on the GPU
+
+| System | What it does | Savings | How it unpacks | Link |
 |---|---|---|---|---|
-| **DFloat11** (NeurIPS 2025) | Huffman по экспоненте BF16 → ~11 бит/вес. Выход **бит-в-бит**. 70B: 141→95 ГБ; 405B: 812→551 ГБ | ~30% (68% размера) | Распаковка **блока** в HBM, затем GEMM. На batch=1 ≈ **2× медленнее** native BF16, пока ядро не fused | [статья](https://arxiv.org/abs/2504.11651), [код](https://github.com/LeanModels/DFloat11) |
-| **ZipServ** (ASPLOS 2026) | Фиксированная bitmap-схема TCA-TBE вместо переменной длины Huffman | до 30% | **ZipGEMM**: decode сразу в регистры Tensor Core, без промежуточного HBM | [статья](https://arxiv.org/abs/2603.17435), [код](https://github.com/HPMLL/ZipServ_ASPLOS26) |
-| **NeuZip** | ANS по экспоненте; есть lossy-вариант обрезки мантиссы | training Llama-3 8B: 31 → <16 ГБ; inference — ещё сильнее в lossy | GPU-параллельный ANS | [статья](https://arxiv.org/abs/2410.20650), [код](https://github.com/BorealisAI/neuzip) |
-| **Unweight** (Cloudflare) | Huffman экспонент MLP; тайл собирается в shared memory перед WGMMA | ~30% MLP, ~20% всей модели | fused kernel на Hopper | [отчёт](https://research.cloudflare.com/papers/unweight-2026.pdf) |
-| **ANS-тайлы «к Шеннону»** | rANS/tANS по тайлам, встык с GEMM, ещё и поверх INT4/AWQ | к 0.01–0.1 бит от предела; Mixtral-176B: batch 20 → 95 | decode в shared memory на каждый тайл GEMM | [статья](https://arxiv.org/html/2606.15789v1) |
-| **bf16_huffman_infer** | fused Huffman-GEMV по мотивам DFloat11 | ~25% VRAM | 80–90% скорости BF16, на 4060 Ti иногда *быстрее* BF16 (узкое горло — шина) | [код](https://github.com/lszxb/bf16_huffman_infer) |
+| **DFloat11** (NeurIPS 2025) | Huffman on the BF16 exponent → ~11 bits/weight. Output is **bit-identical**. 70B: 141→95 GB; 405B: 812→551 GB | ~30% (68% of size) | Unpack a **block** into HBM, then GEMM. At batch=1 ≈ **2× slower** than native BF16 until the kernel is fused | [paper](https://arxiv.org/abs/2504.11651), [code](https://github.com/LeanModels/DFloat11) |
+| **ZipServ** (ASPLOS 2026) | Fixed bitmap scheme TCA-TBE instead of variable-length Huffman | up to 30% | **ZipGEMM**: decode straight into Tensor Core registers, no intermediate HBM | [paper](https://arxiv.org/abs/2603.17435), [code](https://github.com/HPMLL/ZipServ_ASPLOS26) |
+| **NeuZip** | ANS on the exponent; there is a lossy mantissa-trim variant | training Llama-3 8B: 31 → <16 GB; inference — even stronger in lossy | GPU-parallel ANS | [paper](https://arxiv.org/abs/2410.20650), [code](https://github.com/BorealisAI/neuzip) |
+| **Unweight** (Cloudflare) | Huffman of MLP exponents; tile assembled in shared memory before WGMMA | ~30% MLP, ~20% of the whole model | fused kernel on Hopper | [report](https://research.cloudflare.com/papers/unweight-2026.pdf) |
+| **ANS tiles “toward Shannon”** | rANS/tANS per tile, back-to-back with GEMM, even on top of INT4/AWQ | to 0.01–0.1 bit of the bound; Mixtral-176B: batch 20 → 95 | decode into shared memory for each GEMM tile | [paper](https://arxiv.org/html/2606.15789v1) |
+| **bf16_huffman_infer** | fused Huffman-GEMV in the spirit of DFloat11 | ~25% VRAM | 80–90% of BF16 speed, on a 4060 Ti sometimes *faster* than BF16 (the bottleneck is the bus) | [code](https://github.com/lszxb/bf16_huffman_infer) |
 
-DFloat11 — самый прямой ответ на исходный вопрос. Сжатая модель живёт в GPU. Перед matmul слой разворачивается, после — отбрасывается. Llama 3.1 405B (810 ГБ BF16) благодаря этому влезает на **один узел 8×80 ГБ** вместо двух. Против CPU-offload тех же невлезших кусков: **2.3–46×** выше скорость генерации.
+DFloat11 is the most direct answer to the original question. The compressed model lives on the GPU. Before matmul the layer is expanded, after — discarded. Llama 3.1 405B (810 GB BF16) thus fits on **one 8×80 GB node** instead of two. Versus CPU-offload of the same pieces that would not fit: **2.3–46×** higher generation speed.
 
-ZipServ закрывает главную дыру DFloat11: отдельная распаковка в глобальную память занимает 1.56–3.44× времени самого GEMM. Слияние с Tensor Core не только экономит память, но и **ускоряет** инференс (до 2.21× ядро vs cuBLAS, ~1.22× end-to-end vs vLLM) — потому что по шине едет меньше байт, а decode на decode-фазе (batch=1) прячется за ожиданием памяти.
+ZipServ closes DFloat11’s main hole: a separate unpack into global memory takes 1.56–3.44× the GEMM itself. Fusion with Tensor Core not only saves memory but also **speeds up** inference (up to 2.21× kernel vs cuBLAS, ~1.22× end-to-end vs vLLM) — because fewer bytes travel the bus, and decode on the decode phase (batch=1) hides behind memory wait.
 
-### 4.2. ZIP-подобные кодеки — для диска и сети, не для VRAM
+### 4.2. ZIP-like codecs — for disk and network, not for VRAM
 
-**ZipNN** (IBM + BU/MIT/Dartmouth/TAU) — Huffman по отделённой экспоненте, до 80 ГБ/с распаковки на CPU, ~33% на BF16. Цель: Hugging Face, чекпоинты, трафик. GPU-версия «в пути». Это правильный zip для *доставки* модели, не для жизни в HBM ([статья](https://arxiv.org/abs/2411.05239), [код](https://github.com/zipnn/zipnn), [IBM](https://research.ibm.com/blog/Zip-NN-AI-compression)).
+**ZipNN** (IBM + BU/MIT/Dartmouth/TAU) — Huffman on the split-off exponent, up to 80 GB/s unpack on CPU, ~33% on BF16. Goal: Hugging Face, checkpoints, traffic. GPU version “on the way”. This is the right zip for *delivering* the model, not for living in HBM ([paper](https://arxiv.org/abs/2411.05239), [code](https://github.com/zipnn/zipnn), [IBM](https://research.ibm.com/blog/Zip-NN-AI-compression)).
 
-**nvCOMP** — аппаратный стек NVIDIA (LZ4, ZSTD, GDeflate, ANS, Bitcomp). На Blackwell есть даже отдельный **Decompression Engine**: до сотен ГБ/с, нулевая нагрузка на SM, для LZ4/Snappy/Deflate ([блог NVIDIA](https://developer.nvidia.com/blog/speeding-up-data-decompression-with-nvcomp-and-the-nvidia-blackwell-decompression-engine/)). Ирония: тот кодек, который железо жмёт бесплатно, **не сжимает веса**. Для весов нужен ANS/Huffman, который пока считают стриминговые мультипроцессоры. Железо уже идёт в сторону «храним сжатым в HBM», но кодек надо выбрать тот, у которого энтропия, а не словарь.
+**nvCOMP** — NVIDIA’s hardware stack (LZ4, ZSTD, GDeflate, ANS, Bitcomp). On Blackwell there is even a dedicated **Decompression Engine**: up to hundreds of GB/s, zero load on SMs, for LZ4/Snappy/Deflate ([NVIDIA blog](https://developer.nvidia.com/blog/speeding-up-data-decompression-with-nvcomp-and-the-nvidia-blackwell-decompression-engine/)). The irony: the codec that hardware squeezes for free **does not compress weights**. For weights you need ANS/Huffman, which streaming multiprocessors still compute. Hardware is already heading toward “store compressed in HBM”, but you have to pick the codec that has entropy, not a dictionary.
 
-### 4.3. Не zip, а «не все гены сразу»
+### 4.3. Not zip, but “not all genes at once”
 
-| Система | Идея | Когда выигрывает |
+| System | Idea | When it wins |
 |---|---|---|
-| **llama.cpp / GGUF** | mmap файла + `-ngl` слои в VRAM, остальное в RAM/SSD | 70B Q4 на 24 ГБ: часть слоёв на GPU, ~8–14 ток/с вместо 30+ |
-| **FlexGen** | Планировщик: веса/KV/активации по GPU–CPU–SSD; 4-bit | Высокий throughput большими батчами, не интерактивный decode |
-| **DeepSpeed ZeRO-Infinity** | Тренировка: параметры, градиенты, состояния оптимизатора на NVMe | Тренировка, не одиночный чат |
-| **DeltaZip** | База в VRAM, сжатая дельта fine-tune подгружается | Много адаптеров на одной базе, 6–8× на дельте | [arXiv:2312.05215](https://arxiv.org/abs/2312.05215) |
-| **MoE-Infinity / FloE** | Кэш горячих экспертов, остальные в RAM | Mixtral FP16 ~94 ГБ, из них ~67 ГБ — *спящие* эксперты |
-| **PowerInfer / PowerInfer-2** | Hot/cold нейроны; на телефоне — кластеры + UFS | До 11.7× vs llama.cpp на 4090; PowerInfer-2 до 27.8× на OnePlus 12 |
-| **LLM in a Flash** (Apple) | FFN с флеша, в DRAM окно активных нейронов | Модель до 2× DRAM; ~2% FFN с носителя на запрос |
+| **llama.cpp / GGUF** | mmap the file + `-ngl` layers in VRAM, the rest in RAM/SSD | 70B Q4 on 24 GB: some layers on GPU, ~8–14 tok/s instead of 30+ |
+| **FlexGen** | Scheduler: weights/KV/activations across GPU–CPU–SSD; 4-bit | High throughput with large batches, not interactive decode |
+| **DeepSpeed ZeRO-Infinity** | Training: parameters, gradients, optimizer states on NVMe | Training, not a single chat |
+| **DeltaZip** | Base in VRAM, compressed fine-tune delta is loaded | Many adapters on one base, 6–8× on the delta | [arXiv:2312.05215](https://arxiv.org/abs/2312.05215) |
+| **MoE-Infinity / FloE** | Cache hot experts, the rest in RAM | Mixtral FP16 ~94 GB, of which ~67 GB are *sleeping* experts |
+| **PowerInfer / PowerInfer-2** | Hot/cold neurons; on phone — clusters + UFS | Up to 11.7× vs llama.cpp on a 4090; PowerInfer-2 up to 27.8× on OnePlus 12 |
+| **LLM in a Flash** (Apple) | FFN from flash, DRAM holds a window of active neurons | Model up to 2× DRAM; ~2% FFN from storage per request |
 
-Offload проигрывает сжатию-в-VRAM по одной причине: PCIe 4.0 ×16 ≈ 32 ГБ/с, HBM — сотни гигабайт–терабайты в секунду. DFloat11 выигрывает у offload в десятки раз именно поэтому. SSD как «гетерохроматин» годится для редких экспертов и холодных нейронов, не для каждого слоя dense-модели на каждом токене.
+Offload loses to compression-in-VRAM for one reason: PCIe 4.0 ×16 ≈ 32 GB/s, HBM is hundreds of gigabytes–terabytes per second. DFloat11 beats offload by tens of times for exactly that reason. SSD as “heterochromatin” is fine for rare experts and cold neurons, not for every layer of a dense model on every token.
 
-### 4.4. Квантование — настоящий «zip, в котором ещё и считают»
+### 4.4. Quantization — the real “zip you also compute in”
 
-Это уже не про распутывание. INT4/AWQ/GPTQ/GGUF Q4 и BitNet хранят мало бит **и считают в этом формате**. Не надо восстанавливать BF16.
+This is no longer about unwinding. INT4/AWQ/GPTQ/GGUF Q4 and BitNet store few bits **and compute in that format**. No need to restore BF16.
 
-| Формат | 70B, веса | На 24 ГБ |
+| Format | 70B, weights | On 24 GB |
 |---|---|---|
-| BF16 | ~140 ГБ | нет |
-| DFloat11 / ZipNN lossless | ~95 ГБ | нет |
-| INT8 / Q8 | ~70–75 ГБ | нет |
-| Q4_K_M | ~42–43 ГБ | только с offload |
-| INT4 веса + KV отдельно | ~35–38 ГБ | впритык на 48 ГБ, не на 24 |
-| BitNet 1.58 (если так *обучать*) | теоретически ~14 ГБ | да, но это другая модель |
+| BF16 | ~140 GB | no |
+| DFloat11 / ZipNN lossless | ~95 GB | no |
+| INT8 / Q8 | ~70–75 GB | no |
+| Q4_K_M | ~42–43 GB | only with offload |
+| INT4 weights + KV separate | ~35–38 GB | barely on 48 GB, not on 24 |
+| BitNet 1.58 (if you *train* that way) | theoretically ~14 GB | yes, but that is a different model |
 
-BitNet b1.58 хранит веса в {−1, 0, +1}, пакует 4 значения в int8, в ядре распаковывает в SRAM и считает сложениями ([технический отчёт](https://arxiv.org/html/2504.12285v2)). Паттерн тот же «pack–load–unpack–compute», но сжатие **lossy и вшито в обучение**. Из готовой BF16-70B так не сделать без переобучения.
+BitNet b1.58 stores weights in {−1, 0, +1}, packs 4 values into int8, unpacks in SRAM in the kernel and computes with adds ([technical report](https://arxiv.org/html/2504.12285v2)). Same “pack–load–unpack–compute” pattern, but compression is **lossy and baked into training**. You cannot do this from a finished BF16-70B without retraining.
 
-Практический вывод для локального железа в 2026: люди запускают 70B на 24 ГБ не zip-ом, а **Q4 + частичный offload**. Lossless-30% — способ впихнуть *неквантованную* 405B на один 8×80 узел или выиграть batch size в сервисе, где бит-в-бит совпадение с BF16 юридически важно.
+Practical takeaway for local hardware in 2026: people run 70B on 24 GB not with zip, but with **Q4 + partial offload**. Lossless-30% is a way to squeeze an *unquantized* 405B onto one 8×80 node or to win batch size in a service where bit-identical match to BF16 matters legally.
 
 ---
 
-## 5. Второй желудок: KV-cache
+## 5. The second stomach: KV-cache
 
-Даже идеальный zip весов не решает всю память. KV-cache растёт с длиной контекста и числом запросов. У Llama 3 70B (GQA) это порядка **0.3 МБ на токен**; на 128K это десятки гигабайт, сопоставимые с самой моделью. Веса статические и делятся между пользователями; KV — нет.
+Even a perfect weight zip does not solve all memory. KV-cache grows with context length and request count. For Llama 3 70B (GQA) that is on the order of **0.3 MB per token**; at 128K that is tens of gigabytes, comparable to the model itself. Weights are static and shared across users; KV is not.
 
-Поэтому «хромосома модели» и «хромосома разговора» — разные объекты. Для KV другие методы: PagedAttention (vLLM), квантование KV, окна (StreamingLLM), выборочное хранение (H2O, SnapKV), MLA у DeepSeek. LEXI отдельно жмёт экспоненты активаций и кэша на chiplet-шине ([arXiv:2603.15589](https://arxiv.org/html/2603.15589)).
+So the “model chromosome” and the “conversation chromosome” are different objects. For KV, other methods: PagedAttention (vLLM), KV quantization, windows (StreamingLLM), selective storage (H2O, SnapKV), MLA in DeepSeek. LEXI separately squeezes activation and cache exponents on a chiplet bus ([arXiv:2603.15589](https://arxiv.org/html/2603.15589)).
 
 ---
 
-## 6. «Это просто цифры, ключ сожмёт насколько угодно»
+## 6. “These are just numbers, a key will compress as much as you want”
 
-Первая оценка «~30%» — про очень слабый декодер: каждое число независимо, гистограмма экспоненты. Если разрешить **ключ** (кодовую книгу, базис, маленькую сеть-генератор), граница другая. Но «насколько угодно» тоже ломается, и не на жадности архиватора.
+The first “~30%” estimate is about a very weak decoder: each number independent, exponent histogram. If you allow a **key** (codebook, basis, small generator net), the bound is different. But “as much as you want” also breaks, and not on the archiver’s greed.
 
-### Три разных «ключа» — их путают
+### Three different “keys” — they get mixed up
 
-**Криптоключ (AES).** С ним числа можно спрятать и вернуть. Размер не падает: шифротекст = исходник. Это не сжатие.
+**Crypto key (AES).** With it you can hide the numbers and get them back. Size does not drop: ciphertext = source. That is not compression.
 
-**Колмогоровский ключ.** Самая короткая программа, которая печатает эти веса. Для любой конечной строки такая программа есть, и она может быть короткой. Для Llama формально подходит рецепт: датасет + код тренера + seed. Описание короткое («вот этот GitHub и этот торрент»). Но:
+**Kolmogorov key.** The shortest program that prints these weights. For any finite string such a program exists, and it can be short. For Llama a recipe formally works: dataset + trainer code + seed. The description is short (“this GitHub and this torrent”). But:
 
-- если ключ должен быть **самодостаточным**, внутрь надо положить обучающие данные. Llama 3: порядка 15T токенов, это **десятки терабайт текста** — больше, чем 810 ГБ весов. Веса уже сжатие интернета, не наоборот;
-- если ключ — **ссылка** («скачай Llama-3-70B»), сжать можно до имени файла. Данные лежат у Meta, не в вашей VRAM;
-- «разжать» такой ключ = переобучить модель. Это не инференс.
+- if the key must be **self-contained**, you have to put the training data inside. Llama 3: on the order of 15T tokens, that is **tens of terabytes of text** — more than 810 GB of weights. The weights are already a compression of the internet, not the reverse;
+- if the key is a **reference** (“download Llama-3-70B”), you can compress to a filename. The data lives at Meta, not in your VRAM;
+- “decompressing” such a key = retraining the model. That is not inference.
 
-**Рабочий ключ: декодер, который лежит рядом и отрабатывает за миллисекунды.** Кодовая книга, факторы SVD, seed + латент, гиперсеть. Сжатый размер = |ключ| + |индексы|. Дальше работает принцип ящиков: ключ из k бит порождает максимум 2^k разных моделей. Чтобы попасть **точно** в данную обученную 70B, эта точка должна лежать в образе декодера. Случайный ГПСЧ из короткого seed даёт шум, не Llama. Значит, либо декодер богатый (ключ большой), либо попадание приближённое — и это уже не та же модель.
+**Working key: a decoder that sits alongside and finishes in milliseconds.** Codebook, SVD factors, seed + latent, hypernetwork. Compressed size = |key| + |indices|. Then the pigeonhole principle applies: a k-bit key yields at most 2^k different models. To hit **exactly** this trained 70B, that point must lie in the decoder’s image. A random PRNG from a short seed gives noise, not Llama. So either the decoder is rich (the key is large), or the hit is approximate — and that is no longer the same model.
 
-Правильный предел — не «энтропия байт», а **сложность Колмогорова с лимитом времени** (сложность Левина): программа имеет право быть короткой, только если ещё и быстро заканчивается. Инференс требует миллисекунд. Переобучение и перебор программ выбывают.
+The right limit is not “byte entropy” but **time-bounded Kolmogorov complexity** (Levin complexity): a program is allowed to be short only if it also finishes quickly. Inference needs milliseconds. Retraining and searching over programs drop out.
 
-### Векторный способ — он есть, и это не zip
+### The vector way — it exists, and it is not zip
 
-Вес — не скаляр в вакууме. Строка матрицы, группа из 8 соседних чисел, тайл GEMM — это вектор. Если векторы живут в маленьком словаре, хранят индекс, а не координаты.
+A weight is not a scalar in a vacuum. A matrix row, a group of 8 neighboring numbers, a GEMM tile — that is a vector. If the vectors live in a small dictionary, you store an index, not coordinates.
 
-Так и делают:
+That is what people do:
 
-- **Deep Compression** (Han et al., 2015): прунинг + общая кодовая книга (k-means) + Huffman. Прообраз «ключа-словаря».
-- **AQLM** ([Egiazarian et al., 2024](https://arxiv.org/abs/2401.06118)): группа из 8–16 весов = сумма векторов из выученных книг. Это классическое additive / product quantization из поиска ближайших соседей. На практике ~**2–3 бита/вес**, на 2 битах — лучший Pareto среди PTQ. Индекс — и есть ключ в кодовую книгу.
-- **GPTVQ, QuIP#:** векторная / решёточная квантизация; книга фиксированная (решётка E8) или выученная.
-- **SVD-LLM, LoRA, Tensor-Train:** ключ = низкоранговые факторы. `W ≈ UV`. На инференсе можно **не разворачивать** W: считать `(xU)V`. Это идеальный «векторный zip» для GPU.
-- **Kilobyte Models** ([Dhayalkar, 2026](https://arxiv.org/html/2608.00860)): модель = **seed + квантованный латент**. Случайный базис восстанавливается из seed, веса = f(z, seed). На MNIST 4-битная сеть в **2 КБ**. Это буквально «правильный ключ».
+- **Deep Compression** (Han et al., 2015): pruning + a shared codebook (k-means) + Huffman. Prototype of the “dictionary key”.
+- **AQLM** ([Egiazarian et al., 2024](https://arxiv.org/abs/2401.06118)): a group of 8–16 weights = a sum of vectors from learned books. Classic additive / product quantization from nearest-neighbor search. In practice ~**2–3 bits/weight**, at 2 bits — the best Pareto among PTQ. The index *is* the key into the codebook.
+- **GPTVQ, QuIP#:** vector / lattice quantization; the book is fixed (E8 lattice) or learned.
+- **SVD-LLM, LoRA, Tensor-Train:** key = low-rank factors. `W ≈ UV`. At inference you can **not expand** W: compute `(xU)V`. That is the ideal “vector zip” for a GPU.
+- **Kilobyte Models** ([Dhayalkar, 2026](https://arxiv.org/html/2608.00860)): model = **seed + quantized latent**. A random basis is restored from the seed, weights = f(z, seed). On MNIST a 4-bit net in **2 KB**. This is literally the “right key”.
 
-Низкая **внутренняя размерность** ландшафта — не фантазия. Li et al. учили сети в случайном подпространстве и сжимали >100× на маленьких задачах. Aghajanyan et al.: у RoBERTa fine-tune задачи влезает в **~200** случайных координат (90% качества MRPC). VeRA, NOLA, GaLore — из той же семьи: замороженный случайный базис + короткий ключ.
+Low **intrinsic dimension** of the landscape is not fantasy. Li et al. trained nets in a random subspace and compressed >100× on small tasks. Aghajanyan et al.: a RoBERTa fine-tune task fits in **~200** random coordinates (90% of MRPC quality). VeRA, NOLA, GaLore — same family: frozen random basis + short key.
 
-### Почему не «насколько угодно»
+### Why not “as much as you want”
 
-Потому что три требования нельзя удовлетворить сразу.
+Because three requirements cannot be satisfied at once.
 
-1. **Это должна быть та же модель (бит-в-бит).** Тогда векторный lossless почти не выигрывает: уникальных 8-мерных групп в 70B почти столько же, сколько групп. Кодовая книга без коллизий ≥ самих весов. 30% Huffman — потолок именно для *точного* восстановления при быстром декодере.
-2. **Качество можно чуть отдать.** Тогда «насколько угодно» превращается в ручку rate–distortion. 4 бита — почти та же 70B. 2 бита (AQLM) — уже край, но живой. 1.58 бита (BitNet) — другая модель, так *учат*. Дистилляция 70B→8B — тоже ключ: маленькая сеть. Дальше качество падает не из-за «не умеем сжать цифры», а потому что **в весах лежит информация о мире**, и дырявая проекция её выбрасывает.
-3. **Разжать надо на лету, пик VRAM = ключ + один слой.** Тут ключ может быть крошечным, но **транскрипция стоит FLOP**. Схема Kilobyte: θ = tanh(W₀z + b₀), W₀ не хранят, а сеют блоками из seed. Чтобы материализовать слой ~0.9B параметров из латента размерности d, нужно ~0.9B·d умножений. При d = 16k это ~10¹³ операций **на слой**, на токен, на 80 слоёв — часы, не чат. Биология может ждать полимеразу; пользователь нет. Выход: не генерировать W, а считать в факторизованном виде `(xU)V` — и снова упираемся в ранг, не в магию ключа.
+1. **It must be the same model (bit-identical).** Then vector lossless almost does not win: unique 8-dimensional groups in 70B are almost as many as groups. A collision-free codebook ≥ the weights themselves. Huffman 30% is the ceiling precisely for *exact* recovery with a fast decoder.
+2. **Quality can be given up a little.** Then “as much as you want” becomes a rate–distortion knob. 4 bits — almost the same 70B. 2 bits (AQLM) — already the edge, but alive. 1.58 bits (BitNet) — a different model, that is how they *train*. Distillation 70B→8B is also a key: a small net. Further, quality drops not because “we cannot compress numbers” but because **the weights hold information about the world**, and a leaky projection throws it away.
+3. **You have to decompress on the fly, peak VRAM = key + one layer.** Here the key can be tiny, but **transcription costs FLOPs**. Kilobyte scheme: θ = tanh(W₀z + b₀), W₀ is not stored, it is seeded in blocks from the seed. To materialize a layer of ~0.9B parameters from a latent of dimension d, you need ~0.9B·d multiplies. At d = 16k that is ~10¹³ operations **per layer**, per token, over 80 layers — hours, not chat. Biology can wait for polymerase; a user cannot. The way out: do not generate W, compute in factored form `(xU)V` — and you hit rank again, not key magic.
 
-Fine-tune (MRPC, LoRA) имеет крошечную внутреннюю размерность, потому что база уже содержит мир. **Предобучение** — это и есть сжатие текста в веса. Сжать ещё на три порядка без потерь = сжать компрессор лучше, чем позволяет его содержание. Overparameterization даёт зазор (лотерейный билет, низкий ранг, 2-bit VQ), не бесконечность.
+Fine-tune (MRPC, LoRA) has tiny intrinsic dimension because the base already contains the world. **Pretraining** *is* compressing text into weights. Compressing another three orders of magnitude losslessly = compressing the compressor better than its content allows. Overparameterization gives slack (lottery ticket, low rank, 2-bit VQ), not infinity.
 
-### Ключ из самой модели, кусками, потом сшить
+### A key from the model itself, in pieces, then stitch
 
-Обучающий текст здесь ни при чём. Рецепт «датасет + seed» был только мысленным пределом Колмогорова. Рабочий ключ вынимают **из уже посчитанной W**, кусок за куском, без повторного обучения на интернете.
+The training text has nothing to do with this. The “dataset + seed” recipe was only a Kolmogorov thought-limit. A working key is taken **from an already computed W**, piece by piece, without retraining on the internet.
 
-Схема ровно та, что вы описали:
+The scheme is exactly what you described:
 
 ```
-W  →  нарезать на куски (слой / группа каналов / 8–128 соседних весов)
-   →  подогнать ключ K_i под кусок:  D(K_i, индексы) ≈ W_i
-   →  хранить K_i + индексы
-инференс: по карте соединений взять нужный кусок, разжать, посчитать, выбросить
+W  →  slice into pieces (layer / channel group / 8–128 neighboring weights)
+   →  fit a key K_i to the piece:  D(K_i, indices) ≈ W_i
+   →  store K_i + indices
+inference: take the needed piece by the connection map, decompress, compute, drop
 ```
 
-Карта соединений уже есть: это просто индексы тензора `(слой, строка, столбец)`. GEMM и так сшивает тайлы в одном месте. Отдельный «граф швов» изобретать не нужно.
+The connection map already exists: it is just tensor indices `(layer, row, column)`. GEMM already stitches tiles in one place. You do not need to invent a separate “seam graph”.
 
-Так уже делают, и ключ действительно учат по модели:
+This is already done, and the key is indeed learned from the model:
 
-- **AQLM** — ключ = кодовые книги слоя, кусок = 8–16 соседних весов. Книги подгоняют под эту матрицу (k-means / AQ), индексы пишут в каждую группу. На инференсе группа собирается как сумма векторов книги.
-- **XFP** — на слой библиотека из 32 книг; группа из 128 весов выбирает, какой ключ из библиотеки ей подходит.
-- **AAAC** — две книги на слой, группа берёт одну из двух.
-- **Neural Weight Compression** ([Ryu et al., 2025](https://arxiv.org/html/2510.11234v3)) — нейрокодек: анализ/синтез учат **на датасете из кусков весов**. Вопрос статьи буквально: *можно ли сжатие весов выучить из данных, где данные — сами веса.*
-- **NeRN** — маленький MLP по координате `(слой, фильтр, канал)` восстанавливает кусок. Ключ = веса этого MLP, выученные по pretrained-сети.
+- **AQLM** — key = the layer’s codebooks, piece = 8–16 neighboring weights. Books are fit to this matrix (k-means / AQ), indices are written into each group. At inference the group is assembled as a sum of book vectors.
+- **XFP** — a library of 32 books per layer; a group of 128 weights picks which key from the library fits it.
+- **AAAC** — two books per layer, a group takes one of the two.
+- **Neural Weight Compression** ([Ryu et al., 2025](https://arxiv.org/html/2510.11234v3)) — a neural codec: analysis/synthesis trained **on a dataset of weight pieces**. The paper’s question is literally: *can weight compression be learned from data, where the data are the weights themselves.*
+- **NeRN** — a small MLP on the coordinate `(layer, filter, channel)` restores a piece. Key = the weights of that MLP, learned from the pretrained net.
 
-Дробить слой на группы — нормально. Разницы «сошьётся / не сошьётся» нет: линейный слой есть сумма вкладов групп. Если числа в группах близки к исходным, `Wx` сойдётся.
+Splitting a layer into groups is fine. There is no “will stitch / will not stitch” difference: a linear layer is the sum of the groups’ contributions. If the numbers in the groups are close to the original, `Wx` will converge.
 
-Другое дело — **дробление само не уменьшает сумму бит.**
+Another matter — **splitting itself does not reduce the sum of bits.**
 
-Полный размер = Σ|K_i| + Σ|индексы_i|. Нарезали на тысячу кусков с тысячей независимых ключей — можете **раздуть** хранение: каждая книга занимает место. Выигрыш появляется, когда ключ **общий**, а куски только выбирают из него (одна рибосома, много кодонов). Поэтому в проде не «свой автоэнкодер на каждый кусок», а **библиотека на слой + короткие индексы**. Слишком мелкая нарезка → раздув книг. Слишком крупная (весь слой одним SVD) → слой высокого ранга, ключ снова большой.
+Full size = Σ|K_i| + Σ|indices_i|. Slice into a thousand pieces with a thousand independent keys — you can **inflate** storage: each book takes space. The win appears when the key is **shared** and the pieces only pick from it (one ribosome, many codons). So in prod it is not “its own autoencoder per piece” but **a library per layer + short indices**. Too fine a cut → book bloat. Too coarse (the whole layer as one SVD) → a high-rank layer, the key is large again.
 
-Пик VRAM при этом реально падает до «ключ + текущий кусок», если разжимать-считать-выбрасывать. Внутри dense-слоя на один токен всё равно нужны **все** группы: `y = Wx` трогает каждую колонку. Нарезка даёт конвейер и fused-тайл (AQLM/ZipServ), а не право пропустить половину слоя. Пропустить кусок можно, только если соответствующий вход ноль (разреженность x) или кусок — чужой эксперт MoE.
+Peak VRAM really does drop to “key + current piece” if you decompress-compute-drop. Inside a dense layer, on one token you still need **all** groups: `y = Wx` touches every column. Slicing gives a pipeline and a fused tile (AQLM/ZipServ), not the right to skip half the layer. You can skip a piece only if the corresponding input is zero (sparsity of x) or the piece is someone else’s MoE expert.
 
-Ещё: ключ, выученный только как `D(K) ≈ W`, хранит цифры. Часто лучше учить так, чтобы `D(K) x ≈ Wx` на короткой калибровке. Это не «приложить Википедию как ключ», а несколько тысяч предложений, чтобы понять, какие ошибки в W портят выход. Швы тогда сходятся по **функции**, не по битам.
+Also: a key learned only as `D(K) ≈ W` stores digits. It is often better to train so that `D(K) x ≈ Wx` on a short calibration. That is not “attach Wikipedia as a key”, but a few thousand sentences to see which errors in W spoil the output. Seams then converge on **function**, not bits.
 
-Итог: несколько ключей на куски + карта индексов — правильная архитектура, она же ДНК (рибосома общая, гены локальные). Разница не в швах, а в том, что сумма ключей и индексов всё равно должна унести информацию кусков. Общий ключ на слой это делает; уникальный ключ на каждый байт — нет.
-
----
+Bottom line: several keys on pieces + an index map is the right architecture, the same as DNA (ribosome shared, genes local). The difference is not in the seams, but in that the sum of keys and indices still has to carry the pieces’ information. A shared key per layer does that; a unique key per byte does not.
 
 ---
 
-## 7. Насколько это реально — шкала честности
+---
 
-**Уже работает.** Хранить BF16-модель сжатой в VRAM и распутывать слой/тайл перед GEMM. Экономия ~30%, качество = оригинал. Код: DFloat11, ZipServ, NeuZip, Unweight.
+## 7. How real this is — an honesty scale
 
-**Работает, но это не zip.** Квантование 4 бит даёт ~4× и считает без полной распаковки в BF16. Для локального 70B это основной путь.
+**Already works.** Store a BF16 model compressed in VRAM and unwind a layer/tile before GEMM. Savings ~30%, quality = original. Code: DFloat11, ZipServ, NeuZip, Unweight.
 
-**Работает как генная экспрессия.** MoE и hot/cold нейроны: большую часть параметров можно не трогать на данном токене. Память всё равно почти полная, если всё резидентно; выигрыш — compute и возможность держать холодное в RAM.
+**Works, but it is not zip.** 4-bit quantization gives ~4× and computes without a full unpack to BF16. For local 70B this is the main path.
 
-**Плохая идея.** Целиковый zip-поток на всю модель + последовательный unzip + повторное сжатие отработавшего. Нет random access, LZ77 не сжимает, recompress жжёт SM зря, промежуточный BF16-буфер слоя съедает выигрыш.
+**Works as gene expression.** MoE and hot/cold neurons: most parameters can be left untouched on a given token. Memory is still almost full if everything is resident; the win is compute and the ability to keep cold in RAM.
 
-**Жёсткий потолок lossless при фиксированном быстром декодере.** Для обычной BF16-LLM и скалярного Huffman — около трети. С ключом (книга, базис, латент) lossless всё равно упирается в принцип ящиков; «насколько угодно» начинается только как lossy. См. §6.
+**A bad idea.** A whole-file zip stream of the entire model + sequential unzip + re-compress of the finished stretch. No random access, LZ77 does not compress, recompress burns SMs for nothing, an intermediate BF16 layer buffer eats the win.
 
-**Железо идёт туда же.** Blackwell Decompression Engine — ставка NVIDIA на «HBM хранит сжатое». Пока бесплатный блок заточен под аналитические кодеки. Следующий логичный шаг индустрии — fused decompress-GEMM и, возможно, ANS в фиксированной логике.
+**Hard ceiling of lossless with a fixed fast decoder.** For an ordinary BF16 LLM and scalar Huffman — about a third. With a key (book, basis, latent) lossless still hits the pigeonhole principle; “as much as you want” starts only as lossy. See §6.
+
+**Hardware is going the same way.** Blackwell Decompression Engine — NVIDIA’s bet on “HBM stores compressed”. For now the free block is tuned for analytical codecs. The next logical industry step is fused decompress-GEMM and, possibly, ANS in fixed logic.
 
 ---
 
-## 8. Если собирать систему, а не статью
+## 8. If you are assembling a system, not a paper
 
-Не начинать с zip. Стек из готового:
+Do not start with zip. A stack from ready parts:
 
-1. **Формат хранения.** Huffman/ANS по экспоненте BF16 (DFloat11 / ZipNN) или TCA-TBE (ZipServ), если нужна скорость. Для уже квантованных весов — тайловый ANS поверх GGUF/AWQ.
-2. **Исполнение.** Fused decompress-GEMM. Распаковка в shared memory / регистры, не в новый тензор в HBM. Prefetch следующего слоя.
-3. **Архитектура.** Если цель — локально большая модель, брать MoE и класть routed experts в RAM (llama.cpp tensor override, MoE-Infinity, FloE), attention и shared expert — в VRAM.
-4. **Потери по согласию.** Q4/AWQ, если 30% мало. BitNet — только если готовы учить с нуля.
-5. **Не трогать KV тем же zip.** Отдельный бюджет.
+1. **Storage format.** Huffman/ANS on the BF16 exponent (DFloat11 / ZipNN) or TCA-TBE (ZipServ) if you need speed. For already quantized weights — tiled ANS on top of GGUF/AWQ.
+2. **Execution.** Fused decompress-GEMM. Unpack into shared memory / registers, not into a new tensor in HBM. Prefetch the next layer.
+3. **Architecture.** If the goal is a locally large model, take MoE and put routed experts in RAM (llama.cpp tensor override, MoE-Infinity, FloE), attention and the shared expert — in VRAM.
+4. **Loss by consent.** Q4/AWQ if 30% is not enough. BitNet — only if you are ready to train from scratch.
+5. **Do not touch KV with the same zip.** Separate budget.
 
-Грубая арифметика «влезет ли»:
+Rough arithmetic “will it fit”:
 
-- 8B BF16 16 ГБ → DFloat11 10.9 ГБ → комфортно на 16–24 ГБ вместе с коротким KV.
-- 70B BF16 141 ГБ → DFloat11 95 ГБ → всё ещё не влезает даже в 80 ГБ. Q4 ~43 ГБ → 48 ГБ карта или 2×24. На одной 24 ГБ — только Q4 + offload. Стримить 95 ГБ по PCIe 4.0 (~32 ГБ/с) теоретически даёт доли токена в секунду.
-- 405B BF16 812 ГБ → DFloat11 551 ГБ → один узел 8×80 ГБ (640 ГБ) впритык, запас ~90 ГБ на KV, не на 128k контекст. Практичнее официальный FP8.
-- 671B MoE (DeepSeek-V3): считать 37B, хранить сотни гигабайт; без квантования экспертов и их offload потребительский GPU бесполезен.
-
----
-
-## 9. Итог одной фразой
-
-Идея верная в механике (резидентная сжатая копия + локальная распаковка по ходу «полимеразы»-слоя) и уже существует под именами DFloat11/ZipServ/NeuZip. Скалярный zip отдаёт ~30%. **Ключ** (кодовая книга, базис, латент) бьёт этот потолок, но не «насколько угодно»: либо теряете точность, либо платите FLOP на генерацию весов, либо ключ сам разрастается до модели. Живой векторный путь — AQLM/GPTVQ, SVD без материализации W и дистилляция, не AES и не gzip.
+- 8B BF16 16 GB → DFloat11 10.9 GB → comfortable on 16–24 GB together with a short KV.
+- 70B BF16 141 GB → DFloat11 95 GB → still does not fit even in 80 GB. Q4 ~43 GB → a 48 GB card or 2×24. On a single 24 GB — only Q4 + offload. Streaming 95 GB over PCIe 4.0 (~32 GB/s) theoretically gives fractions of a token per second.
+- 405B BF16 812 GB → DFloat11 551 GB → one 8×80 GB node (640 GB) is tight, ~90 GB left for KV, not for 128k context. The official FP8 is more practical.
+- 671B MoE (DeepSeek-V3): compute 37B, store hundreds of gigabytes; without expert quantization and their offload a consumer GPU is useless.
 
 ---
 
-## Источники
+## 9. Bottom line in one sentence
 
-**Lossless веса и энтропия**
+The idea is right in the mechanics (resident compressed copy + local unpack as the “polymerase”-layer walks) and already exists under the names DFloat11/ZipServ/NeuZip. Scalar zip yields ~30%. A **key** (codebook, basis, latent) beats that ceiling, but not “as much as you want”: either you lose accuracy, or you pay FLOPs to generate weights, or the key itself grows to a model. The live vector path is AQLM/GPTVQ, SVD without materializing W, and distillation, not AES and not gzip.
+
+---
+
+## Sources
+
+**Lossless weights and entropy**
 
 - [Zhang et al. DFloat11. arXiv:2504.11651](https://arxiv.org/abs/2504.11651) · [GitHub](https://github.com/LeanModels/DFloat11)
 - [Hershcovitch et al. ZipNN. arXiv:2411.05239](https://arxiv.org/abs/2411.05239) · [GitHub](https://github.com/zipnn/zipnn) · [IBM Research](https://research.ibm.com/blog/Zip-NN-AI-compression)
@@ -285,7 +285,7 @@ W  →  нарезать на куски (слой / группа каналов
 - [Finn. In search of wasted bits (2026)](https://fergusfinn.com/blog/weight-entropy/)
 - [LEXI: lossless exponent coding](https://arxiv.org/html/2603.15589)
 
-**GPU-кодеки и железо**
+**GPU codecs and hardware**
 
 - [NVIDIA nvCOMP](https://developer.nvidia.com/nvcomp)
 - [Cut checkpoint costs with nvCOMP](https://developer.nvidia.com/blog/cut-checkpoint-costs-with-about-30-lines-of-python-and-nvidia-nvcomp/)
@@ -302,7 +302,7 @@ W  →  нарезать на куски (слой / группа каналов
 - [FloE: on-the-fly MoE. arXiv:2505.05950](https://arxiv.org/abs/2505.05950)
 - [llama.cpp MoE offload guide](https://huggingface.co/blog/Doctor-Shotgun/llamacpp-moe-offload-guide)
 
-**Квантование, векторы и ключ-декодер**
+**Quantization, vectors, and the key-decoder**
 
 - [BitNet b1.58 2B4T](https://arxiv.org/html/2504.12285v2)
 - [bitnet.cpp](https://aka.ms/bitnet)
@@ -316,7 +316,7 @@ W  →  нарезать на куски (слой / группа каналов
 - [Ashkenazi et al. NeRN. arXiv:2212.13554](https://arxiv.org/abs/2212.13554)
 - [XFP adaptive codebooks](https://arxiv.org/html/2605.14844v1)
 
-**Хроматин (для аналогии)**
+**Chromatin (for the analogy)**
 
 - [Kujirai et al. Nucleosome transition during Pol II passage. Science 2019](https://www.science.org/doi/10.1126/science.aau9904)
 - [Filipovski et al. Nucleosome retention during elongation. Science 2022](https://www.science.org/doi/10.1126/science.abo3851)

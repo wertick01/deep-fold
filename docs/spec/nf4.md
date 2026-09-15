@@ -1,40 +1,40 @@
-# Кодек A: group-wise NF4, группа 64 (CPU)
+# Codec A: group-wise NF4, group 64 (CPU)
 
-Roundtrip-целостность этапа A. Не контейнер, не VQ, не INT4-RTN, не GPTQ/AWQ, не double-quant шкал.
+Stage-A roundtrip integrity. Not the container, not VQ, not INT4-RTN, not GPTQ/AWQ, not double-quant of scales.
 
-Каноническая реализация — пакет `internal/nf4` на Go 1.22 без CGO. По этой спеке пишутся table-driven тесты и золотой hex **без Python и без bitsandbytes**.
+Canonical implementation — package `internal/nf4` on Go 1.22 without CGO. From this spec table-driven tests and golden hex are written **without Python and without bitsandbytes**.
 
-Нормативные источники уровней: hardcoded-таблица `get_4bit_type("nf4")` в [bitsandbytes/functional.py](https://github.com/bitsandbytes-foundation/bitsandbytes/blob/main/bitsandbytes/functional.py) и LUT `nf4_dequantization_lut` в `csrc/kernels.cu`. Это те же 16 литералов, что использует QLoRA (Dettmers et al., 2023). Квантили `scipy.stats.norm.ppf` заново **не** считать: канон — литералы §1, не таблица из PDF.
+Normative sources of the levels: the hardcoded table `get_4bit_type("nf4")` in [bitsandbytes/functional.py](https://github.com/bitsandbytes-foundation/bitsandbytes/blob/main/bitsandbytes/functional.py) and the LUT `nf4_dequantization_lut` in `csrc/kernels.cu`. These are the same 16 literals QLoRA uses (Dettmers et al., 2023). Do **not** recompute `scipy.stats.norm.ppf` quantiles: the canon is the §1 literals, not a table from the PDF.
 
 ---
 
-## 0. Зафиксированные константы и не-цели
+## 0. Frozen constants and non-goals
 
-| Символ | Значение | Смысл |
+| Symbol | Value | Meaning |
 |---|---:|---|
-| `group_size` / `G_nf4` | **64** | Группа вдоль оси K / `n_in`. Другой размер в v1 — ошибка. |
-| Число уровней | 16 | Ниббл = индекс в LUT, не смещённый INT4. |
-| Шкала | IEEE 754 **binary16** | Не BF16, не float32 на диске. |
-| Double-quant шкал | нет | Поля nested absmax нет. |
-| `zero` | нет | Это не асимметричный INT4. |
+| `group_size` / `G_nf4` | **64** | Group along axis K / `n_in`. Another size in v1 is an error. |
+| Number of levels | 16 | Nibble = LUT index, not offset INT4. |
+| Scale | IEEE 754 **binary16** | Not BF16, not float32 on disk. |
+| Double-quant of scales | none | No nested absmax field. |
+| `zero` | none | This is not asymmetric INT4. |
 
-**Матрица.** `W[n_out, n_in]`, row-major, последняя ось — вход Linear (`n_in` = K). Группы **не** пересекают строки: строка `r`, группа `g` — это 64 элемента `W[r, 64g .. 64g+63]`.
+**Matrix.** `W[n_out, n_in]`, row-major, last axis is the Linear input (`n_in` = K). Groups **do not** cross rows: row `r`, group `g` is 64 elements `W[r, 64g .. 64g+63]`.
 
-**Счёт.** Вход F32 / F16 / BF16 один раз приводится к float32. Квантование и decode для `verify` — float32. Промежуточный BF16 / FP16 у произведения LUT × scale **запрещён**.
+**Compute.** Input F32 / F16 / BF16 is converted once to float32. Quantization and decode for `verify` are float32. Intermediate BF16 / FP16 of the product LUT × scale is **forbidden**.
 
-**Не-цели (запрещено в этом срезе):** INT4 + zero-point, GPTQ, AWQ, `desc_act`, double-quant шкал, GPU-ядро, Ampere fragment-major, книжка VQ.
+**Non-goals (forbidden in this slice):** INT4 + zero-point, GPTQ, AWQ, `desc_act`, double-quant of scales, GPU kernel, Ampere fragment-major, VQ codebook.
 
-**Упаковка нибблов — не как CUDA bitsandbytes.** В `kQuantizeBlockwise` у bnb чётный вес уходит в **старший** ниббл (`q = idx[2c] << 4 | idx[2c+1]`). Здесь, как в `docs/compressor.md` §3 и §6.2: **младший** ниббл = `W[r, 2c]`, старший = `W[r, 2c+1]`. Копировать packing из CUDA bnb нельзя.
+**Nibble packing — not like CUDA bitsandbytes.** In bnb’s `kQuantizeBlockwise` the even weight goes into the **high** nibble (`q = idx[2c] << 4 | idx[2c+1]`). Here, as in `docs/compressor.md` §3 and §6.2: the **low** nibble = `W[r, 2c]`, high = `W[r, 2c+1]`. Copying packing from CUDA bnb is not allowed.
 
 ---
 
-## 1. Таблица из 16 уровней
+## 1. Table of 16 levels
 
-Индекс 0 = −1.0 … индекс 15 = +1.0, строго по возрастанию. Индекс 7 — **плюс-ноль** (`0x00000000`), не `−0`.
+Index 0 = −1.0 … index 15 = +1.0, strictly increasing. Index 7 is **plus-zero** (`0x00000000`), not `−0`.
 
-Литералы ниже — точные строки из `get_4bit_type("nf4")`. В Go их пишут как `float32(...)`. IEEE 754 binary32 после round-to-nearest-even от этого десятичного (совпадает с путём «сначала binary64, потом binary32»: для этих 16 чисел двойное округление не расходится).
+The literals below are the exact strings from `get_4bit_type("nf4")`. In Go they are written as `float32(...)`. IEEE 754 binary32 after round-to-nearest-even from this decimal (coincides with the path “first binary64, then binary32”: for these 16 numbers double rounding does not diverge).
 
-| idx | ниббл | литерал (канон) | binary32 bits | значение float32 |
+| idx | nibble | literal (canon) | binary32 bits | float32 value |
 |---:|:---:|---|---|---|
 | 0 | `0x0` | `-1.0` | `0xBF800000` | −1 |
 | 1 | `0x1` | `-0.6961928009986877` | `0xBF3239B1` | −0.6961928009986877 |
@@ -53,67 +53,67 @@ Roundtrip-целостность этапа A. Не контейнер, не VQ,
 | 14 | `0xE` | `0.7229568362236023` | `0x3F3913B3` | 0.7229568362236023 |
 | 15 | `0xF` | `1.0` | `0x3F800000` | 1 |
 
-Тест `TestNF4TableBits`: `math.Float32bits(NF4[i])` равен столбцу bits. Расхождение на 1 ulp — провал, даже если десятичная запись «похожа». Не использовать укороченные блоги (`-0.6962`) и не путать литерал `0.44070982933044434` с опечаткой `0.44070983934402466` (у этих двух десятичных **один и тот же** binary32 `0x3EE1A4B8`; в исходник всё равно копировать канон из таблицы).
+Test `TestNF4TableBits`: `math.Float32bits(NF4[i])` equals the bits column. A 1-ulp mismatch is a fail, even if the decimal writing “looks similar”. Do not use shortened blog values (`-0.6962`) and do not confuse the literal `0.44070982933044434` with the typo `0.44070983934402466` (those two decimals have **the same** binary32 `0x3EE1A4B8`; still copy the table canon into the source).
 
-Асимметрия (7 отрицательных + ноль + 8 положительных) — свойство QLoRA `use_extra_value=True`, не баг.
+The asymmetry (7 negatives + zero + 8 positives) is a property of QLoRA `use_extra_value=True`, not a bug.
 
 ---
 
-## 2. Encode одного вектора длины 64
+## 2. Encode of one vector of length 64
 
-Вход группы: 64 значения уже в float32. Обозначения: `g[0..63]`, LUT `L[0..15]` из §1.
+Group input: 64 values already in float32. Notation: `g[0..63]`, LUT `L[0..15]` from §1.
 
-### 2.1. Приведение dtype (до нарезки групп)
+### 2.1. Dtype conversion (before slicing into groups)
 
-| Вход | Как получить float32 |
+| Input | How to get float32 |
 |---|---|
-| F32 | как есть |
-| F16 | точное расширение IEEE binary16 → binary32 |
-| BF16 | старшие 16 бит float32, младшие 16 бит нули |
+| F32 | as-is |
+| F16 | exact expansion IEEE binary16 → binary32 |
+| BF16 | high 16 bits of float32, low 16 bits zeros |
 
-Дальше вся арифметика — binary32, round-to-nearest-even, без `FMA` на шаге дистанции (см. §2.4).
+From here all arithmetic is binary32, round-to-nearest-even, without `FMA` on the distance step (see §2.4).
 
-### 2.2. Порядок шагов (нормативный)
+### 2.2. Step order (normative)
 
-1. **Отвергнуть нечисла.** Если хоть один `g[i]` не finite (`NaN` или `±Inf`) → ошибка encode, не подмена на 0.
-2. **Шкала в float32.**  
+1. **Reject non-numbers.** If any `g[i]` is not finite (`NaN` or `±Inf`) → encode error, not substitution with 0.
+2. **Scale in float32.**  
    `s32 = max_i |g[i]|`.  
-   Если `s32 == 0` (вся группа нули, включая `±0`) → `s32 = 1`.  
-   `−0` в `abs` даёт `+0`; `max` по нулям остаётся 0, срабатывает правило «→ 1».
-3. **Шкала на диск.** `s16 = float32_to_fp16_RNE(s32)` (IEEE 754-2008 binary16, ties to even; subnormals разрешены).  
-   Если `s16` не **конечное и строго положительное** → ошибка encode (overflow в Inf, underflow в `+0` у ненулевой группы). Не писать Inf/NaN в блоб `scale`.
-4. **Шкала, которой реально делим** — та, что увидит decode:  
+   If `s32 == 0` (the whole group is zeros, including `±0`) → `s32 = 1`.  
+   `−0` in `abs` yields `+0`; `max` over zeros stays 0, the “→ 1” rule fires.
+3. **Scale on disk.** `s16 = float32_to_fp16_RNE(s32)` (IEEE 754-2008 binary16, ties to even; subnormals allowed).  
+   If `s16` is not **finite and strictly positive** → encode error (overflow to Inf, underflow to `+0` of a non-zero group). Do not write Inf/NaN into the `scale` blob.
+4. **The scale we actually divide by** is the one decode will see:  
    `s = fp16_to_float32(s16)`.  
-   Делить на исходный `s32` **нельзя**: иначе первый encode и encode(decode(·)) разойдутся из‑за округления шкалы.
-5. **Нормировка.** Для каждого `i`: `u[i] = g[i] / s` (деление float32). Затем клип в `[-1, 1]`:  
+   Dividing by the original `s32` is **forbidden**: otherwise the first encode and encode(decode(·)) would diverge because of scale rounding.
+5. **Normalization.** For each `i`: `u[i] = g[i] / s` (float32 division). Then clip to `[-1, 1]`:  
    `u = min(1, max(-1, u))`.  
-   Клип нужен, когда `s16` округлилась вниз и `|g_max| / s > 1`. После клипа край попадает в `L[0]` или `L[15]`.
-6. **Ближайший уровень по L2 в float32.**  
-   Индекс  
+   Clip is needed when `s16` rounded down and `|g_max| / s > 1`. After clip the extreme lands in `L[0]` or `L[15]`.
+6. **Nearest level by L2 in float32.**  
+   Index  
    \[
    \mathrm{idx}[i] = \arg\min_{j=0}^{15}\ (u[i] - L[j])^{2}.
    \]
-   Дистанция считается так и только так:
+   Distance is computed this way and only this way:
 
    ```
-   d = u - L[j]          # вычитание float32
-   d2 = d * d           # умножение float32, не FMA(d,d,0) как отдельное требование
+   d = u - L[j]          # float32 subtraction
+   d2 = d * d           # float32 multiply, not FMA(d,d,0) as a separate requirement
    ```
 
-   `abs(u - L[j])` на `[-1, 1]` даёт тот же argmin (квадрат монотонен). Нормативно зафиксирован квадрат, как в ТЗ «nearest по L2».
-7. **Ties.** Если `d2` равны у двух (смежных) уровней — **меньший индекс**. Это тот же выбор, что у bitsandbytes `dQuantizeNF4`: сравнение с серединой через строгое `>` , равенство уходит в нижнюю ветку. В 1D на строго возрастающей сетке tie бывает только между соседями, когда `u` есть точная середина.
+   `abs(u - L[j])` on `[-1, 1]` yields the same argmin (the square is monotone). Normatively the square is fixed, as in the requirements “nearest by L2”.
+7. **Ties.** If `d2` are equal for two (adjacent) levels — **smaller index**. That is the same choice as bitsandbytes `dQuantizeNF4`: comparison with the midpoint via strict `>`, equality goes to the lower branch. In 1D on a strictly increasing grid a tie happens only between neighbors when `u` is the exact midpoint.
 
-Итог группы: 64 индекса `uint8` в `0..15` и одна шкала `s16`.
+Group result: 64 `uint8` indices in `0..15` and one scale `s16`.
 
-### 2.3. Почему не копировать дерево midpoints из CUDA as-is
+### 2.3. Why not copy the CUDA midpoint tree as-is
 
-`dQuantizeNF4` — двоичное дерево из 15 порогов, каждый порог задуман как середина соседних уровней. Это эквивалент L2 **плюс** tie → меньший индекс, если пороги суть середины **тех же** `float32` LUT.
+`dQuantizeNF4` is a binary tree of 15 thresholds, each threshold intended as the midpoint of neighboring levels. That is equivalent to L2 **plus** tie → smaller index, if the thresholds are midpoints of **the same** `float32` LUT.
 
-Четыре литерала порогов в `kernels.cu` расходятся на 1 ulp с `float32((L[j]+L[j+1])/2)` (`0.8614784181118011`, `0.5016634166240692`, `0.1202552504837513`, `-0.8480964004993439`). Норматив — §2.2 по таблице §1, не дерево CUDA. Реализация **может** искать индекс бинарным поиском по серединам `M[j] = float32( (L[j] + L[j+1]) * 0.5 )` и правилом `u > M[j] → вверх`, иначе вниз. Это обязано совпасть с §2.2. Золотые фикстуры §8–§9 сидят далеко от 1 ulp у порога, поэтому дерево bnb и L2 на них совпадают; unit-тесты всё равно сверяют индексы с §2.2.
+Four threshold literals in `kernels.cu` diverge by 1 ulp from `float32((L[j]+L[j+1])/2)` (`0.8614784181118011`, `0.5016634166240692`, `0.1202552504837513`, `-0.8480964004993439`). The norm is §2.2 against the §1 table, not the CUDA tree. An implementation **may** search the index by binary search over midpoints `M[j] = float32( (L[j] + L[j+1]) * 0.5 )` and the rule `u > M[j] → up`, else down. That must coincide with §2.2. Golden fixtures §8–§9 sit far from 1 ulp of a threshold, so the bnb tree and L2 coincide on them; unit tests still check indices against §2.2.
 
-Середины соседних `L[j]` (для справки, не второй канон):
+Midpoints of neighboring `L[j]` (for reference, not a second canon):
 
-| между idx | midpoint float32 | bits |
+| between idx | midpoint float32 | bits |
 |---:|---|---|
 | 0–1 | −0.8480963706970215 | `0xBF591CD8` |
 | 1–2 | −0.6106328964233398 | `0xBF1C5270` |
@@ -131,161 +131,161 @@ Roundtrip-целостность этапа A. Не контейнер, не VQ,
 | 13–14 | 0.6427869200706482 | `0x3F248DAF` |
 | 14–15 | 0.8614784479141235 | `0x3F5C89DA` |
 
-### 2.4. Контракции и точность
+### 2.4. Contractions and precision
 
-На `[-1, 1]` 16 вычитаний безопасны. Запрещено заменять `(u-L[j])^2` на сравнение в float64 «для точности» в одном месте и float32 в другом: индексы должны быть как у float32. Компиляторный FMA на `d*d` здесь не сдвигает argmin золотых фикстур; для переносимости считать два операции, как в §2.2.
+On `[-1, 1]` 16 subtractions are safe. Forbidden to replace `(u-L[j])^2` with a float64 comparison “for precision” in one place and float32 in another: indices must be as with float32. Compiler FMA on `d*d` does not shift argmin of the golden fixtures here; for portability compute two operations, as in §2.2.
 
 ---
 
 ## 3. Decode
 
-На каждый логический вес с индексом `nib ∈ 0..15` и шкалой группы `s16`:
+For each logical weight with index `nib ∈ 0..15` and group scale `s16`:
 
 ```
-s  = fp16_to_float32(s16)     # точное расширение, не «через BF16»
-w  = L[nib] * s               # оба множителя float32, произведение float32
+s  = fp16_to_float32(s16)     # exact expansion, not “via BF16”
+w  = L[nib] * s               # both factors float32, product float32
 ```
 
-Порядок обязателен: сначала шкала в float32, потом умножить на уровень. Не кастить `L[nib]` в FP16. Не кастить произведение в FP16/BF16 на пути `verify` / `chr decode` (выход — F32, см. стык с CLI). Ядро Ampere потом само сузит в BF16 для MMA; это не этот срез.
+Order is mandatory: first the scale to float32, then multiply by the level. Do not cast `L[nib]` to FP16. Do not cast the product to FP16/BF16 on the `verify` / `chr decode` path (output is F32, see the CLI interface). The Ampere kernel later narrows to BF16 for MMA itself; that is not this slice.
 
-`L[nib]` берётся из §1, не из пересчёта квантилей.
+`L[nib]` is taken from §1, not from a recomputation of quantiles.
 
-Паддинг-столбцы после `n_in` **не** возвращаются (§6).
+Padding columns after `n_in` are **not** returned (§6).
 
 ---
 
-## 4. Псевдокод матрицы, сложность, пик памяти
+## 4. Matrix pseudocode, complexity, peak memory
 
-`n_in_padded = 64 * ceil(n_in / 64)`. `n_groups = n_in_padded / 64`. Если `n_out < 1` или `n_in < 1` → ошибка encode (пустой тензор весов в v1 не сжимаем).
+`n_in_padded = 64 * ceil(n_in / 64)`. `n_groups = n_in_padded / 64`. If `n_out < 1` or `n_in < 1` → encode error (an empty weight tensor is not compressed in v1).
 
 ```
 EncodeNF4(W[n_out, n_in] → float32):
   data  = uint8[n_out][n_in_padded/2]
   scale = fp16[n_out][n_groups]
-  для r = 0 .. n_out-1:                  # можно стримить: одна строка в полёте
-      для g = 0 .. n_groups-1:
-          для k = 0 .. 63:
+  for r = 0 .. n_out-1:                  # can stream: one row in flight
+      for g = 0 .. n_groups-1:
+          for k = 0 .. 63:
               c = 64*g + k
               grp[k] = (c < n_in) ? W[r, c] : 0
           idx[0..63], s16 = EncodeGroup64(grp)   # §2
           scale[r, g] = s16
-          для k = 0 .. 31:
+          for k = 0 .. 31:
               data[r, 32*g + k] = (idx[2k+1] << 4) | idx[2k]
-  вернуть data, scale
+  return data, scale
 
 DecodeNF4(data, scale, n_out, n_in):
   W_hat = float32[n_out][n_in]
-  для r, для g:
+  for r, for g:
       s = fp16_to_float32(scale[r, g])
-      для k = 0 .. 63:
+      for k = 0 .. 63:
           c = 64*g + k
-          если c >= n_in: continue
+          if c >= n_in: continue
           b = data[r, 32*g + k/2]
           nib = (k % 2 == 0) ? (b & 0x0F) : ((b >> 4) & 0x0F)
           W_hat[r, c] = L[nib] * s
-  вернуть W_hat
+  return W_hat
 ```
 
-**Сложность.** Время `Θ(n_out · n_in_padded)`: один проход max-abs (64 сравнения) + 64×16 дистанций. Это ~10³ FLOP на группу, не GEMM. Упаковка — битовые сдвиги, `Θ(n_out · n_in_padded / 2)` байт записи.
+**Complexity.** Time `Θ(n_out · n_in_padded)`: one max-abs pass (64 comparisons) + 64×16 distances. That is ~10³ FLOP per group, not GEMM. Packing is bit shifts, `Θ(n_out · n_in_padded / 2)` bytes written.
 
-**Пик памяти.** Стрим по строкам: держать одну строку float32 (`n_in · 4` Б), packed-строку `n_in_padded/2`, шкалы строки `n_groups · 2`. Для `down_proj` 4096×14336 это ≈ 56 КиБ на строку + выходные блобы можно писать сразу в файл. Полная материализация входа 4096×14336 F32 ≈ 224 МиБ — для CPU-verify жирной матрицы допустима, для компрессора 32B — нет; кодек обязан уметь строковый стрим (интерфейс: «дай строку / полосу строк»).
+**Peak memory.** Stream by rows: hold one float32 row (`n_in · 4` B), a packed row `n_in_padded/2`, row scales `n_groups · 2`. For `down_proj` 4096×14336 that is ≈ 56 KiB per row + output blobs can be written straight to the file. Full materialization of a 4096×14336 F32 input ≈ 224 MiB — allowed for CPU-verify of a fat matrix, not for a 32B compressor; the codec must be able to stream by rows (interface: “give a row / a stripe of rows”).
 
-Ориентир полной материализации (не обязательно):
+Full-materialization orientation (not required):
 
-| Буфер | Формула | 4096×4096 | 4096×14336 |
+| Buffer | Formula | 4096×4096 | 4096×14336 |
 |---|---|---:|---:|
-| вход F32 | `n_out·n_in·4` | 64 МиБ | 224 МиБ |
-| `data` uint8 | `n_out·n_in_padded/2` | 8 МиБ | 28 МиБ |
-| `scale` FP16 | `n_out·n_groups·2` | 0.5 МиБ | 1.75 МиБ |
+| F32 input | `n_out·n_in·4` | 64 MiB | 224 MiB |
+| `data` uint8 | `n_out·n_in_padded/2` | 8 MiB | 28 MiB |
+| `scale` FP16 | `n_out·n_groups·2` | 0.5 MiB | 1.75 MiB |
 
-Стрим по строкам сводит пик к `O(n_in)` плюс то, что уже лежит в `.chr` на диске.
+Streaming by rows reduces the peak to `O(n_in)` plus what already sits in `.chr` on disk.
 
 ---
 
-## 5. Упаковка и распаковка нибблов
+## 5. Nibble packing and unpacking
 
-Машины цели: x86_64, Windows/WSL — little-endian. Блоб `data` — массив `uint8`, **endian на байт не действует**. FP16 шкалы — little-endian `uint16` (§7, §10).
+Target machines: x86_64, Windows/WSL — little-endian. The `data` blob is a `uint8` array, **endianness does not apply to a byte**. FP16 scales are little-endian `uint16` (§7, §10).
 
-### 5.1. Маски
+### 5.1. Masks
 
-Байт `data[r, c]`, `c = 0 .. n_in_padded/2 − 1`:
+Byte `data[r, c]`, `c = 0 .. n_in_padded/2 − 1`:
 
 ```
-lo  =  data[r, c]       & 0x0F      # индекс W[r, 2c]
-hi  = (data[r, c] >> 4) & 0x0F      # индекс W[r, 2c+1]
+lo  =  data[r, c]       & 0x0F      # index of W[r, 2c]
+hi  = (data[r, c] >> 4) & 0x0F      # index of W[r, 2c+1]
 data[r, c] = (hi << 4) | lo
 ```
 
-`nib` — индекс LUT 0..15, не `code + 8` и не знак в старшем бите ниббла.
+`nib` is a LUT index 0..15, not `code + 8` and not a sign in the high bit of the nibble.
 
-Внутри группы байтовый индекс в строке: столбец веса `j` живёт в байте `j >> 1` этой строки; чётный `j` — младший ниббл.
+Inside a group the byte index in the row: weight column `j` lives in byte `j >> 1` of that row; even `j` is the low nibble.
 
-### 5.2. Тестовый вектор: 2 веса → 1 байт
+### 5.2. Test vector: 2 weights → 1 byte
 
-Упаковка — чистая функция двух индексов, без шкалы. Нормированные `u` уже в `[-1, 1]` (как после §2.5–2.6).
+Packing is a pure function of two indices, without scale. Normalized `u` already in `[-1, 1]` (as after §2.5–2.6).
 
-| `u0`, `u1` | idx0, idx1 | байт | разбор |
+| `u0`, `u1` | idx0, idx1 | byte | breakdown |
 |---|---|---|---|
 | `0.0`, `1.0` | 7, 15 | **`0xF7`** | `0xF7 & 0x0F = 7` → `L[7]=0`; `0xF7 >> 4 = 15` → `L[15]=1` |
-| `1.0`, `0.0` | 15, 7 | **`0x7F`** | младший 15, старший 7 |
+| `1.0`, `0.0` | 15, 7 | **`0x7F`** | low 15, high 7 |
 | `L[3]`, `L[12]` | 3, 12 | **`0xC3`** | `L[3]=-0.39491748809814453`, `L[12]=0.44070982933044434` |
 
-Контрольный: если реализация выдаёт `0x7F` на `(0, 1)` — она упаковала по-bnb (чётный вес в старшем ниббле). Это провал.
+Control: if an implementation yields `0x7F` on `(0, 1)` — it packed the bnb way (even weight in the high nibble). That is a fail.
 
-### 5.3. Тайл ядра (только расклад, не этот пакет)
+### 5.3. Kernel tile (layout only, not this package)
 
-Как `docs/compressor.md` §6.2: тайл `(row_tile=i, col_group=j)` — строки `[64i, 64i+64)`, столбцы весов `[8j, 8j+8)` → байты `data[64i : 64i+64, 4j : 4j+4]` (4 байта = 8 нибблов), шкала `scale[64i:64i+64, floor(8j/64)]`. CPU-кодек пишет row-major, не fragment-major.
+As `docs/compressor.md` §6.2: tile `(row_tile=i, col_group=j)` — rows `[64i, 64i+64)`, weight columns `[8j, 8j+8)` → bytes `data[64i : 64i+64, 4j : 4j+4]` (4 bytes = 8 nibbles), scale `scale[64i:64i+64, floor(8j/64)]`. The CPU codec writes row-major, not fragment-major.
 
 ---
 
-## 6. Паддинг, пустые строки, NaN/Inf
+## 6. Padding, empty rows, NaN/Inf
 
-### 6.1. Паддинг `n_in`
+### 6.1. `n_in` padding
 
-Если `n_in % 64 ≠ 0`, при encode хвост каждой строки дополняется **нулями** до `n_in_padded`. В JSON CHR0 `shape = [n_out, n_in]` — **логический**, без паддинга. Блобы имеют ширину padded (§10). Decode отрезает столбцы `≥ n_in`.
+If `n_in % 64 ≠ 0`, on encode the tail of each row is filled with **zeros** up to `n_in_padded`. In CHR0 JSON `shape = [n_out, n_in]` is **logical**, without padding. Blobs have padded width (§10). Decode cuts columns `≥ n_in`.
 
-Паддинг не увеличивает `s`, если в группе есть ненулевой логический вес (`max(|w|, 0, 0, …) = |w|`). Хвостовые нули получают индекс **7**.
+Padding does not increase `s` if the group has a non-zero logical weight (`max(|w|, 0, 0, …) = |w|`). Tail zeros get index **7**.
 
-Нули паддинга — не «ещё одна группа со scale=1 в метаданных отдельно»: они входят в последнюю группу строки.
+Padding zeros are not “another group with scale=1 in metadata separately”: they enter the last group of the row.
 
-Пример: `W` формы `[1, 2] = [0.0, 1.0]`. Одна группа из 64: два логических + 62 нуля. `s16` = FP16(`1.0`) = `0x3C00`. Индексы `[7, 15]` + 62×`7`. Packed 32 байта:
+Example: `W` of shape `[1, 2] = [0.0, 1.0]`. One group of 64: two logical + 62 zeros. `s16` = FP16(`1.0`) = `0x3C00`. Indices `[7, 15]` + 62×`7`. Packed 32 bytes:
 
 ```
 F7 77 77 77 77 77 77 77 77 77 77 77 77 77 77 77
 77 77 77 77 77 77 77 77 77 77 77 77 77 77 77 77
 ```
 
-Decode возвращает только `[0.0, 1.0]`.
+Decode returns only `[0.0, 1.0]`.
 
-### 6.2. Пустая строка (все веса нули)
+### 6.2. Empty row (all weights zeros)
 
-Строка из нулей валидна. Каждая её группа: `s32=0 → s=1`, все индексы 7, `s16 = 0x3C00`. Это не ошибка и не «пропуск строки».
+A row of zeros is valid. Each of its groups: `s32=0 → s=1`, all indices 7, `s16 = 0x3C00`. This is not an error and not a “skip row”.
 
-`n_out < 1` или `n_in < 1` — ошибка (§4), это другой случай.
+`n_out < 1` or `n_in < 1` is an error (§4), that is a different case.
 
 ### 6.3. NaN / Inf
 
-Любой `NaN` или `±Inf` во входной группе (после приведения к float32, включая Inf из F16/BF16) → **ошибка encode**. Не заменять на 0, не пропускать группу, не писать частичный блоб этой матрицы.
+Any `NaN` or `±Inf` in the input group (after conversion to float32, including Inf from F16/BF16) → **encode error**. Do not replace with 0, do not skip the group, do not write a partial blob of this matrix.
 
-Если `s32` finite, но `fp16(s32)` не finite положительное (переполнение `> 65504`, underflow в 0 у ненулевой группы) → тоже ошибка encode. Нормальные веса LLM в это не попадают; молча писать Inf в `scale` нельзя: decode тогда даёт Inf и ломает verify.
+If `s32` is finite but `fp16(s32)` is not finite-positive (overflow `> 65504`, underflow to 0 of a non-zero group) → also encode error. Normal LLM weights do not hit this; silently writing Inf into `scale` is forbidden: decode then yields Inf and breaks verify.
 
-### 6.4. Знаки нуля
+### 6.4. Signs of zero
 
-`−0.0` — конечное. `abs(-0)=0`. Ближайший уровень к `u=−0` после `s=1` — индекс 7. В LUT пишем `+0`.
+`−0.0` is finite. `abs(-0)=0`. The nearest level to `u=−0` after `s=1` is index 7. The LUT stores `+0`.
 
 ---
 
-## 7. Шкала FP16: биты и endian
+## 7. FP16 scale: bits and endian
 
-- Хранение: binary16 little-endian. `1.0` → bits `0x3C00` → в файле байты `00 3C`.
-- Запись: RNE, ties to even, как в `docs/spec/vq.md` §7.2. Subnormals binary16 разрешены.
-- Чтение: точное расширение в float32.
-- `+0` как хранимая шкала **запрещён** (кроме пути, который мы уже заменили на `s=1` для нулевой группы).
-- Не BF16: `1.0` в BF16 тоже `0x3C00` в старших 16 битах float32, но среди произвольных `s` BF16 ≠ FP16.
+- Storage: binary16 little-endian. `1.0` → bits `0x3C00` → in the file bytes `00 3C`.
+- Write: RNE, ties to even, as in `docs/spec/vq.md` §7.2. binary16 subnormals allowed.
+- Read: exact expansion to float32.
+- `+0` as a stored scale is **forbidden** (except the path we already replaced with `s=1` for a zero group).
+- Not BF16: `1.0` in BF16 is also `0x3C00` in the high 16 bits of float32, but among arbitrary `s` BF16 ≠ FP16.
 
-Частые значения для тестов:
+Common values for tests:
 
-| float32 | binary16 bits | LE байты |
+| float32 | binary16 bits | LE bytes |
 |---|---|---|
 | `1.0` | `0x3C00` | `00 3C` |
 | `2.0` | `0x4000` | `00 40` |
@@ -293,25 +293,25 @@ Decode возвращает только `[0.0, 1.0]`.
 | `2.5` | `0x4100` | `00 41` |
 | `0.5` | `0x3800` | `00 38` |
 
-Расклад `scale[r, g]` в блобе: offset `(r * n_groups + g) * 2` байт от начала блоба `scale`.
+Layout of `scale[r, g]` in the blob: offset `(r * n_groups + g) * 2` bytes from the start of the `scale` blob.
 
 ---
 
-## 8. Золотой пример: 64 веса
+## 8. Golden example: 64 weights
 
-Одна строка, `n_in = 64` (паддинга нет), `n_groups = 1`.
+One row, `n_in = 64` (no padding), `n_groups = 1`.
 
-**Вход** (считать в float32, не в десятичной «примерно»):
+**Input** (count in float32, not in decimal “approximately”):
 
 ```
-W[i] = float32(i) / float32(63)     для i = 0,1,…,63
+W[i] = float32(i) / float32(63)     for i = 0,1,…,63
 ```
 
-`63` и `i ≤ 63` точны в binary32. Деление — float32. Эквивалентно `float32(float64(i)/63)` для этих `i` (оба пути дают один binary32).
+`63` and `i ≤ 63` are exact in binary32. Division is float32. Equivalent to `float32(float64(i)/63)` for these `i` (both paths yield one binary32).
 
-`max |W| = W[63] = 1.0` → `s32 = 1.0` → `s16 = 0x3C00`. `s = 1.0f32`. `u[i] = W[i]`. Клип не срабатывает.
+`max |W| = W[63] = 1.0` → `s32 = 1.0` → `s16 = 0x3C00`. `s = 1.0f32`. `u[i] = W[i]`. Clip does not fire.
 
-**Индексы** (nearest L2, tie → меньший; здесь ties нет):
+**Indices** (nearest L2, tie → smaller; here there are no ties):
 
 ```
 i:   0  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15
@@ -327,44 +327,44 @@ i:  48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63
 idx: 14 14 14 14 14 14 14 15 15 15 15 15 15 15 15 15
 ```
 
-Пороги, на которых меняется индекс (для отладки, `u = i/63`):
+Thresholds at which the index changes (for debugging, `u = i/63`):
 
-| idx | `i` | условие |
+| idx | `i` | condition |
 |---|---|---|
 | 7 | 0..2 | `u ≤ 0.03979014977812767` |
-| 8 | 3..7 | до `0.120255246758461` |
-| 9 | 8..12 | до `0.2035212516784668` |
-| 10 | 13..18 | до `0.2920137643814087` |
-| 11 | 19..24 | до `0.3893125355243683` |
-| 12 | 25..31 | до `0.5016634464263916` |
-| 13 | 32..40 | до `0.6427869200706482` |
-| 14 | 41..54 | до `0.8614784479141235` |
-| 15 | 55..63 | выше, включая `1.0` |
+| 8 | 3..7 | up to `0.120255246758461` |
+| 9 | 8..12 | up to `0.2035212516784668` |
+| 10 | 13..18 | up to `0.2920137643814087` |
+| 11 | 19..24 | up to `0.3893125355243683` |
+| 12 | 25..31 | up to `0.5016634464263916` |
+| 13 | 32..40 | up to `0.6427869200706482` |
+| 14 | 41..54 | up to `0.8614784479141235` |
+| 15 | 55..63 | above, including `1.0` |
 
-Самый тесный зазор в этой фикстуре: `i=13`, `u ≈ 0.206349209` против середины 9–10 `≈ 0.20352125` (зазор ~3·10⁻³, тысячи ulp). Индекс однозначен.
+The tightest gap in this fixture: `i=13`, `u ≈ 0.206349209` versus midpoint 9–10 `≈ 0.20352125` (gap ~3·10⁻³, thousands of ulp). The index is unambiguous.
 
-**Packed 32 байта** (младший ниббл = чётный `i`):
+**Packed 32 bytes** (low nibble = even `i`):
 
 ```
 77 87 88 88 99 99 A9 AA AA BA BB BB CB CC CC CC
 DD DD DD DD ED EE EE EE EE EE EE FE FF FF FF FF
 ```
 
-Слитно, верхний регистр:
+Concatenated, uppercase:
 
 ```
 778788889999A9AAAABABBBBCBCCCCCCDDDDDDDDEDEEEEEEEEEEEEFEFFFFFFFF
 ```
 
-**Шкала:** `s = 1.0`, bits `0x3C00`, в блобе `00 3C`.
+**Scale:** `s = 1.0`, bits `0x3C00`, in the blob `00 3C`.
 
-Тест `TestNF4Golden64`: encode этой строки → 32 байта как выше и `scale` один `uint16` `0x3C00`. Decode → `L[idx[i]] * 1.0` с битами float32 LUT, не «близко к i/63».
+Test `TestNF4Golden64`: encode of this row → 32 bytes as above and `scale` one `uint16` `0x3C00`. Decode → `L[idx[i]] * 1.0` with the LUT float32 bits, not “close to i/63”.
 
 ---
 
-## 9. Инварианты тестов без модели
+## 9. Test invariants without a model
 
-Метрики orig vs reconstruct (после decode в float32, orig тоже в float32):
+Metrics orig vs reconstruct (after decode to float32, orig also in float32):
 
 ```
 e_i    = float32( L[idx_i] * s ) − float32(W_i)
@@ -373,60 +373,60 @@ maxabs = max_i |e_i|
 mae    = mean_i |e_i|
 ```
 
-`mean` по **логическим** элементам, без паддинга. Сумма квадратов — в float64 от уже посчитанного `e_i` float32.
+`mean` over **logical** elements, without padding. Sum of squares is in float64 from already-computed float32 `e_i`.
 
-### 9.1. Нулевая матрица
+### 9.1. Zero matrix
 
-`W = 0` любой формы с `n_out, n_in ≥ 1`, в том числе некратной 64. Все нибблы логических (и padded) позиций = **7**. Все шкалы `0x3C00`. Decode — точные нули.
+`W = 0` of any shape with `n_out, n_in ≥ 1`, including non-multiples of 64. All nibbles of logical (and padded) positions = **7**. All scales `0x3C00`. Decode is exact zeros.
 
-### 9.2. Константа на группе
+### 9.2. Constant on a group
 
-Группа из 64 копий `c ≠ 0`, finite. `s32 = |c|`, `s16 = fp16(|c|)`. После деления на `s = f32(s16)` все `u = sign(c)` (с клипом, если `s16 < |c|`). Все индексы **0** если `c < 0`, **15** если `c > 0`.
+A group of 64 copies of `c ≠ 0`, finite. `s32 = |c|`, `s16 = fp16(|c|)`. After division by `s = f32(s16)` all `u = sign(c)` (with clip if `s16 < |c|`). All indices **0** if `c < 0`, **15** if `c > 0`.
 
-Проверка: `c = −2.25` → `s16 = 0x4080`, нибблы все `0x0`, decode = `−1.0 * 2.25 = −2.25` (2.25 точно в FP16). `c = 0.5` → `s16 = 0x3800`, все индексы 15, decode = `1.0 * 0.5`.
+Check: `c = −2.25` → `s16 = 0x4080`, nibbles all `0x0`, decode = `−1.0 * 2.25 = −2.25` (2.25 is exact in FP16). `c = 0.5` → `s16 = 0x3800`, all indices 15, decode = `1.0 * 0.5`.
 
-### 9.3. Идемпотентность encode ∘ decode
+### 9.3. Idempotence of encode ∘ decode
 
-Пусть `P = encode(W)`, `Ŵ = decode(P)`, `P₂ = encode(Ŵ)`, `Ŵ₂ = decode(P₂)`.
+Let `P = encode(W)`, `Ŵ = decode(P)`, `P₂ = encode(Ŵ)`, `Ŵ₂ = decode(P₂)`.
 
-Требовать:
+Require:
 
-1. `decode(P)` бит-стабилен: повторный decode тех же блобов → те же `float32` биты.
-2. `P₂` совпадает с `P` (те же нибблы и те же bits шкалы) на фикстурах, где encode шёл по §2.2.
+1. `decode(P)` is bit-stable: a repeated decode of the same blobs → the same `float32` bits.
+2. `P₂` matches `P` (the same nibbles and the same scale bits) on fixtures where encode followed §2.2.
 
-Почему это так при `s = max|g|`. Ненулевая группа всегда содержит элемент с `|g| = s32`. После шагов 3–5 он кодируется в индекс 0 или 15 (`|u|=1` после клипа). Тогда `max|Ŵ| = |L[0 или 15]| · s = s`, второй encode пишет тот же `s16` и те же `u = L[idx]` — неподвижные точки LUT, argmin возвращает тот же индекс. Нулевая группа: `Ŵ=0`, снова `s=1`, индекс 7.
+Why this is so when `s = max|g|`. A non-zero group always contains an element with `|g| = s32`. After steps 3–5 it encodes to index 0 or 15 (`|u|=1` after clip). Then `max|Ŵ| = |L[0 or 15]| · s = s`, the second encode writes the same `s16` and the same `u = L[idx]` — LUT fixed points, argmin returns the same index. Zero group: `Ŵ=0`, again `s=1`, index 7.
 
-Оговорка FP16: квантовать **обязано** против `f32(s16)`, не против сырого `s32`. Иначе `P₂.idx` может разъехаться с `P.idx` на 1 ниббл у порога. С §2.2 инвариант держится; «оговорка» в ТЗ — именно этот каст шкалы, а не «иногда можно не совпасть».
+FP16 caveat: quantization **must** be against `f32(s16)`, not against raw `s32`. Otherwise `P₂.idx` can drift from `P.idx` by 1 nibble at a threshold. With §2.2 the invariant holds; the “caveat” in the requirements is exactly this scale cast, not “sometimes it is allowed not to match”.
 
-Не требовать `Ŵ = W` бит-в-байт: кодек lossy.
+Do not require `Ŵ = W` bit-for-byte: the codec is lossy.
 
-### 9.4. Жёсткие пороги на фикстуре 2×64
+### 9.4. Strict thresholds on the 2×64 fixture
 
-Матрица `W[2, 64]` float32:
+Matrix `W[2, 64]` float32:
 
 ```
-W[0, i] = float32(i) / float32(63)                 # как §8
-W[1, i] = float32(2*i − 63) / float32(63)       # равномерная сетка [-1, 1]
+W[0, i] = float32(i) / float32(63)                 # as §8
+W[1, i] = float32(2*i − 63) / float32(63)       # uniform grid [-1, 1]
 ```
 
-Обе шкалы `0x3C00` (`s=1`). Packed:
+Both scales `0x3C00` (`s=1`). Packed:
 
-Строка 0 — §8 (`7787…FFFF`).
+Row 0 — §8 (`7787…FFFF`).
 
-Строка 1, 32 байта:
+Row 1, 32 bytes:
 
 ```
 00 00 10 11 11 11 21 22 22 33 43 44 54 55 66 76
 87 88 99 AA BA BB CC CC DD DD EE EE EE FE FF FF
 ```
 
-Слитно:
+Concatenated:
 
 ```
 00001011111121222233434454556676878899AABABBCCCCDDDDEEEEEEFEFFFF
 ```
 
-Индексы строки 1 (для отладки):
+Row-1 indices (for debugging):
 
 ```
 0 0 0 0 0  1 1 1 1 1 1 1 1  2 2 2 2 2  3 3 3  4 4 4 4
@@ -434,77 +434,77 @@ W[1, i] = float32(2*i − 63) / float32(63)       # равномерная се�
 12 12 12 12  13 13 13 13  14 14 14 14 14 14 14  15 15 15 15 15
 ```
 
-Посчитанные метрики orig vs decode (128 элементов, формула в шапке §9):
+Computed metrics orig vs decode (128 elements, formula in the §9 header):
 
-| метрика | значение | жёсткий порог теста |
+| metric | value | strict test threshold |
 |---|---:|---:|
 | rmse | 0.05184147829055911 | **≤ 0.05185** |
 | maxabs | 0.14507704973220825 | **≤ 0.14508** |
 | mae | 0.03979102736047935 | **≤ 0.03980** |
 
-Где maxabs: строка 1, `i=5`, `W = float32(−53/63) ≈ −0.841269850730896`, индекс 1, reconstruct `L[1] ≈ −0.6961928009986877`, `|e| ≈ 0.14507705`.
+Where maxabs: row 1, `i=5`, `W = float32(−53/63) ≈ −0.841269850730896`, index 1, reconstruct `L[1] ≈ −0.6961928009986877`, `|e| ≈ 0.14507705`.
 
-Главный assert этой фикстуры — **байты packed и bits шкал**. Пороги rmse/maxabs — сеть на случай, если decode умножает не туда. Если packed совпал, метрики обязаны совпасть с таблицей с запасом 10⁻⁷; пороги чуть шире, чтобы не ловить порядок суммирования.
+The main assert of this fixture is **packed bytes and scale bits**. rmse/maxabs thresholds are a net in case decode multiplies the wrong way. If packed matched, the metrics must match the table with a 10⁻⁷ margin; the thresholds are slightly wider so as not to catch summation order.
 
-Ориентир, **не** unit-гейт: для случайного `N(0,1)` по группе 64 RMSE reconstruct обычно ≪ 0.1 (часто ~0.03–0.08: ошибка NF4 на нормированных × типичный `E[max|g|]`). Случайный seed в CI не использовать.
+Orientation, **not** a unit gate: for random `N(0,1)` per group of 64 reconstruct RMSE is usually ≪ 0.1 (often ~0.03–0.08: NF4 error on normalized × typical `E[max|g|]`). Do not use a random seed in CI.
 
-### 9.5. Обязательные имена тестов `internal/nf4`
+### 9.5. Required test names `internal/nf4`
 
-| Имя | Arrange | Assert |
+| Name | Arrange | Assert |
 |---|---|---|
-| `TestNF4TableBits` | константа LUT | 16× `Float32bits` = §1 |
+| `TestNF4TableBits` | LUT constant | 16× `Float32bits` = §1 |
 | `TestNF4Golden64` | `W[i]=i/63` | packed hex §8, scale `0x3C00` |
-| `TestNF4Golden2x64` | фикстура §9.4 | оба packed, две шкалы `0x3C00`, rmse/maxabs/mae ≤ порогов |
-| `TestNF4PackNibble` | пары §5.2 | байты `F7`, `7F`, `C3` |
-| `TestNF4ZeroMatrix` | нули `[3,64]` и `[1,65]` | нибблы 7, scale `0x3C00`, decode 0 |
-| `TestNF4Constant` | `c=−2.25` и `c=0.5` на группе | индексы 0 / 15, scale bits §9.2 |
-| `TestNF4Idempotent` | §8 и §9.4 | encode(decode(P)) = P |
-| `TestNF4Pad65` | `[1,2]=[0,1]` | packed §6.1, decode формы `[1,2]` |
-| `TestNF4RejectNaN` | один NaN | ошибка encode |
-| `TestNF4RejectInf` | один Inf | ошибка encode |
-| `TestNF4RejectEmpty` | `n_out=0` или `n_in=0` | ошибка |
-| `TestNF4GroupSize` | `group_size≠64` на стыке CHR0 | ошибка reader/encoder |
-| `TestNF4DecodeExact` | packed §8 | `W_hat[i] = L[idx[i]]` побитово |
-| `TestNF4ScaleLE` | scale `1.0` | блоб байты `00 3C` |
+| `TestNF4Golden2x64` | fixture §9.4 | both packed, two scales `0x3C00`, rmse/maxabs/mae ≤ thresholds |
+| `TestNF4PackNibble` | pairs §5.2 | bytes `F7`, `7F`, `C3` |
+| `TestNF4ZeroMatrix` | zeros `[3,64]` and `[1,65]` | nibbles 7, scale `0x3C00`, decode 0 |
+| `TestNF4Constant` | `c=−2.25` and `c=0.5` on a group | indices 0 / 15, scale bits §9.2 |
+| `TestNF4Idempotent` | §8 and §9.4 | encode(decode(P)) = P |
+| `TestNF4Pad65` | `[1,2]=[0,1]` | packed §6.1, decode of shape `[1,2]` |
+| `TestNF4RejectNaN` | one NaN | encode error |
+| `TestNF4RejectInf` | one Inf | encode error |
+| `TestNF4RejectEmpty` | `n_out=0` or `n_in=0` | error |
+| `TestNF4GroupSize` | `group_size≠64` at the CHR0 interface | reader/encoder error |
+| `TestNF4DecodeExact` | packed §8 | `W_hat[i] = L[idx[i]]` bitwise |
+| `TestNF4ScaleLE` | scale `1.0` | blob bytes `00 3C` |
 
 ---
 
-## 10. Стык с CHR0
+## 10. Interface with CHR0
 
-Кодек не описывает JSON-файл целиком. Контракт тензора с `codec: "nf4"`. Офсеты `[start, end)` от начала файла, как в `docs/compressor.md` §6.1. Контейнер выравнивает блобы на 64.
+The codec does not describe the JSON file as a whole. Contract of a tensor with `codec: "nf4"`. Offsets `[start, end)` from the start of the file, as in `docs/compressor.md` §6.1. The container aligns blobs to 64.
 
-### 10.1. Обязательные ключи
+### 10.1. Required keys
 
-| Ключ | Тип | Значение v1 | Обязателен |
+| Key | Type | v1 value | Required |
 |---|---|---|---|
-| `codec` | string | `"nf4"` | да |
-| `shape` | `[int, int]` | логический `[n_out, n_in]` | да |
-| `group_size` | int | **64** | да |
-| `data` | `[int, int]` | `[start, end)` packed uint8 | да |
-| `scale` | `[int, int]` | `[start, end)` FP16 | да |
-| `kind` | string | по правилам CHR0 | да, не забота кодека |
-| `layer` | int | если слойный тензор | по CHR0 |
+| `codec` | string | `"nf4"` | yes |
+| `shape` | `[int, int]` | logical `[n_out, n_in]` | yes |
+| `group_size` | int | **64** | yes |
+| `data` | `[int, int]` | `[start, end)` packed uint8 | yes |
+| `scale` | `[int, int]` | `[start, end)` FP16 | yes |
+| `kind` | string | per CHR0 rules | yes, not the codec’s concern |
+| `layer` | int | if a layered tensor | per CHR0 |
 
-Нет `zero`, нет `codebook` / `index`, нет nested absmax. Reader: `group_size ≠ 64` → ошибка этого среза. Поле `zero` присутствует → ошибка (это был бы другой codec).
+No `zero`, no `codebook` / `index`, no nested absmax. Reader: `group_size ≠ 64` → error of this slice. Field `zero` present → error (that would be another codec).
 
-### 10.2. Блобы
+### 10.2. Blobs
 
-Пусть `n_in_padded = 64 * ceil(n_in / 64)`, `n_groups = n_in_padded / 64`.
+Let `n_in_padded = 64 * ceil(n_in / 64)`, `n_groups = n_in_padded / 64`.
 
 **`data`**
 
 - dtype: `uint8`
-- форма: `[n_out, n_in_padded/2]`
-- layout: row-major, байт `(r, c)` по §5
+- shape: `[n_out, n_in_padded/2]`
+- layout: row-major, byte `(r, c)` per §5
 - `end - start = n_out * n_in_padded / 2`
 
 **`scale`**
 
 - dtype: FP16 little-endian
-- форма: `[n_out, n_groups]`
+- shape: `[n_out, n_groups]`
 - `end - start = n_out * n_groups * 2`
 
-Мини-пример (офсеты вымышленные, длины обязательны): `q_proj` 64×64:
+Mini-example (offsets made up, lengths mandatory): `q_proj` 64×64:
 
 ```json
 "model.layers.0.self_attn.q_proj": {
@@ -520,14 +520,14 @@ W[1, i] = float32(2*i − 63) / float32(63)       # равномерная се�
 
 `6144 − 4096 = 2048 = 64 × 32`. `6272 − 6144 = 128 = 64 × 1 × 2`.
 
-Эталон длин для `4096×4096` (как в компрессоре, но **с правильной длиной**, не как иллюстрация `data: [4096, 8200]` в `docs/compressor.md` §6.1):
+Length reference for `4096×4096` (as in the compressor, but **with the correct length**, not like the illustration `data: [4096, 8200]` in `docs/compressor.md` §6.1):
 
 - `data`: `4096 × 4096 / 2 = 8_388_608`
 - `scale`: `4096 × (4096/64) × 2 = 524_288`
 
-Writer считает `end = start + nbytes`.
+The writer computes `end = start + nbytes`.
 
-### 10.3. Сигнатуры для `chr decode` / `verify`
+### 10.3. Signatures for `chr decode` / `verify`
 
 ```
 EncodeNF4(W f32[n_out, n_in]) → data u8[n_out, n_in_padded/2], scale f16[n_out, n_groups]
@@ -535,20 +535,20 @@ EncodeNF4(W f32[n_out, n_in]) → data u8[n_out, n_in_padded/2], scale f16[n_out
 DecodeNF4(data, scale, n_out, n_in) → W_hat f32[n_out, n_in]
 ```
 
-`DecodeNF4` — чистая функция блобов и логического shape. Паддинг наружу не отдаёт.
+`DecodeNF4` is a pure function of the blobs and the logical shape. It does not emit padding outward.
 
-Нормы и bias этим кодеком не кодируются (в CHR0 они `bf16`).
+Norms and bias are not encoded by this codec (in CHR0 they are `bf16`).
 
 ---
 
-## 11. Чеклист для `internal/nf4`
+## 11. Checklist for `internal/nf4`
 
-- LUT §1 побитово, без scipy.
-- Encode группы: max-abs → FP16 scale → деление на `f32(s16)` → клип → L2 → tie = меньший индекс.
-- Decode: `L[nib] * f32(s16)` в float32.
-- Packing: low = чётный столбец; тест `0xF7` / `0x7F`.
-- Pad только в encode; `shape` логический.
-- NaN/Inf / пустой shape / не-finite scale → ошибка.
-- Золотой hex §8 и 2×64 §9.4.
-- Стык: `group_size: 64`, формы блобов §10, без `zero`.
-- Не INT4, не double quant, не дерево CUDA как второй канон.
+- LUT §1 bitwise, without scipy.
+- Group encode: max-abs → FP16 scale → divide by `f32(s16)` → clip → L2 → tie = smaller index.
+- Decode: `L[nib] * f32(s16)` in float32.
+- Packing: low = even column; test `0xF7` / `0x7F`.
+- Pad only in encode; `shape` is logical.
+- NaN/Inf / empty shape / non-finite scale → error.
+- Golden hex §8 and 2×64 §9.4.
+- Interface: `group_size: 64`, blob shapes §10, no `zero`.
+- Not INT4, not double quant, not the CUDA tree as a second canon.

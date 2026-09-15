@@ -58,6 +58,11 @@ def models_root() -> Path:
     return deepfold_home() / "models"
 
 
+def chats_root() -> Path:
+    """Saved ``deepfold chat`` transcripts: ``$DEEPFOLD_HOME/chats``."""
+    return deepfold_home() / "chats"
+
+
 def runs_root() -> Path:
     """Where lab / competitor dumps go. ``$DEEPFOLD_RUNS`` or ``<models>/runs``."""
     env = os.environ.get(ENV_RUNS)

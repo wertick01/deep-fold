@@ -225,6 +225,7 @@ def _ship(**over) -> Machine:
         transformers=True,
         safetensors=True,
         hf_hub=True,
+        cli_script=r"C:\dev\deep-fold\.venv\Scripts\deepfold.exe",
     )
     base.update(over)
     return Machine(**base)  # type: ignore[arg-type]
@@ -1164,6 +1165,17 @@ def test_parser_k5_commands() -> None:
     chat = build_parser().parse_args(["chat", "--model", "D:/m", "--max-new-tokens", "8"])
     assert chat.command == "chat" and chat.model == "D:/m" and chat.max_new_tokens == 8
     assert not hasattr(chat, "prompt")
+    defaults = build_parser().parse_args(["chat", "--model", "D:/m"])
+    assert defaults.max_new_tokens == 256 and defaults.max_seq == 2048
+    assert defaults.new is False and defaults.session is None
+    assert defaults.agent is False and defaults.workspace is None
+    assert defaults.max_tool_rounds == 8
+    agent = build_parser().parse_args(
+        ["chat", "--model", "D:/m", "--agent", "--workspace", "D:/proj"]
+    )
+    assert agent.agent is True and agent.workspace == "D:/proj"
+    run_defaults = build_parser().parse_args(["run", "--model", "D:/m"])
+    assert run_defaults.max_new_tokens == 64 and run_defaults.max_seq == 512
     setup = build_parser().parse_args(["setup", "--dry-run"])
     assert setup.dry_run is True
     live = build_parser().parse_args(["test", "--live"])
@@ -1184,7 +1196,301 @@ def test_slash_commands_are_not_prompts() -> None:
     assert chat_mod.classify_slash("/clear") == "clear"
     assert chat_mod.classify_slash("/help") == "help"
     assert chat_mod.classify_slash("/stats") == "stats"
+    assert chat_mod.classify_slash("/new") == "new"
+    assert chat_mod.classify_slash("/chats") == "chats"
+    assert chat_mod.classify_slash("/copy") == "copy"
+    assert chat_mod.classify_slash("/save") == "save"
+    assert chat_mod.classify_slash("/agent") == "agent"
+    assert chat_mod.classify_slash("/agent on") == "agent"
     assert chat_mod.classify_slash("/rm") == "unknown"
+    assert "Ctrl+C" in messages.CHAT_HELP
+    assert "/copy" in messages.CHAT_HELP
+    assert "/agent" in messages.CHAT_HELP
+
+
+def test_chat_status_and_toolbar() -> None:
+    out = SimpleNamespace(
+        prefill_ms=92.4,
+        prompt_len=38,
+        decode_tok_s=33.9,
+        decode_steps=63,
+        tokens=[1] * 64,
+        interrupted=False,
+        stop_token=None,
+    )
+    text = chat_mod.format_status(out, max_seq=512, max_new_tokens=64)
+    assert "92 ms" in text and "33.9 tok/s" in text and "102/512" in text
+    assert "stop max_new_tokens" in text
+    assert chat_mod.turn_stop(out, max_seq=512, max_new_tokens=64) == "max_new_tokens"
+    out.stop_token = 151645
+    assert chat_mod.turn_stop(out, max_seq=512, max_new_tokens=64) == "eos"
+    out.stop_token = None
+    out.interrupted = True
+    assert "interrupted" in chat_mod.format_status(
+        out, max_seq=512, max_new_tokens=64
+    )
+    bar = chat_mod.toolbar_text(
+        leaf="Qwen2.5-3B-Instruct",
+        sm="sm_86",
+        codec="nf4",
+        max_seq=512,
+        max_new_tokens=64,
+        out=out,
+    )
+    assert "nf4" in bar and "sm_86" in bar
+    empty = chat_mod.toolbar_text(
+        leaf="Qwen2.5-3B-Instruct",
+        sm="sm_86",
+        codec="nf4",
+        max_seq=512,
+        max_new_tokens=64,
+        out=None,
+    )
+    assert "seq 0/512" in empty and "—" in empty
+    agent_bar = chat_mod.toolbar_text(
+        leaf="Qwen2.5-3B-Instruct",
+        sm="sm_86",
+        codec="nf4",
+        max_seq=512,
+        max_new_tokens=64,
+        out=None,
+        agent=True,
+    )
+    assert "agent" in agent_bar
+
+
+def test_transcript_roundtrip_under_home() -> None:
+    from gpu.cli import transcript as store
+
+    with tempfile.TemporaryDirectory() as tmp:
+        old = os.environ.get("DEEPFOLD_HOME")
+        os.environ["DEEPFOLD_HOME"] = tmp
+        try:
+            model = r"C:\dev\models\Qwen2.5-3B-Instruct"
+            row = store.new_transcript(model)
+            row.messages = [
+                {"role": "user", "content": "привет, расскажи о себе"},
+                {"role": "assistant", "content": "Я Qwen"},
+            ]
+            path = store.save_transcript(row)
+            assert path.is_file() and path.parent == store.chats_root()
+            loaded = store.load_transcript(row.id)
+            assert loaded is not None
+            assert loaded.messages == row.messages
+            assert loaded.title.startswith("привет")
+            row.messages.append(
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"name": "list_dir", "arguments": {"path": "."}}],
+                }
+            )
+            row.messages.append(
+                {"role": "tool", "name": "list_dir", "content": "file\ta.txt"}
+            )
+            store.save_transcript(row)
+            reloaded = store.load_transcript(row.id)
+            assert reloaded is not None
+            assert reloaded.messages[-1]["role"] == "tool"
+            assert reloaded.messages[-2]["tool_calls"][0]["name"] == "list_dir"
+            listed = store.list_transcripts(model)
+            assert [r.id for r in listed] == [row.id]
+            other = store.new_transcript(r"C:\dev\models\Qwen2.5-14B-Instruct")
+            other.messages = [{"role": "user", "content": "14b"}]
+            store.save_transcript(other)
+            assert [r.id for r in store.list_transcripts(model)] == [row.id]
+        finally:
+            if old is None:
+                os.environ.pop("DEEPFOLD_HOME", None)
+            else:
+                os.environ["DEEPFOLD_HOME"] = old
+
+
+def test_copy_and_save_use_last_assistant() -> None:
+    from gpu.cli import clipboard as clip
+
+    hist = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "ответ с кириллицей"},
+    ]
+    assert chat_mod.last_assistant(hist) == "ответ с кириллицей"
+    dumped = chat_mod.format_transcript(hist)
+    assert "user>" in dumped and "ответ с кириллицей" in dumped
+    held: list[str] = []
+    clip.copy_text("привет", put=held.append)
+    assert held == ["привет"]
+    with tempfile.TemporaryDirectory() as tmp:
+        dest = Path(tmp) / "reply.md"
+        dest.write_text(chat_mod.last_assistant(hist) or "", encoding="utf-8")
+        assert dest.read_text(encoding="utf-8") == "ответ с кириллицей"
+
+
+def test_agent_parse_and_sandbox() -> None:
+    from gpu.cli import agent as agent_mod
+
+    text = (
+        "I'll look.\n<tool_call>\n"
+        '{"name": "list_dir", "arguments": {"path": "."}}\n'
+        "</tool_call>\n"
+        "<tool_call>\n"
+        '{"function": {"name": "read_file", "arguments": "{\\"path\\": \\"a.txt\\"}"}}\n'
+        "</tool_call>"
+    )
+    calls = agent_mod.parse_tool_calls(text)
+    assert calls == [
+        {"name": "list_dir", "arguments": {"path": "."}},
+        {"name": "read_file", "arguments": {"path": "a.txt"}},
+    ]
+    assert agent_mod.strip_tool_xml(text) == "I'll look."
+    assert agent_mod.confirm_accepted("y") and agent_mod.confirm_accepted("да")
+    assert not agent_mod.confirm_accepted("n")
+    assert agent_mod.needs_confirm("write_file")
+    assert not agent_mod.needs_confirm("list_dir")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "a.txt").write_text("hello\nworld\n", encoding="utf-8")
+        (root / "sub").mkdir()
+        listed = agent_mod.execute("list_dir", {"path": "."}, root)
+        assert "a.txt" in listed and "sub" in listed
+        read = agent_mod.execute("read_file", {"path": "a.txt"}, root)
+        assert "1: hello" in read and "2: world" in read
+        wrote = agent_mod.execute(
+            "write_file", {"path": "sub/b.txt", "content": "x"}, root
+        )
+        assert "wrote" in wrote
+        assert (root / "sub" / "b.txt").read_text(encoding="utf-8") == "x"
+        escaped = agent_mod.execute("read_file", {"path": ".."}, root)
+        assert escaped.startswith("error:")
+        (root / ".git").mkdir()
+        (root / ".git" / "config").write_text("secret", encoding="utf-8")
+        git = agent_mod.execute("read_file", {"path": ".git/config"}, root)
+        assert "not readable" in git
+        unknown = agent_mod.execute("shell", {"cmd": "dir"}, root)
+        assert "unknown tool" in unknown
+        hist: list = [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"name": "list_dir", "arguments": {"path": "."}}],
+            },
+            {"role": "tool", "name": "list_dir", "content": listed},
+        ]
+        agent_mod.ensure_agent_system(hist, root)
+        assert hist[0]["role"] == "system"
+        flat = agent_mod.flatten_history(hist)
+        assert "<tool_call>" in flat[1]["content"]
+        assert flat[2]["role"] == "user" and "<tool_response>" in flat[2]["content"]
+        agent_mod.drop_agent_system(hist)
+        assert hist[0]["role"] == "assistant"
+
+        class _Proc:
+            returncode = 0
+            stdout = "1 passed"
+            stderr = ""
+
+        def _fake_run(cmd, **kwargs):
+            assert cmd[-2] == "--"
+            assert "pytest" in cmd
+            return _Proc()
+
+        orig = agent_mod.subprocess.run
+        agent_mod.subprocess.run = _fake_run  # type: ignore[method-assign]
+        try:
+            out = agent_mod.execute("run_tests", {"path": "a.txt"}, root)
+        finally:
+            agent_mod.subprocess.run = orig  # type: ignore[method-assign]
+        assert out.startswith("exit 0")
+
+
+def test_markdown_stream_identity_and_fences() -> None:
+    from gpu.cli import md as chat_md
+
+    src = "pre\n" + "`" * 3 + "python\nprint(1)\n" + "`" * 3 + "\npost **bold**"
+    plain = chat_md.to_ansi(src, color=False)
+    assert "print(1)" in plain and "bold" in plain and "**" not in plain
+    colored = chat_md.to_ansi(src, color=True)
+    assert "\x1b[" in colored
+    assert "print(1)" in chat_md.strip_ansi(colored)
+    assert chat_md.strip_ansi(colored).endswith("post bold")
+    parts: list[str] = []
+    stream = chat_md.MarkdownStream(parts.append, color=True)
+    fence = "`" * 3
+    for chunk in (fence, "\nco", "de\n", fence):
+        stream.feed(chunk)
+    stream.close()
+    joined = "".join(parts)
+    assert "\x1b[" in joined
+    assert chat_md.strip_ansi(joined) == fence + "\ncode\n" + fence
+    old = os.environ.get("NO_COLOR")
+    os.environ["NO_COLOR"] = "1"
+    try:
+        assert chat_md.color_enabled() is False
+    finally:
+        if old is None:
+            os.environ.pop("NO_COLOR", None)
+        else:
+            os.environ["NO_COLOR"] = old
+
+
+def test_markdown_math_and_inline() -> None:
+    from gpu.cli import md as chat_md
+    from gpu.cli.tex import latex_to_unicode
+
+    assert latex_to_unicode(r"\alpha") == "α"
+    assert latex_to_unicode(r"x^2") == "x²"
+    assert latex_to_unicode(r"\frac{1}{2}") == "½"
+    assert "∑" in latex_to_unicode(r"\sum_{i=1}^{n} x_i")
+    assert "ℝ" in latex_to_unicode(r"\mathbb{R}")
+    matrix = latex_to_unicode(r"\begin{pmatrix} 1 & 2 \\ 3 & 4 \end{pmatrix}")
+    assert "1" in matrix and "4" in matrix and "(" in matrix
+    assert chat_md.to_ansi(r"$\alpha$", color=False) == "α"
+    assert "$" not in chat_md.to_ansi(r"$E=mc^2$", color=False)
+    assert "²" in chat_md.to_ansi(r"$E=mc^2$", color=False)
+    display = chat_md.to_ansi("$$\\frac{a+b}{c}$$", color=False)
+    assert "a+b" in display and "c" in display and "\\" not in display
+    assert chat_md.to_ansi(r"\(\theta\)", color=False) == "θ"
+    assert chat_md.to_ansi("# Title\n", color=False) == "Title\n"
+    assert chat_md.to_ansi("- one\n- two\n", color=False) == "• one\n• two\n"
+    assert chat_md.to_ansi("`code`", color=False) == "code"
+    assert chat_md.to_ansi("[hi](http://x)", color=False) == "hi"
+    parts: list[str] = []
+    stream = chat_md.MarkdownStream(parts.append, color=False)
+    for chunk in (r"$\al", r"pha$ **bo", "ld**"):
+        stream.feed(chunk)
+    stream.close()
+    assert "".join(parts) == "α bold"
+    fenced = chat_md.to_ansi("```\n$\\alpha$\n```", color=False)
+    assert "$\\alpha$" in fenced
+    hidden = chat_md.to_ansi(
+        'pre <tool_call>\n{"name": "list_dir", "arguments": {"path": "."}}\n</tool_call> post',
+        color=False,
+    )
+    assert "pre" in hidden and "post" in hidden
+    assert "tool_call" not in hidden
+
+
+def test_chat_picker_and_stalled_tool() -> None:
+    from gpu.cli import agent as agent_mod
+
+    assert chat_mod.parse_chat_choice("", 3) == ("empty", None)
+    assert chat_mod.parse_chat_choice("n", 3) == ("new", None)
+    assert chat_mod.parse_chat_choice("2", 3) == ("index", 2)
+    assert chat_mod.parse_chat_choice("9", 3) == ("bad-index", 9)
+    assert chat_mod.parse_chat_choice("20260915-211057-900", 1)[0] == "id"
+    kind, payload = chat_mod.parse_chat_choice(
+        "напиши демонстрационный файл с кодом", 1
+    )
+    assert kind == "prompt" and "файл" in str(payload)
+    junk = "<tool_call>" + ("!" * 20)
+    assert agent_mod.degenerate_tool_text(junk)
+    assert not agent_mod.degenerate_tool_text(
+        '<tool_call>\n{"name": "list_dir", "arguments": {"path": "."}}\n</tool_call>'
+    )
+    m = _ship(cli_script=None)
+    row = next(c for c in checks(m, verdict(m, override=False)) if c.name == "deepfold CLI")
+    assert row.tag == "warn"
+    assert "python -m gpu.cli" in row.detail
 
 
 def test_chat_without_tty_points_at_run_prompt() -> None:
@@ -1214,6 +1520,7 @@ def test_setup_dry_run_does_not_pip() -> None:
     assert called == []
     text = out.getvalue() + err.getvalue()
     assert "torch" in text and "download.pytorch.org/whl/cu124" in text
+    assert '".[hub,chat]"' in text or ".[hub,chat]" in text
 
 
 def test_setup_refuses_torch_gpu_without_pip() -> None:

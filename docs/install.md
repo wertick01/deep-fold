@@ -15,7 +15,12 @@ Deepfold does **not** install the NVIDIA driver, Python, Go, or a CUDA
 compiler. A red `doctor` is a normal install refusal, not a kernel bug.
 
 After `pip install -e .`, `deepfold` and `python -m gpu.cli` are the same.
-If `deepfold` is not on PATH yet, use `python -m gpu.cli`. `-h` and `--help`
+If `deepfold` is not on PATH yet, use `python -m gpu.cli`. The author’s
+conda env `torch-gpu` never installs the `deepfold` script (a broken wheel
+there takes the kernel); that lab always uses `python -m gpu.cli`.
+Neighbor boxes run `scripts/setup.ps1` / `setup.sh`, then
+`.\\.venv\\Scripts\\Activate.ps1` (or `source .venv/bin/activate`). Without
+activate, call `.\\.venv\\Scripts\\deepfold.exe` directly. `-h` and `--help`
 are equivalent. Dumps below were captured from a live `python -m gpu.cli`.
 
 ---
@@ -285,8 +290,9 @@ The setup script already installs the `hub` extra.
 ### `chat` — conversation in a terminal
 
 Needs a real TTY (PowerShell / Linux terminal, not a redirect). Weights load
-once. Each turn prefills the **whole** history (KV is not reused across turns
-in v1).
+once. Each turn prefills the **whole** history from JSON under
+`$DEEPFOLD_HOME/chats` (KV is not reused across turns). Chat default is 256
+new tokens and `--max-seq 2048` (`run` stays 64 / 512).
 
 ```text
 deepfold chat -h
@@ -298,9 +304,7 @@ usage: deepfold chat [-h] [--model MODEL] [--chr CHR] [--codec {auto,nf4,vq}]
                      [--max-seq MAX_SEQ] [--max-resident-mib MAX_RESIDENT_MIB]
                      [--raw] [--no-warmup] [--no-compress] [--quiet] [--debug]
 
-Same load path as run, then a prompt_toolkit session. Enter sends, Ctrl+J new
-line. Each turn prefills the whole chat. Needs a TTY; scripts use run
---prompt.
+Same load path as run, then a prompt_toolkit session. Enter sends, Ctrl+J newline, Ctrl+C stops a reply. Each turn prefills the whole chat. Needs a TTY; scripts use run --prompt.
 
 options:
   -h, --help            show this help message and exit
@@ -311,8 +315,8 @@ options:
                         --codec vq is oracle-only
   --chr-bin CHR_BIN     path to the Go chr binary
   --max-new-tokens MAX_NEW_TOKENS
-                        tokens to generate per turn (default: 64)
-  --max-seq MAX_SEQ     preallocated KV length
+                        tokens to generate per turn (default: 256)
+  --max-seq MAX_SEQ     preallocated KV length (default: 2048)
   --max-resident-mib MAX_RESIDENT_MIB
                         HBM cap for NF4 weights in MiB; overflow streams the
                         rest (H2). Default: fully resident if NF4 fits, else
@@ -327,13 +331,19 @@ options:
   --debug               traceback after the report
 ```
 
-`--max-seq` defaults to 512.
+`--max-seq` for `chat` defaults to 2048.
 
 ```text
 deepfold chat --model D:\weights\Qwen2.5-3B-Instruct
 deepfold chat --model D:\weights\Qwen2.5-3B-Instruct --chr D:\weights\qwen25-3b.nf4.chr --max-new-tokens 128
 deepfold chat --model D:\weights\Qwen2.5-3B-Instruct --max-seq 1024 --no-warmup
+deepfold chat --model D:\weights\Qwen2.5-14B-Instruct --agent --workspace C:\dev\deep-fold
 ```
+
+`--agent` (or `/agent on`) lets the model list, read, and write files under
+`--workspace` (cwd if omitted) and run pytest on a path there. Writes and
+tests prompt `allow this tool? [y/N]`. There is no general shell. Prefer 14B
+over 3B for tool JSON. `--agent` cannot be combined with `--raw`.
 
 In-session:
 
@@ -341,14 +351,22 @@ In-session:
 |---|---|
 | Enter | send the turn |
 | Ctrl+J | newline in the same message |
+| Ctrl+C | stop the reply; at an empty prompt, twice to quit |
 | `/help` | this cheat sheet |
+| `/stats` | last turn prefill ms, tok/s, and stop reason |
 | `/clear` | drop history |
-| `/stats` | last turn prefill ms and tok/s |
+| `/new` | start a new saved chat |
+| `/chats` | pick a saved chat |
+| `/copy` | copy the last reply (`/copy all` = whole chat) |
+| `/save [path]` | write the last reply to a file |
+| `/agent on` `/agent off` | toggle workspace tools |
 | `/quit` or `/exit` | leave |
 | any other `/foo` | refused, not sent to the model |
 
 Needs the `prompt_toolkit` extra (`deepfold[chat]`; the setup script installs
-it). Not a TTY → exit 1 and “use `run --prompt`”.
+it). Not a TTY → exit 1 and “use `run --prompt`”. Streamed replies render
+markdown (bold, lists, fenced code) and approximate `$...$` / `$$` LaTeX as
+Unicode. `/copy` still stores the raw model text.
 
 ### `run` — one prompt or a thin REPL
 
@@ -507,7 +525,7 @@ deepfold from-ollama qwen2.5:3b --hf Qwen/Qwen2.5-3B-Instruct --yes --dir D:\wei
 | `DEEPFOLD_MODEL` | default HuggingFace dir for `run` / `chat` |
 | `DEEPFOLD_CHR` | `.chr` file if present and the header matches the model |
 | `DEEPFOLD_MODELS` | root for `pull` trees and the lab |
-| `DEEPFOLD_HOME` | cache (`%LOCALAPPDATA%\deepfold` / `~/.cache/deepfold`) |
+| `DEEPFOLD_HOME` | cache (`%LOCALAPPDATA%\deepfold` / `~/.cache/deepfold`); chat JSON in `chats/` |
 | `DEEPFOLD_CHR_BIN` | `chr` / `chr.exe` |
 | `DEEPFOLD_RUNS` | lab run dumps |
 | `DEEPFOLD_COPY_JOIN` | `1`/`0` — CPU join H2D (Windows on by default, Linux off) |
@@ -538,6 +556,7 @@ deepfold chat --model "$DEEPFOLD_MODEL"
 | `doctor` exit 3 on Ada | old contract bug; after K4 this must not happen |
 | `chat` “needs a TTY” | pipe / IDE without a TTY; use a terminal window or `run --prompt` |
 | `chat` asks for prompt_toolkit | `pip install "deepfold[chat]"` |
+| `'deepfold' is not recognized` / is not a command | Activate `.venv`, or `.\\.venv\\Scripts\\deepfold.exe`, or `python -m gpu.cli`. conda `torch-gpu` never gets the script. Skip the saved-chat picker with `--new`. |
 | `pull` unknown id | only the four table rows above |
 | CUDA OOM | close other GPU programs; 32B is overflow, not 3B |
 | first run takes a minute+ | one-time fatbinary JIT on the neighbor card |

@@ -1,53 +1,53 @@
-# Кодек B: additive VQ 2×8, residual k-means (CPU)
+# Codec B: additive VQ 2×8, residual k-means (CPU)
 
-Диагностика формата этапа B. Не качество чата, не AQLM, не калибровка на активациях X. Книга **на матрицу**, не на слой. Счёт только MSE весов.
+Stage-B format diagnostics. Not chat quality, not AQLM, not calibration on activations X. Codebook **per matrix**, not per layer. Count only weight MSE.
 
-Каноническая реализация — пакет `internal/vq` на Go 1.22 без CGO, без GPU, без faiss, без beam, без sklearn. Эта спека достаточна, чтобы написать пакет и table-driven тесты на крошечной матрице.
+Canonical implementation — package `internal/vq` on Go 1.22 without CGO, without GPU, without faiss, without beam, without sklearn. This spec is enough to write the package and table-driven tests on a tiny matrix.
 
 ---
 
-## 0. Зафиксированные константы и не-цели
+## 0. Frozen constants and non-goals
 
-| Символ | Значение | Смысл |
+| Symbol | Value | Meaning |
 |---|---:|---|
-| `M` | 2 | Число кодовых книг. M=1 в v1 **не** делаем. |
-| `k` | 256 | Центроидов в каждой книге. |
-| `B` / `group_size` | 8 | Длина вектора = группа вдоль `n_in`. |
-| `codebook_bits` | 8 | Индекс — один байт, `k = 2^8`. |
-| `iters` по умолчанию | 20 | Полных циклов Lloyd на **каждую** книгу. |
-| `--seed` по умолчанию | 0 | `uint64`. |
-| `--chunk` по умолчанию | 262144 | Векторов на чанк assignment. |
-| `--tol` по умолчанию | выключен | Ранняя остановка только если задали порог. |
+| `M` | 2 | Number of codebooks. M=1 is **not** done in v1. |
+| `k` | 256 | Centroids in each codebook. |
+| `B` / `group_size` | 8 | Vector length = group along `n_in`. |
+| `codebook_bits` | 8 | Index is one byte, `k = 2^8`. |
+| `iters` default | 20 | Full Lloyd cycles on **each** codebook. |
+| `--seed` default | 0 | `uint64`. |
+| `--chunk` default | 262144 | Vectors per assignment chunk. |
+| `--tol` default | off | Early stop only if a threshold was given. |
 
-**Хранение.** Книга `codebook[M][256][8]` — IEEE 754 **binary16** (FP16), little-endian. Индексы — `uint8`. Арифметика k-means — **float32**, аккумуляторы сумм — **float64**.
+**Storage.** Codebook `codebook[M][256][8]` is IEEE 754 **binary16** (FP16), little-endian. Indices are `uint8`. k-means arithmetic is **float32**, sum accumulators are **float64**.
 
-**Реконструкция группы из 8 весов:**
+**Reconstruction of a group of 8 weights:**
 
 \[
-\hat g = C_1[i_1] + C_2[i_2] \quad \text{(покомпонентно, float32 после FP16→float32)}
+\hat g = C_1[i_1] + C_2[i_2] \quad \text{(componentwise, float32 after FP16→float32)}
 \]
 
-Для `verify` выход decode — float32. Сравнение с оригиналом W — lossy. Сравнение decode с «книга + индексы» — **бит-точное**.
+For `verify` the decode output is float32. Comparison with original W is lossy. Comparison of decode with “codebook + indices” is **bit-exact**.
 
-**Не-цели v1 (запрещено реализовывать в этом срезе):** GPU / CUDA / faiss / beam search / GPTVQ / block fine-tune / Hessian / imatrix / weighted k-means / mini-batch Sculley / sklearn / вторая книга иной размерности / `M≠2` / `k≠256` / `B≠8`.
+**v1 non-goals (forbidden to implement in this slice):** GPU / CUDA / faiss / beam search / GPTVQ / block fine-tune / Hessian / imatrix / weighted k-means / mini-batch Sculley / sklearn / a second codebook of a different dimension / `M≠2` / `k≠256` / `B≠8`.
 
-**Детерминизм.** Один и тот же `(W, seed, iters, chunk, tol)` → те же `uint8` индексы и те же биты FP16 книги на одном компиляторе Go / одной архитектуре. Правило тай-брейков и порядок потребления RNG зафиксированы ниже. Золотые индексы в unit-тестах снимаются с Go, не с NumPy.
+**Determinism.** The same `(W, seed, iters, chunk, tol)` → the same `uint8` indices and the same FP16 codebook bits on one Go compiler / one architecture. Tie-break rules and RNG consumption order are fixed below. Golden indices in unit tests are taken from Go, not from NumPy.
 
 ---
 
-## 1. Формулы residual k-means: формы, init → iterate → residual → вторая книга
+## 1. Residual k-means formulas: shapes, init → iterate → residual → second codebook
 
-### 1.1. Вход, паддинг, нарезка векторов
+### 1.1. Input, padding, slicing into vectors
 
-Вход: матрица `W[n_out, n_in]`, row-major. Допустимые исходные dtype: `F32`, `F16`, `BF16`. Перед кластеризацией каждый элемент **один раз** приводится к float32:
+Input: matrix `W[n_out, n_in]`, row-major. Allowed source dtypes: `F32`, `F16`, `BF16`. Before clustering each element is converted **once** to float32:
 
-- F32 → как есть;
+- F32 → as-is;
 - F16 → IEEE binary16 → float32;
-- BF16 → старшие 16 бит float32, младшие 16 бит нули.
+- BF16 → high 16 bits of float32, low 16 bits zeros.
 
-`NaN` или `Inf` на входе → **ошибка encode**, не молча. Пустые оси `n_out < 1` или `n_in < 1` → ошибка encode.
+`NaN` or `Inf` on input → **encode error**, not silently. Empty axes `n_out < 1` or `n_in < 1` → encode error.
 
-Паддинг только вдоль `n_in`, только нулями, только во внутреннем буфере encode:
+Padding only along `n_in`, only with zeros, only in the internal encode buffer:
 
 \[
 n_{\mathrm{in\_padded}} = 8 \left\lceil \frac{n_{\mathrm{in}}}{8} \right\rceil, \qquad
@@ -55,9 +55,9 @@ G = \frac{n_{\mathrm{in\_padded}}}{8}, \qquad
 N = n_{\mathrm{out}} \cdot G.
 \]
 
-В метаданных CHR0 лежит **логический** `shape = [n_out, n_in]`, не padded. `G` и размер блоба `index` считаются из padded. При decode лишние `n_in_padded - n_in` столбцов отбрасываются.
+CHR0 metadata stores the **logical** `shape = [n_out, n_in]`, not padded. `G` and the `index` blob size are computed from padded. On decode the extra `n_in_padded - n_in` columns are dropped.
 
-Вектор с линейным номером `n ∈ {0,…,N−1}`:
+Vector with linear number `n ∈ {0,…,N−1}`:
 
 \[
 r = \left\lfloor n / G \right\rfloor, \quad
@@ -66,212 +66,212 @@ j = n \bmod G,
 
 \[
 V[n, d] = \begin{cases}
-W[r,\ 8j+d] & \text{если } 8j+d < n_{\mathrm{in}} \\
-0 & \text{иначе}
+W[r,\ 8j+d] & \text{if } 8j+d < n_{\mathrm{in}} \\
+0 & \text{otherwise}
 \end{cases}
 \quad d=0..7.
 \]
 
-Формы:
+Shapes:
 
-| Тензор | Форма | dtype при счёте | Комментарий |
+| Tensor | Shape | dtype when counting | Comment |
 |---|---|---|---|
-| `W` логический | `[n_out, n_in]` | float32 | Как в JSON `shape`. |
-| `W_pad` | `[n_out, n_in_padded]` | float32 | Нужен только как view; можно не материализовать отдельно от `V`. |
+| `W` logical | `[n_out, n_in]` | float32 | As in JSON `shape`. |
+| `W_pad` | `[n_out, n_in_padded]` | float32 | Needed only as a view; need not be materialized separately from `V`. |
 | `V` | `[N, 8]` | float32 | `N = n_out * G`. Row-major: `V[n*8 + d]`. |
-| `R` | `[N, 8]` | float32 | Рабочий residual. Стартует как копия `V`. |
-| `C_m` (счёт) | `[256, 8]` | float32 | Одна книга. |
-| `C` (файл) | `[2, 256, 8]` | FP16 | См. §7. |
-| `π_m` | `[N]` | uint8 | Assignment книги `m`. |
-| `index` (файл) | `[n_out, G, 2]` | uint8 | См. §6. |
+| `R` | `[N, 8]` | float32 | Working residual. Starts as a copy of `V`. |
+| `C_m` (compute) | `[256, 8]` | float32 | One codebook. |
+| `C` (file) | `[2, 256, 8]` | FP16 | See §7. |
+| `π_m` | `[N]` | uint8 | Assignment of codebook `m`. |
+| `index` (file) | `[n_out, G, 2]` | uint8 | See §6. |
 
-`V` не обязан быть отдельной аллокацией, если `W_pad` уже row-major float32: тогда `V` — view. `R` — **отдельный** буфер: после первой книги `V` больше не равен residual. Исходный `W` после построения `R` для compress можно отпустить.
+`V` need not be a separate allocation if `W_pad` is already row-major float32: then `V` is a view. `R` is a **separate** buffer: after the first codebook `V` is no longer equal to the residual. The source `W` can be released after building `R` for compress.
 
-### 1.2. Additive VQ как цель
+### 1.2. Additive VQ as the objective
 
-Ищем книги \(C^{(0)}, C^{(1)} \in \mathbb{R}^{256 \times 8}\) и индексы \(\pi^{(0)}, \pi^{(1)} \in \{0,\ldots,255\}^N\):
+We seek codebooks \(C^{(0)}, C^{(1)} \in \mathbb{R}^{256 \times 8}\) and indices \(\pi^{(0)}, \pi^{(1)} \in \{0,\ldots,255\}^N\):
 
 \[
 \hat V[n] \approx C^{(0)}[\pi^{(0)}(n)] + C^{(1)}[\pi^{(1)}(n)].
 \]
 
-Бит/вес: \(M \cdot 8 / 8 = 2\). Объём книги на матрицу: \(2 \cdot 256 \cdot 8 \cdot 2 = 8192\) байт.
+Bits/weight: \(M \cdot 8 / 8 = 2\). Codebook volume per matrix: \(2 \cdot 256 \cdot 8 \cdot 2 = 8192\) bytes.
 
-Это **residual k-means** (инициализация AQLM / additive quantization), не совместный beam по паре индексов. Каждая книга жадно приближает текущий residual по MSE:
+This is **residual k-means** (AQLM / additive quantization initialization), not a joint beam over a pair of indices. Each codebook greedily approximates the current residual by MSE:
 
 \[
 L_m = \frac{1}{N} \sum_{n=0}^{N-1} \left\| R^{(m)}[n] - C^{(m)}[\pi^{(m)}(n)] \right\|_2^2.
 \]
 
-Sqrt в лоссе и в assignment **не берём**: argmin по \(L_2^2\) совпадает с argmin по \(L_2\).
+Do **not** take sqrt in the loss or in assignment: argmin over \(L_2^2\) coincides with argmin over \(L_2\).
 
-### 1.3. Внешний цикл по книгам (ровно M=2)
+### 1.3. Outer loop over codebooks (exactly M=2)
 
-`Q16(x)` = float32 → FP16 (roundTiesToEven) → float32. Так residual второй книги совпадает с тем, что вычтет decode из записанной книги, а не из «сырого» float32-центроида Lloyd.
+`Q16(x)` = float32 → FP16 (roundTiesToEven) → float32. Then the residual of the second codebook matches what decode will subtract from the written codebook, not from the “raw” float32 Lloyd centroid.
 
 ```
 R[N, 8] ← copy(V)          # float32
-создать PCG(seed, 0)       # один генератор на матрицу, §2.1
-idx_sub ← ReservoirIndices(N, n_sub=min(N, 65536), rng)   # один раз
+create PCG(seed, 0)       # one generator per matrix, §2.1
+idx_sub ← ReservoirIndices(N, n_sub=min(N, 65536), rng)   # once
 
-для m = 0, 1:
+for m = 0, 1:
     C_f32[256, 8], π[N] ← KMeans(R, k=256, iters, chunk, tol, rng, idx_sub)
     C_fp16[m] ← float32_to_fp16(C_f32)          # roundTiesToEven, §7
-    # residual для следующей книги — через записанную книгу
-    для n = 0 .. N-1:                           # чанками, как assignment
+    # residual for the next codebook — through the written codebook
+    for n = 0 .. N-1:                           # in chunks, like assignment
         R[n] ← R[n] − fp16_to_float32(C_fp16[m][ π[n] ])
     π_store[m] ← π
 
-упаковать index из π_store[0], π_store[1]       # §6
-вернуть codebook=C_fp16, index
+pack index from π_store[0], π_store[1]       # §6
+return codebook=C_fp16, index
 ```
 
-После `m=1` финальный residual `R` — ошибка реконструкции относительно **записанных** FP16 книг. Его можно выбросить; для логов MSE = `mean(R²)` по `N*8` элементам (паддинг-нули входят во внутренний MSE, в `verify` против W — нет, там логический shape).
+After `m=1` the final residual `R` is the reconstruction error relative to the **written** FP16 codebooks. It can be discarded; for logs MSE = `mean(R²)` over `N*8` elements (padding zeros enter the internal MSE; in `verify` against W they do not, there the logical shape is used).
 
-Если при `float32_to_fp16` получился Inf (центроид вне диапазона binary16, `|x| > 65504`) — ошибка encode. На весах LLM не встречается; на синтетике с гигантскими числами — да.
+If `float32_to_fp16` produced Inf (centroid outside the binary16 range, `|x| > 65504`) — encode error. Does not happen on LLM weights; on synthetic data with giant numbers — yes.
 
-### 1.4. Один KMeans на текущем residual `R`
+### 1.4. One KMeans on the current residual `R`
 
 ```
 C ← KMeansPlusPlus(R[idx_sub], k=256, rng)      # §2
 C_old ← zeros
-для iter = 1 .. iters:                          # iters=0 → тело не крутится
+for iter = 1 .. iters:                          # iters=0 → body does not run
     π ← AssignChunks(R, C, chunk)               # §3
     C, count ← UpdateMeans(R, π)                # §4
     δ ← max_{j: count[j]>0} ‖C[j] − C_old[j]‖_2
     C_old ← C
-    ResplitEmpty(C, count, rng)                 # §4.2, после δ
-    если tol задан и δ < tol: break
-π ← AssignChunks(R, C, chunk)                   # финальный assignment под итоговую C
-вернуть C, π
+    ResplitEmpty(C, count, rng)                 # §4.2, after δ
+    if tol is set and δ < tol: break
+π ← AssignChunks(R, C, chunk)                   # final assignment under the final C
+return C, π
 ```
 
-**Зачем финальный assignment.** После последнего update центроиды съехали, а `π` ещё от предыдущей `C`. В файл пишем индексы, согласованные с итоговой float32-книгой (до FP16-каста). После FP16-каста индексы **не** пересчитываем: test §9.2 требует согласованности с записанной книгой, а не оптимальности FP16-книги.
+**Why the final assignment.** After the last update the centroids moved, and `π` is still from the previous `C`. We write to the file indices consistent with the final float32 codebook (before the FP16 cast). After the FP16 cast we **do not** recompute indices: test §9.2 requires consistency with the written codebook, not optimality of the FP16 codebook.
 
-**`iters = 0`:** только k-means++ и один assignment, без Lloyd. Разрешено. Дефолт 20.
+**`iters = 0`:** only k-means++ and one assignment, no Lloyd. Allowed. Default 20.
 
-**`iters < 0`:** ошибка.
+**`iters < 0`:** error.
 
-Каждая из двух книг крутит свой Lloyd независимо. Счётчик `iter` не общий.
+Each of the two codebooks runs its own Lloyd independently. The `iter` counter is not shared.
 
-### 1.5. Формы внутри одной итерации Lloyd
+### 1.5. Shapes inside one Lloyd iteration
 
-| Буфер | Форма | dtype | Живёт |
+| Buffer | Shape | dtype | Lives |
 |---|---|---|---|
-| `C` | `[256, 8]` | float32 | вся книга |
-| `cnorm2` | `[256]` | float32 | итерация; `∑_d C[j,d]²` |
-| `x_chunk` | `[T, 8]` | view в `R` | чанк |
-| `dist` | `[T, 256]` | float32 | чанк; можно не хранить целиком, §3.4 |
-| `π` | `[N]` | uint8 | вся книга |
-| `sum` | `[256, 8]` | float64 | итерация |
-| `count` | `[256]` | int64 | итерация |
+| `C` | `[256, 8]` | float32 | whole codebook |
+| `cnorm2` | `[256]` | float32 | iteration; `∑_d C[j,d]²` |
+| `x_chunk` | `[T, 8]` | view into `R` | chunk |
+| `dist` | `[T, 256]` | float32 | chunk; need not store whole, §3.4 |
+| `π` | `[N]` | uint8 | whole codebook |
+| `sum` | `[256, 8]` | float64 | iteration |
+| `count` | `[256]` | int64 | iteration |
 
 `T = min(chunk, N − offset)`.
 
 ---
 
-## 2. k-means++ на подвыборке
+## 2. k-means++ on a subsample
 
 ### 2.1. RNG
 
-Один генератор на **одну матрицу**:
+One generator per **one matrix**:
 
 ```
 rng = math/rand/v2.New( math/rand/v2.NewPCG(uint64(seed), uint64(0)) )
 ```
 
-Go 1.22+. Методы только `IntN(n)` (`[0, n)`) и `Float64()` (`[0, 1)`). Не `math/rand` v1 (другой алгоритм). Не хешировать имя тензора в seed: две матрицы с одним `--seed` получают **одинаковую** последовательность, каждая со своего `NewPCG(seed, 0)`.
+Go 1.22+. Methods only `IntN(n)` (`[0, n)`) and `Float64()` (`[0, 1)`). Not `math/rand` v1 (different algorithm). Do not hash the tensor name into the seed: two matrices with the same `--seed` get the **same** sequence, each from its own `NewPCG(seed, 0)`.
 
-Порядок потребления на матрице:
+Consumption order on a matrix:
 
-1. Резервуар индексов подвыборки (0 вызовов, если `N ≤ 65536`).
-2. Книга 0: k-means++ (IntN + Float64), затем на каждой итерации Lloyd — шум респлита пустых (Float64).
-3. Книга 1: то же, генератор **не** сбрасывается.
+1. Reservoir of subsample indices (0 calls if `N ≤ 65536`).
+2. Codebook 0: k-means++ (IntN + Float64), then on each Lloyd iteration — empty-cluster resplit noise (Float64).
+3. Codebook 1: the same, the generator is **not** reset.
 
-Потоки не параллелить: гонка по RNG запрещена. Assignment внутри Lloyd от RNG не зависит.
+Do not parallelize streams: an RNG race is forbidden. Assignment inside Lloyd does not depend on RNG.
 
-### 2.2. Размер подвыборки
+### 2.2. Subsample size
 
 \[
 n_{\mathrm{sub}} = \min(N,\ 65536).
 \]
 
-Ровно так, не «около 64k». `65536 = 2^{16}` — константа спеки, не флаг.
+Exactly that, not “about 64k”. `65536 = 2^{16}` is a spec constant, not a flag.
 
-Индексы подвыборки считаются **один раз** по `N` и переиспользуются для обеих книг. Значения векторов на этих индексах берутся из **текущего** `R` (для книги 1 это уже residual).
+Subsample indices are computed **once** from `N` and reused for both codebooks. Vector values at those indices are taken from the **current** `R` (for codebook 1 that is already the residual).
 
-### 2.3. Как семплировать без shuffle всего N
+### 2.3. How to sample without shuffling all of N
 
-Полный shuffle индексов `0..N-1` на жирной матрице — это `N` значений `int64` (для `N = 7_340_032` ≈ 56 МиБ) плюс проход permutации. Не делаем.
+A full shuffle of indices `0..N-1` on a fat matrix is `N` `int64` values (for `N = 7_340_032` ≈ 56 MiB) plus a permutation pass. We do not do that.
 
-**Выбранный метод: Algorithm R (Vitter), резервуар по индексам.** Не страйд: у `W` есть структура по строкам, равномерный страйд систематически дырявит ряды.
+**Chosen method: Algorithm R (Vitter), reservoir over indices.** Not a stride: `W` has structure along rows, a uniform stride systematically holes rows.
 
 ```
 n_sub = min(N, 65536)
 idx_sub[0 .. n_sub) — uint32
-если N ≤ 65536:
-    idx_sub[i] = i                          # без RNG
-иначе:
-    для i = 0 .. n_sub-1:
-        idx_sub[i] = i                      # первые n_sub векторов
-    для t = n_sub .. N-1:
-        j = rng.IntN(t + 1)                 # равномерно в [0, t]
-        если j < n_sub:
+if N ≤ 65536:
+    idx_sub[i] = i                          # no RNG
+else:
+    for i = 0 .. n_sub-1:
+        idx_sub[i] = i                      # first n_sub vectors
+    for t = n_sub .. N-1:
+        j = rng.IntN(t + 1)                 # uniform in [0, t]
+        if j < n_sub:
             idx_sub[j] = t
 ```
 
-Это равномерный набор `n_sub` **различных** индексов. Порядок в массиве `idx_sub` фиксирован алгоритмом и участвует в k-means++ (первый центроид — равномерно по **позициям** резервуара).
+This is a uniform set of `n_sub` **distinct** indices. The order in array `idx_sub` is fixed by the algorithm and participates in k-means++ (the first centroid is uniform over **positions** of the reservoir).
 
-Память резервуара: `65536 * 4 = 262144` байт на индексы. Сами векторы подвыборки собираются gather-ом перед k-means++ книги: `S[s, :] = R[idx_sub[s], :]`, форма `[n_sub, 8]` float32 = `65536 * 8 * 4 = 2_097_152` байт. Этот буфер `S` можно переиспользовать.
+Reservoir memory: `65536 * 4 = 262144` bytes for indices. The subsample vectors themselves are gathered before the codebook’s k-means++: `S[s, :] = R[idx_sub[s], :]`, shape `[n_sub, 8]` float32 = `65536 * 8 * 4 = 2_097_152` bytes. This buffer `S` can be reused.
 
-### 2.4. k-means++ на `S[n_sub, 8]`
+### 2.4. k-means++ on `S[n_sub, 8]`
 
-Arthur, Vassilvitskii 2007, квадрат L2, без sqrt.
+Arthur, Vassilvitskii 2007, squared L2, no sqrt.
 
-**Старт.** `j0 = rng.IntN(n_sub)`. `C[0] = S[j0]`.
+**Start.** `j0 = rng.IntN(n_sub)`. `C[0] = S[j0]`.
 
-**Шаг t = 1 .. 255.** Для каждой строки `s`:
+**Step t = 1 .. 255.** For each row `s`:
 
 \[
 d^2[s] = \min_{0 \le j < t} \ \sum_{d=0}^{7} \bigl(S[s,d] - C[j,d]\bigr)^2
 \]
 
-(минимум по уже выбранным центроидам; при равных дистанциях внутренний argmin не важен — в \(d^2\) попадает одно и то же число).
+(minimum over already chosen centroids; with equal distances the inner argmin does not matter — the same number lands in \(d^2\)).
 
 \[
 \Sigma = \sum_{s=0}^{n_{\mathrm{sub}}-1} d^2[s].
 \]
 
-- Если `Σ > 0`: пусть `r = rng.Float64() * Σ`. Кумулятив:
+- If `Σ > 0`: let `r = rng.Float64() * Σ`. Cumulative:
 
   ```
   acc = 0
-  pick = n_sub - 1                  # fallback на ошибку округления
-  для s = 0 .. n_sub-1:
+  pick = n_sub - 1                  # fallback for rounding error
+  for s = 0 .. n_sub-1:
       acc ← acc + d²[s]
-      если acc >= r:
+      if acc >= r:
           pick = s
           break
   C[t] = S[pick]
   ```
 
-  Сравнение `acc >= r`, не `>`. Если `r = 0` и ведущие `d²` нули, возьмётся первый `s` с ненулевым накоплением либо `s=0` при `acc>=0`.
+  Comparison `acc >= r`, not `>`. If `r = 0` and leading `d²` are zeros, the first `s` with a non-zero accumulation is taken, or `s=0` when `acc>=0`.
 
-- Если `Σ = 0`: все точки подвыборки уже совпадают с одним из выбранных центроидов (типично: 4 уникальных вектора, `k=256`). Берём `pick = rng.IntN(n_sub)` **с повторами** и копируем `C[t] = S[pick]`. Дубликаты разведёт респлит пустых на Lloyd (§4.2).
+- If `Σ = 0`: all subsample points already coincide with one of the chosen centroids (typical: 4 unique vectors, `k=256`). Take `pick = rng.IntN(n_sub)` **with repeats** and copy `C[t] = S[pick]`. Duplicates will be split by empty-cluster resplit on Lloyd (§4.2).
 
-**Если `n_sub < k`** (крошечная матрица, например `1×8` → `N=1`). После исчерпания разнообразия подвыборки (`Σ=0` или кончились шаги по уникальным) остальные центроиды — копии + тот же механизм `Σ=0` / `IntN`. Lloyd + респлит обязательны, иначе 255 пустых кластеров так и останутся точными дубликатами, а тай-брейк assignment свалит всех в меньший индекс — это нормально для MSE, респлит всё равно нужен, чтобы книга не содержала 255 идентичных строк без шума (для детерминизма шум должен быть).
+**If `n_sub < k`** (tiny matrix, e.g. `1×8` → `N=1`). After exhausting subsample diversity (`Σ=0` or unique steps ran out) the remaining centroids are copies + the same `Σ=0` / `IntN` mechanism. Lloyd + resplit are mandatory, otherwise 255 empty clusters would stay exact duplicates, and the assignment tie-break would dump everyone into the smaller index — that is fine for MSE, resplit is still needed so the codebook does not contain 255 identical rows without noise (for determinism the noise must be there).
 
-k-means++ **не** считается итерацией Lloyd и не смотрит на `--tol`.
+k-means++ is **not** counted as a Lloyd iteration and does not look at `--tol`.
 
-Сложность init: \(n_{\mathrm{sub}} \cdot (1+2+\cdots+255) \cdot O(B) \approx 65536 \cdot 32640 \cdot 8\) mul-add ≈ \(1.7 \cdot 10^{10}\) FLOP в худшем случае, один раз на книгу. На CPU приемлемо; на `n_sub ≪ 65536` дешево.
+Init complexity: \(n_{\mathrm{sub}} \cdot (1+2+\cdots+255) \cdot O(B) \approx 65536 \cdot 32640 \cdot 8\) mul-add ≈ \(1.7 \cdot 10^{10}\) FLOP in the worst case, once per codebook. Acceptable on CPU; cheap on `n_sub ≪ 65536`.
 
 ---
 
-## 3. Assignment чанками
+## 3. Assignment in chunks
 
-### 3.1. Формула
+### 3.1. Formula
 
-Для вектора `x ∈ R^8` и центроида `c_j`:
+For a vector `x ∈ R^8` and centroid `c_j`:
 
 \[
 \mathrm{dist}(x, c_j)
@@ -279,381 +279,381 @@ k-means++ **не** считается итерацией Lloyd и не смот�
  = \sum_d x_d^2 + \sum_d c_{j,d}^2 - 2 \sum_d x_d c_{j,d}.
 \]
 
-**Sqrt не берём.** Argmin по `dist` = argmin по \(L_2\).
+**Do not take sqrt.** Argmin over `dist` = argmin over \(L_2\).
 
-Для фиксированного `x` слагаемое `‖x‖²` от `j` не зависит и **можно опустить** в argmin (на выбор индекса не влияет). В реализации разрешено считать
+For a fixed `x` the term `‖x‖²` does not depend on `j` and **may be omitted** in argmin (it does not affect the index choice). An implementation is allowed to compute
 
 \[
 j^\star(x) = \arg\min_j \bigl( \|c_j\|_2^2 - 2\, x^\top c_j \bigr).
 \]
 
-Если нужен сам SSE для лога итерации — тогда полный `dist`. В файл SSE не пишется.
+If the SSE itself is needed for an iteration log — then the full `dist`. SSE is not written to the file.
 
-### 3.2. dtypes и порядок операций
+### 3.2. dtypes and operation order
 
-| Величина | dtype | Как считать |
+| Quantity | dtype | How to compute |
 |---|---|---|
-| `x`, `C[j]` | float32 | как лежат в `R` / `C` |
-| `dot = x·c_j` | float32 | `acc = 0; для d=0..7: acc += x[d]*c[j][d]` (mul, затем add; **без FMA-требований**, порядок `d` возрастающий) |
-| `cnorm2[j]` | float32 | один раз на итерацию: `∑_d C[j,d]*C[j,d]`, тот же порядок `d` |
-| `xnorm2` | float32 | опционально, тот же порядок |
-| `dist` | float32 | `xnorm2 + cnorm2[j] − (dot + dot)`  (`2*dot` как `dot+dot`, не через float64) |
+| `x`, `C[j]` | float32 | as they sit in `R` / `C` |
+| `dot = x·c_j` | float32 | `acc = 0; for d=0..7: acc += x[d]*c[j][d]` (mul, then add; **no FMA requirement**, `d` in increasing order) |
+| `cnorm2[j]` | float32 | once per iteration: `∑_d C[j,d]*C[j,d]`, same `d` order |
+| `xnorm2` | float32 | optional, same order |
+| `dist` | float32 | `xnorm2 + cnorm2[j] − (dot + dot)`  (`2*dot` as `dot+dot`, not via float64) |
 | `π[n]` | uint8 | argmin, §3.3 |
 
-Запрещено материализовать тензор `(N, 256, 8)` или `(T, 256, 8)` разностей. Это для `T=N=7_340_032`:
+Forbidden to materialize a `(N, 256, 8)` or `(T, 256, 8)` tensor of differences. That for `T=N=7_340_032` is:
 
 \[
-7\,340\,032 \times 256 \times 8 \times 4 = 60\,129\,542\,144\ \text{байт} \approx 56\ \text{ГиБ}.
+7\,340\,032 \times 256 \times 8 \times 4 = 60\,129\,542\,144\ \text{bytes} \approx 56\ \text{GiB}.
 \]
 
-Мгновенный OOM. Считаем `dot` как GEMM `x_chunk[T,8] @ C[256,8]^T → [T,256]` либо fused с argmin по строке (§3.4).
+Instant OOM. Compute `dot` as GEMM `x_chunk[T,8] @ C[256,8]^T → [T,256]` or fused with per-row argmin (§3.4).
 
-`cnorm2` — 256 float32 = 1024 байта, считать каждый чанк заново незапрещено, дешевле один раз на итерацию.
+`cnorm2` is 256 float32 = 1024 bytes; recomputing every chunk is not forbidden, cheaper once per iteration.
 
-### 3.3. Argmin и ties
+### 3.3. Argmin and ties
 
-Сканировать `j = 0, 1, …, 255` в этом порядке:
+Scan `j = 0, 1, …, 255` in that order:
 
 ```
 best_j = 0
 best_d = dist(x, C[0])
-для j = 1 .. 255:
+for j = 1 .. 255:
     d = dist(x, C[j])
-    если d < best_d:          # строго меньше
+    if d < best_d:          # strictly less
         best_d = d
         best_j = j
 π = uint8(best_j)
 ```
 
-**Ties → меньший индекс.** Равенство `d == best_d` ветку не берёт, остаётся прежний (меньший) `j`. Не `<=`. Не «случайный из tied».
+**Ties → smaller index.** Equality `d == best_d` does not take the branch, the previous (smaller) `j` remains. Not `<=`. Not “random among tied”.
 
-`best_d` стартует с `j=0`, даже если он Inf/NaN — на валидном `R` (вход без NaN/Inf, центроиды конечные) `dist` конечен.
+`best_d` starts from `j=0`, even if it is Inf/NaN — on a valid `R` (input without NaN/Inf, finite centroids) `dist` is finite.
 
-### 3.4. Чанковый цикл
+### 3.4. Chunk loop
 
 ```
 offset = 0
-пока offset < N:
+while offset < N:
     T = min(chunk, N - offset)
     x = R[offset : offset+T]          # view [T, 8]
     π[offset : offset+T] = Argmin(x, C)   # §3.1–3.3
     offset += T
 ```
 
-Последний чанк короче. `chunk < 1` → ошибка encode. `chunk > N` допустим: один чанк длины `N`.
+The last chunk is shorter. `chunk < 1` → encode error. `chunk > N` is allowed: one chunk of length `N`.
 
-**Две допустимые раскладки памяти на чанк** (численно идентичный argmin, если dot в float32 с порядком `d=0..7`):
+**Two allowed memory layouts per chunk** (numerically identical argmin if dot is float32 with order `d=0..7`):
 
-1. **Материализовать `dist[T, 256]` float32**, затем построчный argmin. Пик см. §8.
-2. **Fused:** для каждого из `T` векторов держать 256 float32 (или сразу running-min). Пик `dist` = `256*4` байта. На CPU без BLAS это естественный путь. Индексы те же.
+1. **Materialize `dist[T, 256]` float32**, then per-row argmin. Peak see §8.
+2. **Fused:** for each of the `T` vectors keep 256 float32 (or a running-min immediately). Peak `dist` = `256*4` bytes. On CPU without BLAS this is the natural path. Indices are the same.
 
-Спека **не** требует BLAS. Если BLAS/GEMM включён позже, он обязан соблюдать тай-брейк «меньший индекс» (после GEMM — тот же скан `j=0..255` со строгим `<`). Разный порядок свёртки 8 слагаемых dot может сдвинуть биты `dist` и, редко, индекс; для unit-тестов §9.1/§9.2 это неважно (там дистанции 0 vs >0). Кросс-архитектурные золотые индексы на гауссовом шуме **не** обещаем.
+The spec **does not** require BLAS. If BLAS/GEMM is enabled later, it must obey the “smaller index” tie-break (after GEMM — the same scan `j=0..255` with strict `<`). A different fold order of the 8 dot terms can shift `dist` bits and, rarely, the index; for unit tests §9.1/§9.2 that does not matter (there distances are 0 vs >0). Cross-architecture golden indices on Gaussian noise are **not** promised.
 
-Чанки независимы. Параллелить по чанкам в v1 **нельзя** (простота + никакого вопроса про редукцию сумм). Потоки — не этот срез.
+Chunks are independent. Parallelizing over chunks in v1 is **not allowed** (simplicity + no question about reducing sums). Threads are not this slice.
 
 ---
 
-## 4. Update: суммы, счётчики, пустые кластеры
+## 4. Update: sums, counters, empty clusters
 
-### 4.1. Среднее
+### 4.1. Mean
 
-После assignment (или **в том же проходе**, что assignment — предпочтительно на CPU, один обход `R`):
+After assignment (or **in the same pass** as assignment — preferred on CPU, one walk of `R`):
 
 ```
 sum[256, 8] = 0                  # float64
 count[256] = 0                   # int64
-для n = 0 .. N-1:
+for n = 0 .. N-1:
     j = π[n]
     count[j] += 1
-    для d = 0 .. 7:
+    for d = 0 .. 7:
         sum[j, d] += float64(R[n, d])
-для j = 0 .. 255:
-    если count[j] > 0:
-        для d = 0 .. 7:
+for j = 0 .. 255:
+    if count[j] > 0:
+        for d = 0 .. 7:
             C[j, d] = float32( sum[j, d] / float64(count[j]) )
-    # иначе C[j] не трогаем — респлит в §4.2
+    # else do not touch C[j] — resplit in §4.2
 ```
 
-Суммы в float64: на `N ≈ 7·10^6` и координатах ~1 ошибка float32-аккумулятора уже заметна. Деление одно на занятый кластер. `count` не бывает > `N`; `int64` с запасом.
+Sums in float64: at `N ≈ 7·10^6` and coordinates ~1, float32-accumulator error is already noticeable. One division per occupied cluster. `count` is never > `N`; `int64` has margin.
 
-Двухпроходный вариант (сначала `π`, потом `index_add` по `π`) эквивалентен и тоже допустим. Mini-batch / экспоненциальное скользящее среднее — **нет**.
+A two-pass variant (first `π`, then `index_add` over `π`) is equivalent and also allowed. Mini-batch / exponential moving average — **no**.
 
-Пустой кластер (`count[j] = 0`) среднее не определяет. Не писать `0/0`, не обнулять `C[j]` молча.
+An empty cluster (`count[j] = 0`) does not define a mean. Do not write `0/0`, do not silently zero `C[j]`.
 
-### 4.2. Пустые кластеры — респлит самого толстого
+### 4.2. Empty clusters — resplit of the fattest
 
-После update, **один раз за итерацию**:
+After update, **once per iteration**:
 
-1. `t = argmax_j count[j]`. Ties → **меньший** `j`. Если все `count` нули (не бывает при `N≥1`) — ошибка.
-2. Для каждого `j` в порядке `0,1,…,255`, если `count[j] == 0`:
+1. `t = argmax_j count[j]`. Ties → **smaller** `j`. If all `count` are zeros (does not happen at `N≥1`) — error.
+2. For each `j` in order `0,1,…,255`, if `count[j] == 0`:
 
    \[
    C[j, d] = C[t, d] + (2 u_{j,d} - 1) \cdot \varepsilon, \quad d=0..7,
    \]
 
-   где `u_{j,d} = rng.Float64() ∈ [0, 1)`, \(\varepsilon = 10^{-5}\) (ровно `1e-5`, не относительный масштаб).
+   where `u_{j,d} = rng.Float64() ∈ [0, 1)`, \(\varepsilon = 10^{-5}\) (exactly `1e-5`, not a relative scale).
 
-   Восемь вызовов `Float64` на каждый пустой `j`, порядок `d=0..7`. Пустые, которых нет, RNG не трогают.
+   Eight `Float64` calls per empty `j`, order `d=0..7`. Empties that are not there do not touch the RNG.
 
-Счётчики **не** меняем: это виртуальный респлит. Все пустые кластеры этой итерации — шумные копии **одного** и того же самого толстого (разный шум). Следующий assignment перераспределит точки. Если шумные копии снова пустые — на следующей итерации снова респлит от актуального толстого.
+Counters are **not** changed: this is a virtual resplit. All empty clusters of this iteration are noisy copies of **one and the same** fattest (different noise). The next assignment will redistribute points. If the noisy copies are empty again — on the next iteration resplit again from the current fattest.
 
-`ε = 1e-5` представим в float32. Не сдвигаем сам `C[t]` (TZ: шум на новый центроид, не «разъехать пару на ±ε»).
+`ε = 1e-5` is representable in float32. Do not shift `C[t]` itself (requirements: noise on the new centroid, not “spread a pair by ±ε”).
 
-Не удалять пустые позиции: книга всегда 256 строк.
+Do not delete empty slots: the codebook is always 256 rows.
 
-На фикстуре из 4 точных векторов: k-means++ почти наверняка (а при ортогональных векторах — обязательно, см. §9.1) кладёт все 4 в init; Lloyd оставляет 4 живых средних, равных этим векторам; 252 пустых получают `толстый + шум`; assignment точек с дистанцией 0 остаётся на точном центроиде из-за строгого `<`. MSE реконструкции ≈ 0.
+On a fixture of 4 exact vectors: k-means++ almost surely (and with orthogonal vectors — necessarily, see §9.1) puts all 4 into init; Lloyd leaves 4 live means equal to those vectors; 252 empties get `fattest + noise`; assignment of points with distance 0 stays on the exact centroid because of strict `<`. Reconstruction MSE ≈ 0.
 
-### 4.3. Когда респлит относительно `δ`
+### 4.3. When resplit is relative to `δ`
 
-`δ` (§5) считается **до** респлита, только по кластерам с `count[j] > 0`. Иначе каждая итерация с пустыми давала бы `δ ≥ ε` и ломала бы раннюю остановку.
+`δ` (§5) is computed **before** resplit, only over clusters with `count[j] > 0`. Otherwise every iteration with empties would give `δ ≥ ε` and would break early stopping.
 
 ---
 
-## 5. Ранняя остановка
+## 5. Early stopping
 
-Дефолт: **всегда ровно `iters` циклов** assign → update → resplit, плюс финальный assignment. `--tol` не задан → проверки нет.
+Default: **always exactly `iters` cycles** of assign → update → resplit, plus a final assignment. `--tol` not set → no check.
 
-Если задали `--tol τ` с `τ ≥ 0` (float64/float32, в CLI одно число):
+If `--tol τ` was given with `τ ≥ 0` (float64/float32, one number in the CLI):
 
-После update и **до** resplit:
+After update and **before** resplit:
 
 \[
 \delta = \max_{\,j:\ \mathrm{count}[j]>0}
 \sqrt{\sum_{d=0}^{7} \bigl(C[j,d] - C^{\mathrm{old}}[j,d]\bigr)^2 }.
 \]
 
-Здесь sqrt нужен: порог в единицах L2 смещения центроида, не SSE. Если пустых нет и все 256 живы — максимум по всем `j`.
+Here sqrt is needed: the threshold is in units of L2 centroid displacement, not SSE. If there are no empties and all 256 are live — maximum over all `j`.
 
-Стоп, если `δ < τ`. Resplit этой итерации **всё равно выполняется** (книга не должна уйти в файл с точными дубликатами пустых). Затем финальный assignment и выход из Lloyd этой книги.
+Stop if `δ < τ`. This iteration’s resplit **still runs** (the codebook must not go into the file with exact duplicates of empties). Then the final assignment and exit from this codebook’s Lloyd.
 
-`C_old` — копия `C` после resplit **предыдущей** итерации (на итерации 1 — состояние сразу после k-means++). То есть меряем сдвиг, который сделал update по assignment, не шум респлита.
+`C_old` is a copy of `C` after the **previous** iteration’s resplit (on iteration 1 — the state right after k-means++). That is, we measure the shift that update made from assignment, not resplit noise.
 
-Минимум итераций при заданном `τ`: одна (есть что измерить). `τ = 0` означает стоп только при побитово неизменных занятых центроидах.
+Minimum iterations when `τ` is set: one (there is something to measure). `τ = 0` means stop only when occupied centroids are bitwise unchanged.
 
-Рекомендуемое значение, если когда-нибудь включат в CLI по умолчанию: не включать. На синтетике 4 векторов `δ=0` уже после 1–2 итераций; на гауссе 20 итераций дешевле, чем спорить о пороге.
+Recommended value if it is ever turned on in the CLI by default: do not enable. On the 4-vector synthetic `δ=0` already after 1–2 iterations; on a Gaussian 20 iterations is cheaper than arguing about a threshold.
 
-Флаг `--iters` задаёт **верхнюю** границу. `--tol` без `--iters` всё равно ограничен 20.
+The `--iters` flag sets an **upper** bound. `--tol` without `--iters` is still capped at 20.
 
 ---
 
-## 6. Упаковка `index[n_out, n_in_padded/8, M]`
+## 6. Packing `index[n_out, n_in_padded/8, M]`
 
-### 6.1. Layout в памяти
+### 6.1. In-memory layout
 
-Форма `[n_out, G, M]` с `M=2`, dtype `uint8`, C-order / row-major, последняя ось самая быстрая:
+Shape `[n_out, G, M]` with `M=2`, dtype `uint8`, C-order / row-major, last axis fastest:
 
 \[
 \mathrm{offset}(r, j, m) = (r \cdot G + j) \cdot 2 + m.
 \]
 
-На одну группу из 8 весов — **два подряд** байта: сначала индекс книги 0, сразу за ним индекс книги 1.
+For one group of 8 weights — **two consecutive** bytes: first the index of codebook 0, immediately after it the index of codebook 1.
 
 ```
-index[r, j, 0] = π^{(0)}[r*G + j]     # i1, книга C1 = codebook[0]
-index[r, j, 1] = π^{(1)}[r*G + j]     # i2, книга C2 = codebook[1]
+index[r, j, 0] = π^{(0)}[r*G + j]     # i1, codebook C1 = codebook[0]
+index[r, j, 1] = π^{(1)}[r*G + j]     # i2, codebook C2 = codebook[1]
 ```
 
-Байты блоба `index` без дополнительного паддинга внутри блоба. Выравнивание блоба до 64 байт — дело контейнера CHR0, не кодека: кодек отдаёт ровно
+Bytes of the `index` blob have no extra padding inside the blob. Aligning the blob to 64 bytes is the CHR0 container’s job, not the codec’s: the codec yields exactly
 
 \[
 |\mathrm{index}| = n_{\mathrm{out}} \cdot G \cdot 2
 \]
 
-байта. Для `4096×14336`: `G = 1792`, `|index| = 4096 * 1792 * 2 = 14\,680\,064` байта.
+bytes. For `4096×14336`: `G = 1792`, `|index| = 4096 * 1792 * 2 = 14\,680\,064` bytes.
 
-Ядро Ampere читает тайл `(row_tile=i, col_group=j)` как `index[64i : 64i+64, j, :]`. Внутри одной строки `r` группы `j` идут подряд в памяти (`i1,i2` сразу за ними следующая группа). Срез 64 строк при фиксированном `j` — страйд `G·2` байт. Для CPU-verify расклад row-major, не fragment-major Tensor Core.
+The Ampere kernel reads tile `(row_tile=i, col_group=j)` as `index[64i : 64i+64, j, :]`. Inside one row `r` groups `j` are consecutive in memory (`i1,i2` then the next group). A slice of 64 rows at a fixed `j` has stride `G·2` bytes. For CPU-verify the layout is row-major, not Tensor Core fragment-major.
 
-### 6.2. Численный пример: 1×16 весов → 2 группы → 4 байта индексов
+### 6.2. Numeric example: 1×16 weights → 2 groups → 4 index bytes
 
-Логический `W` формы `[1, 16]`, `n_in % 8 = 0`, `G = 2`, `N = 2`. Две группы по 8 весов — два «вектора», на каждый по `M=2` индекса.
+Logical `W` of shape `[1, 16]`, `n_in % 8 = 0`, `G = 2`, `N = 2`. Two groups of 8 weights — two “vectors”, `M=2` indices each.
 
-Пусть encode (или ручная книга для теста decode) дал:
+Suppose encode (or a hand-made codebook for a decode test) gave:
 
-| группа `j` | столбцы `W` | `i1 = index[0,j,0]` | `i2 = index[0,j,1]` |
+| group `j` | `W` columns | `i1 = index[0,j,0]` | `i2 = index[0,j,1]` |
 |---|---|---:|---:|
 | 0 | 0..7 | 0 | 7 |
 | 1 | 8..15 | 1 | 0 |
 
-Линейная память блоба `index` (4 байта):
+Linear memory of the `index` blob (4 bytes):
 
 ```
 offset:  0     1     2     3
-байт:   i1g0  i2g0  i1g1  i2g1
+byte:   i1g0  i2g0  i1g1  i2g1
 hex:    00    07    01    00
 ```
 
-Это и есть «1×16 весов → 2 группы, на группу два uint8». Если в разговорной формулировке «2 индекса» — имеются в виду 2 группы; в файле лежит 4 байта.
+This is “1×16 weights → 2 groups, two uint8 per group”. If the informal phrasing says “2 indices” — that means 2 groups; the file holds 4 bytes.
 
-Decode этих 4 байт с книгой из §7.3:
+Decode of these 4 bytes with the codebook from §7.3:
 
 \[
 \hat g_0 = C[0][0] + C[1][7], \qquad \hat g_1 = C[0][1] + C[1][0].
 \]
 
-### 6.3. Паддинг в индексах
+### 6.3. Padding in indices
 
-`W` формы `[1, 10]`: `n_in_padded = 16`, `G = 2`, блоб `index` всё равно 4 байта. Вторая группа — веса `[W[0,8], W[0,9], 0,0,0,0,0,0]`. Decode считает 16 значений, в `verify` и в выходной тензор попадают только 10 логических. Индексы паддинг-группы **хранятся** (иначе размер блоба не вывести из `shape` и `group_size`).
+`W` of shape `[1, 10]`: `n_in_padded = 16`, `G = 2`, the `index` blob is still 4 bytes. The second group is weights `[W[0,8], W[0,9], 0,0,0,0,0,0]`. Decode computes 16 values; only 10 logical ones enter `verify` and the output tensor. Padding-group indices **are stored** (otherwise the blob size cannot be derived from `shape` and `group_size`).
 
 ---
 
-## 7. Книга FP16: оси `[M, 256, 8]`, little-endian
+## 7. FP16 codebook: axes `[M, 256, 8]`, little-endian
 
-### 7.1. Порядок осей и байт
+### 7.1. Axis and byte order
 
 `codebook[m, j, d]`:
 
-- `m = 0..1` — самая медленная ось (книга 0 целиком, затем книга 1);
-- `j = 0..255` — номер центроида = значение uint8-индекса;
-- `d = 0..7` — координата группы, совпадает с `W[r, 8j+d]`.
+- `m = 0..1` — slowest axis (codebook 0 whole, then codebook 1);
+- `j = 0..255` — centroid number = uint8 index value;
+- `d = 0..7` — group coordinate, coincides with `W[r, 8j+d]`.
 
-Байтовый офсет элемента от начала блоба `codebook`:
+Byte offset of an element from the start of the `codebook` blob:
 
 \[
 \mathrm{byte\_offset}(m,j,d) = \bigl((m \cdot 256 + j) \cdot 8 + d\bigr) \cdot 2.
 \]
 
-Каждый элемент — IEEE 754 binary16, **little-endian** (как x86_64 / Windows / WSL). Размер блоба всегда
+Each element is IEEE 754 binary16, **little-endian** (as x86_64 / Windows / WSL). Blob size is always
 
 \[
 2 \cdot 256 \cdot 8 \cdot 2 = 8192
 \]
 
-байта, независимо от `n_out, n_in`.
+bytes, independent of `n_out, n_in`.
 
-Книга 0 занимает байты `[0, 4096)`, книга 1 — `[4096, 8192)`. Центроид `j` книги `m` — 16 подряд байт.
+Codebook 0 occupies bytes `[0, 4096)`, codebook 1 — `[4096, 8192)`. Centroid `j` of codebook `m` is 16 consecutive bytes.
 
-CHR0 может выровнять блоб до 64; 8192 уже делится на 64, хвостового pad нет.
+CHR0 may align the blob to 64; 8192 already divides by 64, there is no tail pad.
 
-### 7.2. Конверсия float32 ↔ FP16
+### 7.2. float32 ↔ FP16 conversion
 
-- **Запись:** round-to-nearest, ties to even (IEEE 754-2008). Subnormals binary16 разрешены. Overflow → ошибка encode, не Inf в файле.
-- **Чтение / reconstruct / residual между книгами:** FP16 → float32 точным расширением мантиссы (как аппаратный `cvt`). Промежуточный BF16 **не** используется.
-- Считать Lloyd в FP16 **нельзя**.
+- **Write:** round-to-nearest, ties to even (IEEE 754-2008). binary16 subnormals allowed. Overflow → encode error, not Inf in the file.
+- **Read / reconstruct / residual between codebooks:** FP16 → float32 by exact mantissa expansion (like a hardware `cvt`). Intermediate BF16 is **not** used.
+- Computing Lloyd in FP16 is **forbidden**.
 
-Идентичность reconstruct: для каждого `d`
+Reconstruct identity: for each `d`
 
 ```
 w_hat = fp16_to_f32(codebook[0, i1, d]) + fp16_to_f32(codebook[1, i2, d])
 ```
 
-сложение уже в float32. Не складывать в FP16 (переполнение и потеря хвоста). Не квантовать сумму обратно в FP16 — выход verify float32.
+addition already in float32. Do not add in FP16 (overflow and tail loss). Do not quantize the sum back to FP16 — verify output is float32.
 
-### 7.3. Золотой кусок книги для теста layout (без k-means)
+### 7.3. Golden codebook fragment for a layout test (no k-means)
 
-Ручная книга, остальное нули:
+Hand-made codebook, the rest zeros:
 
-| Адрес | Значение float32 | binary16 LE hex |
+| Address | float32 value | binary16 LE hex |
 |---|---|---|
-| `C[0,0,:] = [1, 0,0,0,0,0,0,0]` | 1.0 → `0x3C00` | байты `00 3C` плюс 14 нулей |
-| `C[0,1,:] = [0, 1,0,0,0,0,0,0]` | 1.0 на `d=1` | 2 нуля, затем `00 3C`, затем 12 нулей |
-| `C[1,7,:] = [0, 0, 0.5, 0,0,0,0,0]` | 0.5 → `0x3800` | офсет `4096 + 7*16 + 4 = 4212`: `00 38` |
+| `C[0,0,:] = [1, 0,0,0,0,0,0,0]` | 1.0 → `0x3C00` | bytes `00 3C` plus 14 zeros |
+| `C[0,1,:] = [0, 1,0,0,0,0,0,0]` | 1.0 at `d=1` | 2 zeros, then `00 3C`, then 12 zeros |
+| `C[1,7,:] = [0, 0, 0.5, 0,0,0,0,0]` | 0.5 → `0x3800` | offset `4096 + 7*16 + 4 = 4212`: `00 38` |
 
-Первые 16 байт блоба: `00 3C 00 00 00 00 00 00 00 00 00 00 00 00 00 00`.
+First 16 bytes of the blob: `00 3C 00 00 00 00 00 00 00 00 00 00 00 00 00 00`.
 
-Вместе с индексами §6.2:
+Together with the indices of §6.2:
 
 \[
 \hat g_0 = [1, 0, 0.5, 0, 0, 0, 0, 0], \qquad
 \hat g_1 = [0, 1, 0, 0, 0, 0, 0, 0].
 \]
 
-Побитово: `1.0f32 = 0x3f800000`, `0.5f32 = 0x3f000000`. Этот пример проверяет gather+add и расклад, не Lloyd.
+Bitwise: `1.0f32 = 0x3f800000`, `0.5f32 = 0x3f000000`. This example checks gather+add and layout, not Lloyd.
 
 ---
 
-## 8. Пик памяти: матрица 4096×14336, chunk=1e6
+## 8. Peak memory: matrix 4096×14336, chunk=1e6
 
-### 8.1. Размеры задачи
+### 8.1. Problem sizes
 
 \[
-n_{\mathrm{out}}=4096,\quad n_{\mathrm{in}}=14336=8\cdot 1792 \text{ (паддинг не нужен)},
+n_{\mathrm{out}}=4096,\quad n_{\mathrm{in}}=14336=8\cdot 1792 \text{ (padding not needed)},
 \]
 
 \[
 N = 4096 \cdot 14336 / 8 = 7\,340\,032.
 \]
 
-float32-образ `W` / `V` / `R`:
+float32 image of `W` / `V` / `R`:
 
 \[
-4096 \cdot 14336 \cdot 4 = 234\,881\,024\ \text{байт} = 224\ \text{МиБ}.
+4096 \cdot 14336 \cdot 4 = 234\,881\,024\ \text{bytes} = 224\ \text{MiB}.
 \]
 
-### 8.2. Чанк assignment при `chunk = 1_000_000`
+### 8.2. Assignment chunk at `chunk = 1_000_000`
 
-Если материализовать `dist[T, 256]` float32 (`T = 1e6`):
+If `dist[T, 256]` float32 is materialized (`T = 1e6`):
 
-| Буфер чанка | Форма | Байты |
+| Chunk buffer | Shape | Bytes |
 |---|---|---:|
 | `dist` | `[1e6, 256]` float32 | **1 024 000 000** |
-| `xnorm2` (если считают) | `[1e6]` float32 | 4 000 000 |
+| `xnorm2` (if computed) | `[1e6]` float32 | 4 000 000 |
 | `cnorm2` | `[256]` float32 | 1 024 |
-| `π` куска (можно писать сразу в полный `π`) | `[1e6]` uint8 | 1 000 000 |
-| `x` | view в `R` | 0 |
-| **итого workspace assignment** | | **1 029 001 024** ≈ 981 МиБ |
+| `π` of the piece (can write straight into full `π`) | `[1e6]` uint8 | 1 000 000 |
+| `x` | view into `R` | 0 |
+| **assignment workspace total** | | **1 029 001 024** ≈ 981 MiB |
 
-`1e6 × 256 × 4 = 1_024_000_000` байт — это ответ на «сколько байт на чанк assignment при chunk=1e6» в постановке GEMM-буфера дистанций.
+`1e6 × 256 × 4 = 1_024_000_000` bytes — that is the answer to “how many bytes per assignment chunk at chunk=1e6” in the GEMM-distance-buffer formulation.
 
-Запрещённый буфер `(T, 256, 8)` float32 при том же `T`: `1e6 × 256 × 8 × 4 = 8_192_000_000` байт ≈ 7.63 ГиБ — **не выделять**.
+Forbidden buffer `(T, 256, 8)` float32 at the same `T`: `1e6 × 256 × 8 × 4 = 8_192_000_000` bytes ≈ 7.63 GiB — **do not allocate**.
 
-`compressor.md` §5 оценивал `1M×256×2 ≈ 0.5 ГБ` (как будто 2 байта на дистанцию). У нас счёт в float32: **4 байта**, ≈ **1.024 ГБ** на `dist`.
+`compressor.md` §5 estimated `1M×256×2 ≈ 0.5 GB` (as if 2 bytes per distance). Our count is in float32: **4 bytes**, ≈ **1.024 GB** for `dist`.
 
-Fused argmin по строке: вместо 1.024 ГБ держим `256 × 4 = 1024` байта. На CPU v1 **так и рекомендуется реализовывать**. Цифры 1.024 ГБ остаются верхней границей, если кто-то пойдёт в GEMM.
+Fused per-row argmin: instead of 1.024 GB keep `256 × 4 = 1024` bytes. On CPU v1 **that is the recommended implementation**. The 1.024 GB figures remain an upper bound if someone goes the GEMM route.
 
-### 8.3. Рекомендуемый `chunk`
+### 8.3. Recommended `chunk`
 
-**Дефолт `--chunk 262144`** (`2^{18}`).
+**Default `--chunk 262144`** (`2^{18}`).
 
-- `dist[262144, 256]` float32 = `262144 × 256 × 4 = 268_435_456` байт = 256 МиБ — если материализуют.
-- Fused: пик чанка пренебрежим, 262144 векторов × 8 × 4 = 8 МиБ горячего прохода по `R` хорошо ложится в кэш хуже, чем мелкий чанк, но меньше накладных на цикл по чанкам.
-- Компромисс с `compressor.md` §4.1 («256k–1M»).
+- `dist[262144, 256]` float32 = `262144 × 256 × 4 = 268_435_456` bytes = 256 MiB — if materialized.
+- Fused: chunk peak is negligible, 262144 vectors × 8 × 4 = 8 MiB of a hot pass over `R` sits worse in cache than a tiny chunk, but has less loop overhead over chunks.
+- Compromise with `compressor.md` §4.1 (“256k–1M”).
 
-Альтернативы (не дефолт): `65536` (64 МиБ GEMM-буфер, больше оверхеда цикла), `1000000` (пик §8.2, на RAM 16 ГБ ещё влезает рядом с 224 МиБ `R`).
+Alternatives (not default): `65536` (64 MiB GEMM buffer, more loop overhead), `1000000` (peak §8.2, on 16 GB RAM still fits next to 224 MiB `R`).
 
-`chunk` не влияет на результат assignment, только на пик и скорость. Менять его в тестах целостности индексов можно.
+`chunk` does not affect the assignment result, only peak and speed. Changing it in index-integrity tests is allowed.
 
-### 8.4. Пик encode всей матрицы 4096×14336
+### 8.4. Encode peak for the whole 4096×14336 matrix
 
-Минимальный набор (in-place residual, fused argmin):
+Minimal set (in-place residual, fused argmin):
 
-| Буфер | Байты |
+| Buffer | Bytes |
 |---|---:|
 | `R` float32 | 234 881 024 |
-| `π` двух книг, uint8 (можно два `[N]` или сразу packed) | 14 680 064 |
+| `π` of two codebooks, uint8 (can be two `[N]` or packed immediately) | 14 680 064 |
 | `idx_sub` uint32 | 262 144 |
-| `S` подвыборка float32 | 2 097 152 |
-| `C` float32 текущей книги | 8 192 |
+| `S` subsample float32 | 2 097 152 |
+| `C` float32 of the current codebook | 8 192 |
 | `sum` float64 + `count` | 256×8×8 + 256×8 = 18 432 |
 | fused dist | 1 024 |
-| **пик ≈** | **≈ 252 МиБ** |
+| **peak ≈** | **≈ 252 MiB** |
 
-Если плюс копия исходного `W` float32 (для одновременного verify в том же процессе): +224 МиБ ≈ 476 МиБ.
+If plus a copy of the source `W` float32 (for simultaneous verify in the same process): +224 MiB ≈ 476 MiB.
 
-Если плюс материализованный `dist` при `chunk=1e6`: **≈ 1.27 ГБ**. При дефолтном `chunk=262144` и материализации `dist`: **≈ 520 МиБ**.
+If plus a materialized `dist` at `chunk=1e6`: **≈ 1.27 GB**. At default `chunk=262144` and materializing `dist`: **≈ 520 MiB**.
 
-На lm_head ~1.6 ГБ BF16 (~3.2 ГБ float32) этот срез **не** режет полосы: алгоритм тот же. Если float32-образ не влезает в RAM — это зона `docs/spec/integrity-cli.md` (двухпроход: резервуар стримом строк, затем assignment стримом). Для unit-тестов полосы не нужны. Книга всё равно одна на матрицу.
+On lm_head ~1.6 GB BF16 (~3.2 GB float32) this slice **does not** cut stripes: the algorithm is the same. If the float32 image does not fit in RAM — that is the zone of `docs/spec/integrity-cli.md` (two-pass: reservoir by streaming rows, then assignment by stream). For unit tests stripes are not needed. The codebook is still one per matrix.
 
 ---
 
-## 9. Инварианты тестов без модели
+## 9. Test invariants without a model
 
-Фикстуры синтетические. Модель не скачивать. Пороги жёсткие, для живой 8B не применять.
+Fixtures are synthetic. Do not download a model. Thresholds are strict; do not apply them to a live 8B.
 
-Общие правила:
+Common rules:
 
-- `seed=0`, `iters=20`, `chunk` любой ≥1, `tol` выключен, если не указано иное.
-- MSE / RMSE по логическому `[n_out, n_in]`, float32, без паддинг-столбцов:
+- `seed=0`, `iters=20`, `chunk` any ≥1, `tol` off unless stated otherwise.
+- MSE / RMSE over the logical `[n_out, n_in]`, float32, without padding columns:
 
 \[
 \mathrm{MSE} = \frac{1}{n_{\mathrm{out}} n_{\mathrm{in}}} \sum_{r,c} \bigl(W[r,c] - \hat W[r,c]\bigr)^2, \quad
 \mathrm{RMSE} = \sqrt{\mathrm{MSE}}.
 \]
 
-- «Сырой mean»: \(\hat W \equiv \bar w = \mathrm{mean}(W)\). Тогда MSE_mean = \(\mathrm{Var}(W)\) (population, делитель `n_out*n_in`, не `n-1`).
+- “Raw mean”: \(\hat W \equiv \bar w = \mathrm{mean}(W)\). Then MSE_mean = \(\mathrm{Var}(W)\) (population, divisor `n_out*n_in`, not `n-1`).
 
-### 9.1. Ровно 4 различных вектора dim 8, повторённые
+### 9.1. Exactly 4 distinct dim-8 vectors, repeated
 
-Строки-шаблоны (точное представление в float32 и в FP16):
+Template rows (exact representation in float32 and in FP16):
 
 ```
 a = [0, 0, 0, 0, 0, 0, 0, 0]
@@ -662,97 +662,97 @@ c = [0, 1, 0, 0, 0, 0, 0, 0]
 d = [0, 0, 1, 0, 0, 0, 0, 0]
 ```
 
-`W` формы `[16, 8]`: строка `r` = `{a,b,c,d}[r % 4]`. Тогда `N = 16`, четыре уникальных вектора, каждый по 4 раза. `n_in` уже кратен 8.
+`W` of shape `[16, 8]`: row `r` = `{a,b,c,d}[r % 4]`. Then `N = 16`, four unique vectors, each 4 times. `n_in` is already a multiple of 8.
 
-Ортогональность `{b,c,d}` и нуль `a` гарантируют: после выбора первого центроида в k-means++ квадраты дистанций ненулевых **разных** шаблонов строго больше, чем у копий уже выбранного; все 4 шаблона попадут в init до дубликатов.
+Orthogonality of `{b,c,d}` and zero `a` guarantee: after choosing the first centroid in k-means++, squared distances of non-zero **different** templates are strictly larger than those of copies of the already chosen one; all 4 templates will land in init before duplicates.
 
-После `iters=20` (хватит и 2):
+After `iters=20` (2 would suffice):
 
-1. Среди 256 строк `fp16_to_f32(codebook[0])` есть все четыре вектора: для каждого шаблона `v ∈ {a,b,c,d}`
+1. Among the 256 rows of `fp16_to_f32(codebook[0])` all four vectors are present: for each template `v ∈ {a,b,c,d}`
 
    \[
    \min_{j=0..255} \| C^{(0)}[j] - v \|_\infty < 10^{-4}.
    \]
 
-   Фактически 0: `0` и `1` точны в FP16.
+   In fact 0: `0` and `1` are exact in FP16.
 
 2. `RMSE(W, decode(encode(W))) < 10^{-5}`, `maxabs < 10^{-4}`.
 
-3. Индексы книги 0 на одинаковых строках `W` совпадают (если в книге вдруг два точных дубликата центроида — тай-брейк берёт меньший `j`, индекс всё равно один и тот же).
+3. Codebook-0 indices on identical rows of `W` coincide (if the codebook happens to have two exact centroid duplicates — the tie-break takes the smaller `j`, the index is still the same).
 
-4. Использованные центроиды книги 1 (те `j`, что встречаются в `index[:,:,1]`) имеют `‖C^{(1)}[j]‖_∞ < 10^{-3}`: residual после идеальной первой книги ≈ 0.
+4. Used codebook-1 centroids (those `j` that appear in `index[:,:,1]`) have `‖C^{(1)}[j]‖_∞ < 10^{-3}`: residual after a perfect first codebook ≈ 0.
 
-Это тест «книга содержит их с точностью FP16, MSE ≈ 0». Не проверяем, что **не**-использованные 252 строки книги нули — там шум респлита.
+This is the test “the codebook contains them to FP16 precision, MSE ≈ 0”. We do not check that the **unused** 252 codebook rows are zeros — there is resplit noise there.
 
-Дополнительно, совсем вырожденно: нулевая матрица `[8, 16]` → RMSE = 0 относительно `W`, все группы идут в один индекс книги 0 (меньший среди точных нулей).
+Additionally, fully degenerate: a zero matrix `[8, 16]` → RMSE = 0 relative to `W`, all groups go to one codebook-0 index (the smaller among exact zeros).
 
-### 9.2. reconstruct(encode(W)) бит-согласован с записанной книгой
+### 9.2. reconstruct(encode(W)) bit-consistent with the written codebook
 
-Для **любого** успешно закодированного `W` (включая §9.1, §9.3, ручную книгу §7.3):
+For **any** successfully encoded `W` (including §9.1, §9.3, the hand-made codebook §7.3):
 
-Пусть `(codebook_fp16, index)` — выход encode. Независимо от encode, эталон:
+Let `(codebook_fp16, index)` be the encode output. Independently of encode, the reference:
 
 ```
-для r, j, d:
+for r, j, d:
     i1 = index[r, j, 0]
     i2 = index[r, j, 1]
     ref[r, 8j+d] = f32(codebook[0,i1,d]) + f32(codebook[1,i2,d])
-обрезать столбцы до n_in
+trim columns to n_in
 ```
 
-`Decode(codebook, index, shape)` обязан дать `ref` **с теми же битами float32** (`math.Float32bits` по каждому элементу), не «близко». Сравнение с оригиналом `W` здесь **не** делается.
+`Decode(codebook, index, shape)` must yield `ref` **with the same float32 bits** (`math.Float32bits` on each element), not “close”. Comparison with original `W` is **not** done here.
 
-Следствия:
+Consequences:
 
-- повторный decode тех же блобов — те же биты;
-- encode не имеет права реконструировать из float32-центроидов Lloyd, минуя FP16-каст;
-- контейнерный roundtrip `.chr` → те же 8192 байт книги и те же `index` байты → тот же `ref`.
+- a repeated decode of the same blobs — the same bits;
+- encode has no right to reconstruct from float32 Lloyd centroids, bypassing the FP16 cast;
+- a container roundtrip `.chr` → the same 8192 codebook bytes and the same `index` bytes → the same `ref`.
 
-### 9.3. Оригинал vs reconstruct: лучше mean / не хуже случайной одной книги
+### 9.3. Original vs reconstruct: better than mean / not worse than a random single codebook
 
-Фикстура `W` `[32, 128]`, `N = 512` (больше `k`, запомнить все векторы одной книгой нельзя). Элементы — детерминированный «шум» без Box–Muller, row-major:
+Fixture `W` `[32, 128]`, `N = 512` (larger than `k`, one codebook cannot memorize all vectors). Elements are deterministic “noise” without Box–Muller, row-major:
 
 ```
-x = uint32(seed)              # для этого теста seed=1, не 0: xorshift32 не стартует с 0
-если x == 0: x = 1
-для каждого элемента:
+x = uint32(seed)              # for this test seed=1, not 0: xorshift32 does not start from 0
+if x == 0: x = 1
+for each element:
     x ^= x << 13
     x ^= x >> 17
-    x ^= x << 5                 # все сдвиги по uint32
+    x ^= x << 5                 # all shifts on uint32
     W = float32( (x % 2001) ) / 1000.0 − 1.0     # ≈ Uniform[-1, 1]
 ```
 
-Population variance этой матрицы — конкретное число, реализация считает его с `W`. Пороги:
+The population variance of this matrix is a concrete number; the implementation computes it from `W`. Thresholds:
 
-1. **Главный:** `MSE(W, decode(encode(W))) < 0.5 * Var(W)`. Сырой mean даёт ровно `Var(W)`; 2×8 обязан быть заметно лучше. (Критерий готовности ТЗ: «MSE после 2×8 заметно меньше, чем у сырого mean».)
+1. **Main:** `MSE(W, decode(encode(W))) < 0.5 * Var(W)`. The raw mean gives exactly `Var(W)`; 2×8 must be noticeably better. (Readiness criterion from the requirements: “MSE after 2×8 is noticeably smaller than that of the raw mean”.)
 
-2. **Случайная одна книга 256:** построить `C_rand[256, 8]` тем же xorshift, продолжая состояние после заполнения `W` (ещё 256×8 вызовов той же формулы). Assignment §3 к **одной** книге, reconstruct = `C_rand[π_rand]` без второй книги. Требовать
+2. **Random single codebook of 256:** build `C_rand[256, 8]` with the same xorshift, continuing the state after filling `W` (another 256×8 calls of the same formula). Assignment §3 to **one** codebook, reconstruct = `C_rand[π_rand]` without a second codebook. Require
 
    \[
    \mathrm{MSE}_{\mathrm{VQ2}} \le \mathrm{MSE}_{\mathrm{rand1}}.
    \]
 
-   На этой фикстуре неравенство строгое с большим запасом: случайные 256 векторов в кубе `[-1,1]^8` не попадают в облако `W`.
+   On this fixture the inequality is strict with a large margin: random 256 vectors in the cube `[-1,1]^8` do not land in the cloud of `W`.
 
-3. Не требовать `MSE = 0`. Не требовать побитового совпадения индексов между машинами.
+3. Do not require `MSE = 0`. Do not require bitwise matching of indices across machines.
 
-Матрица меньше `k` векторов (`N ≤ 256`) для этого теста **не** годится: тогда одна книга может запомнить все точки, MSE≈0, сравнение с mean тривиально «да», а с «случайной книгой» зависит от везения.
+A matrix with fewer than `k` vectors (`N ≤ 256`) is **not** suitable for this test: then one codebook can memorize all points, MSE≈0, comparison with mean is trivially “yes”, and with a “random codebook” it depends on luck.
 
-### 9.4. Ещё проверки (обязательны в `internal/vq`, дешёвые)
+### 9.4. More checks (required in `internal/vq`, cheap)
 
-| Имя | Arrange | Assert |
+| Name | Arrange | Assert |
 |---|---|---|
-| `PadNin` | `W` `[1, 10]`, конечные числа | `G=2`, `|index|=4`, decode формы `[1,10]`, паддинг-столбцы не торчат наружу |
-| `Layout1x16` | ручная книга §7.3 + байты `00 07 01 00` | decode = `[1, 0, 0.5, 0,0,0,0,0,  0,1,0,0,0,0,0,0]`, биты §9.2 |
-| `TieSmallerIndex` | `x=[1,0,…,0]`, `C[0]=C[1]=x`, остальные далеко | `π=0` |
-| `DistNoSqrt` | микропример §9.5 | argmin = 0 |
-| `RejectNaN` | один NaN в `W` | encode ошибка |
-| `RejectInf` | один Inf | encode ошибка |
-| `ItersZero` | §9.1, `iters=0` | не падает; RMSE может быть > 0, но decode бит-согласован с книгой |
-| `SeedDeterminism` | два encode §9.3, `seed=1` | байты `codebook` и `index` совпали |
-| `EmptyMatrix` | `n_out=0` или `n_in=0` | ошибка |
+| `PadNin` | `W` `[1, 10]`, finite numbers | `G=2`, `|index|=4`, decode of shape `[1,10]`, padding columns do not leak out |
+| `Layout1x16` | hand-made codebook §7.3 + bytes `00 07 01 00` | decode = `[1, 0, 0.5, 0,0,0,0,0,  0,1,0,0,0,0,0,0]`, bits §9.2 |
+| `TieSmallerIndex` | `x=[1,0,…,0]`, `C[0]=C[1]=x`, the rest far | `π=0` |
+| `DistNoSqrt` | micro-example §9.5 | argmin = 0 |
+| `RejectNaN` | one NaN in `W` | encode error |
+| `RejectInf` | one Inf | encode error |
+| `ItersZero` | §9.1, `iters=0` | does not crash; RMSE may be > 0, but decode is bit-consistent with the codebook |
+| `SeedDeterminism` | two encodes of §9.3, `seed=1` | `codebook` and `index` bytes matched |
+| `EmptyMatrix` | `n_out=0` or `n_in=0` | error |
 
-### 9.5. Микропример dist (ручной счёт)
+### 9.5. Dist micro-example (hand calculation)
 
 `x = [1,0,0,0,0,0,0,0]`, `‖x‖² = 1`.
 
@@ -762,48 +762,48 @@ Population variance этой матрицы — конкретное число,
 | 1 | `[0,1,0,0,0,0,0,0]` | 1 | 0 | `1+1−0=2` |
 | 2 | `[0.5,0,0,0,0,0,0,0]` | 0.25 | 0.5 | `1+0.25−1=0.25` |
 
-Argmin = 0. Если добавить `c_3 = c_0`, tie → всё ещё 0.
+Argmin = 0. If `c_3 = c_0` is added, tie → still 0.
 
 ---
 
-## 10. Стык с CHR0
+## 10. Interface with CHR0
 
-Кодек не пишет JSON целиком — только контракт полей тензора с `codec: "vq"`. Офсеты `[start, end)` от начала файла, как в `docs/compressor.md` §6.1. Контейнер паддит блобы до 64.
+The codec does not write the JSON as a whole — only the tensor-field contract with `codec: "vq"`. Offsets `[start, end)` from the start of the file, as in `docs/compressor.md` §6.1. The container pads blobs to 64.
 
-### 10.1. Обязательные ключи JSON тензора
+### 10.1. Required JSON keys of a tensor
 
-| Ключ | Тип | Значение v1 | Обязателен |
+| Key | Type | v1 value | Required |
 |---|---|---|---|
-| `codec` | string | `"vq"` | да |
-| `shape` | `[int, int]` | логический `[n_out, n_in]` | да |
-| `group_size` | int | **8** | да |
-| `n_codebooks` | int | **2** | да |
-| `codebook_bits` | int | **8** | да |
-| `codebook` | `[int, int]` | `[start, end)` блоба книги | да |
-| `index` | `[int, int]` | `[start, end)` блоба индексов | да |
-| `kind` | string | как у CHR0 (`q`/`down`/…) | да, но не забота кодека |
-| `layer` | int | если слойный тензор | по правилам CHR0 |
+| `codec` | string | `"vq"` | yes |
+| `shape` | `[int, int]` | logical `[n_out, n_in]` | yes |
+| `group_size` | int | **8** | yes |
+| `n_codebooks` | int | **2** | yes |
+| `codebook_bits` | int | **8** | yes |
+| `codebook` | `[int, int]` | `[start, end)` of the codebook blob | yes |
+| `index` | `[int, int]` | `[start, end)` of the index blob | yes |
+| `kind` | string | as in CHR0 (`q`/`down`/…) | yes, but not the codec’s concern |
+| `layer` | int | if a layered tensor | per CHR0 rules |
 
-Нет полей `data`, `scale`, `zero` у `vq`. Reader: если `group_size ≠ 8` или `n_codebooks ≠ 2` или `codebook_bits ≠ 8` — ошибка (этот срез других режимов не умеет).
+There are no `data`, `scale`, `zero` fields on `vq`. Reader: if `group_size ≠ 8` or `n_codebooks ≠ 2` or `codebook_bits ≠ 8` — error (this slice does not know other modes).
 
-### 10.2. Блобы
+### 10.2. Blobs
 
 **`codebook`**
 
 - dtype: FP16 little-endian
-- форма: `[n_codebooks, 2^codebook_bits, group_size] = [2, 256, 8]`
+- shape: `[n_codebooks, 2^codebook_bits, group_size] = [2, 256, 8]`
 - `end - start = 8192`
-- оси и офсеты — §7
+- axes and offsets — §7
 
 **`index`**
 
 - dtype: uint8
-- форма: `[n_out, n_in_padded/8, n_codebooks] = [n_out, G, 2]`
-- `n_in_padded = 8 * ceil(n_in / 8)`, `n_in` из `shape[1]`
+- shape: `[n_out, n_in_padded/8, n_codebooks] = [n_out, G, 2]`
+- `n_in_padded = 8 * ceil(n_in / 8)`, `n_in` from `shape[1]`
 - `end - start = n_out * G * 2`
-- расклад — §6
+- layout — §6
 
-Пример (офсет `start=20000` вымышленный; длины обязательны):
+Example (`start=20000` offset is made up; lengths are mandatory):
 
 ```json
 "model.layers.0.mlp.down_proj": {
@@ -819,11 +819,11 @@ Argmin = 0. Если добавить `c_3 = c_0`, tie → всё ещё 0.
 }
 ```
 
-Проверка: `28192 − 20000 = 8192`. `14708256 − 28192 = 14_680_064 = 4096 × 1792 × 2`. Writer считает `end = start + nbytes`, не подставляет пример руками. В `docs/compressor.md` §6.1 офсет `index` — иллюстрация контейнера, не эталон длины.
+Check: `28192 − 20000 = 8192`. `14708256 − 28192 = 14_680_064 = 4096 × 1792 × 2`. The writer computes `end = start + nbytes`, does not paste the example by hand. In `docs/compressor.md` §6.1 the `index` offset is a container illustration, not a length reference.
 
-### 10.3. Decode как контракт для `chr decode` / `verify`
+### 10.3. Decode as the contract for `chr decode` / `verify`
 
-Сигнатуры логические (не код):
+Logical signatures (not code):
 
 ```
 EncodeVQ(W f32[n_out,n_in], seed u64, iters int, chunk int, tol optional)
@@ -833,28 +833,28 @@ DecodeVQ(codebook f16[2,256,8], index u8[n_out,G,2], n_out, n_in)
   → W_hat f32[n_out, n_in]
 ```
 
-`DecodeVQ` не читает seed/iters: он чистая функция книги и индексов. Паддинг-столбцы не возвращает.
+`DecodeVQ` does not read seed/iters: it is a pure function of the codebook and indices. It does not return padding columns.
 
-Нормы / bias этим кодеком не кодируются (всегда `bf16` в CHR0).
-
----
-
-## 11. Сложность и ожидаемое время (ориентир, не тест)
-
-Один assignment на 4096×14336: GEMM `(N×8)×(8×256)` ≈ `N * 256 * 8 = 1.50·10^{10}` FMA ≈ 30 GFLOP, как `docs/compressor.md` §4.2.
-
-20 итераций × 2 книги + 2 финальных assignment ≈ 42 assignment ≈ 1.3 TFLOP плюс update и k-means++. На CPU чистый Go — минуты на одну жирную матрицу, не миллисекунды GPU. Для v1 целостности это приемлемо; живой 8B/32B на CPU — отдельное решение (эта спека не включает faiss и GPU). Mini-batch как «запасной путь» компрессора **не** включаем: меняет результат и ломает детерминизм §2.
+Norms / bias are not encoded by this codec (always `bf16` in CHR0).
 
 ---
 
-## 12. Чеклист для `internal/vq`
+## 11. Complexity and expected time (orientation, not a test)
 
-- [ ] Паддинг `n_in` до кратности 8, логический shape снаружи.
-- [ ] `R` float32, две книги подряд, residual через `Q16(C)`.
-- [ ] PCG(`seed`, 0); резервуар `min(N,65536)`; k-means++; Lloyd ≤20.
-- [ ] Assignment чанками, `dist` без sqrt, ties → меньший индекс, нет тензора `(N,256,8)`.
-- [ ] Update float64-суммы; пустые → толстый + `Uniform[-1e-5, 1e-5)` из того же RNG.
-- [ ] `--tol` опционален, `δ` по L2 занятых центроидов до респлита.
-- [ ] `index` row-major `[n_out,G,2]`, книга FP16 `[2,256,8]` LE.
-- [ ] Тесты §9.1–§9.4 без модели.
-- [ ] JSON-поля `group_size: 8`, `n_codebooks: 2`, `codebook_bits: 8`.
+One assignment on 4096×14336: GEMM `(N×8)×(8×256)` ≈ `N * 256 * 8 = 1.50·10^{10}` FMA ≈ 30 GFLOP, as `docs/compressor.md` §4.2.
+
+20 iterations × 2 codebooks + 2 final assignments ≈ 42 assignments ≈ 1.3 TFLOP plus update and k-means++. On CPU pure Go — minutes for one fat matrix, not GPU milliseconds. For v1 integrity that is acceptable; a live 8B/32B on CPU is a separate decision (this spec does not include faiss and GPU). Mini-batch as a compressor “fallback path” is **not** included: it changes the result and breaks determinism §2.
+
+---
+
+## 12. Checklist for `internal/vq`
+
+- [ ] Pad `n_in` to a multiple of 8, logical shape on the outside.
+- [ ] `R` float32, two codebooks in sequence, residual through `Q16(C)`.
+- [ ] PCG(`seed`, 0); reservoir `min(N,65536)`; k-means++; Lloyd ≤20.
+- [ ] Assignment in chunks, `dist` without sqrt, ties → smaller index, no `(N,256,8)` tensor.
+- [ ] Update float64-sums; empties → fattest + `Uniform[-1e-5, 1e-5)` from the same RNG.
+- [ ] `--tol` optional, `δ` by L2 of occupied centroids before resplit.
+- [ ] `index` row-major `[n_out,G,2]`, FP16 codebook `[2,256,8]` LE.
+- [ ] Tests §9.1–§9.4 without a model.
+- [ ] JSON fields `group_size: 8`, `n_codebooks: 2`, `codebook_bits: 8`.

@@ -72,6 +72,7 @@ class Machine:
     hf_hub: bool = False
     ollama: str | None = None
     extras_missing: tuple[str, ...] = field(default_factory=tuple)
+    cli_script: str | None = None
 
     @property
     def sm(self) -> str:
@@ -109,6 +110,16 @@ def _nf4_artifact() -> tuple[Path | None, bool, bool]:
         for name in _KERNEL_SOURCES
     )
     return artifact, stale, bool(usable)
+
+
+def _find_cli_script() -> str | None:
+    """``deepfold.exe`` next to this interpreter, else ``deepfold`` on PATH."""
+    bindir = Path(sys.executable).resolve().parent
+    for name in ("deepfold.exe", "deepfold"):
+        hit = bindir / name
+        if hit.is_file():
+            return str(hit)
+    return shutil.which("deepfold")
 
 
 def _find_nvcc() -> str | None:
@@ -262,6 +273,7 @@ def probe(*, chr_bin: str | None = None, extras_for: str | None = None) -> Machi
         hf_hub=_installed("huggingface_hub"),
         ollama=shutil.which("ollama"),
         extras_missing=extras,
+        cli_script=_find_cli_script(),
     )
 
 
@@ -496,6 +508,17 @@ def checks(m: Machine, v: Verdict) -> list[Check]:
     if m.extras_missing:
         out.append(
             Check("fail", "internlm extra", "missing " + ", ".join(m.extras_missing))
+        )
+    if m.cli_script:
+        out.append(Check("ok", "deepfold CLI", m.cli_script))
+    else:
+        out.append(
+            Check(
+                "warn",
+                "deepfold CLI",
+                "not next to this Python; python -m gpu.cli still works. "
+                "Neighbor: scripts/setup.ps1 then .\\.venv\\Scripts\\Activate.ps1",
+            )
         )
     if m.smi_used_mib is not None:
         out.append(

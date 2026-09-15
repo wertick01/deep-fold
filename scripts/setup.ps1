@@ -47,9 +47,19 @@ if (Get-Command go -ErrorAction SilentlyContinue) {
 if ($LASTEXITCODE -ne 0) {
     Write-Host "doctor exited $LASTEXITCODE (0 generate possible, 2 install, 3 generate refused by class, 1 neither)."
 }
+
+$DeepfoldCmd = Join-Path $Venv "Scripts\deepfold.exe"
 Write-Host ""
 Write-Host "Next:"
 Write-Host "  .\.venv\Scripts\Activate.ps1"
 Write-Host "  deepfold pull Qwen/Qwen2.5-3B-Instruct --yes"
 Write-Host "  deepfold chat --model <that directory>"
+if (Test-Path $DeepfoldCmd) {
+    Write-Host "Without activate:"
+    Write-Host "  $DeepfoldCmd doctor"
+} else {
+    Write-Host "WARN: deepfold.exe was not created. Use:"
+    Write-Host "  $VenvPy -m gpu.cli doctor"
+}
 Write-Host "Do not expect the 3080 tok/s plate on another card."
+Write-Host "conda env torch-gpu never gets a deepfold command; that lab uses python -m gpu.cli."

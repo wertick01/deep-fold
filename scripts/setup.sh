@@ -32,4 +32,9 @@ echo "Next:"
 echo "  source .venv/bin/activate"
 echo "  deepfold pull Qwen/Qwen2.5-3B-Instruct --yes"
 echo "  deepfold chat --model <that directory>"
+if [[ -x "$VENV/bin/deepfold" ]]; then
+  echo "Without activate: $VENV/bin/deepfold doctor"
+else
+  echo "WARN: .venv/bin/deepfold missing. Use: $VENV_PY -m gpu.cli doctor"
+fi
 echo "Do not expect the 3080 tok/s plate on another card."

@@ -1,96 +1,96 @@
 # H2: NF4 overflow ring (pinned host, two slots)
 
-**Статус 2026-09-14:** C0 закрыта. **H2-1…H2-6 PASS.**
+**Status 2026-09-14:** C0 closed. **H2-1…H2-6 PASS.**
 
-Продуктовый дым Qwen2.5-32B-Instruct на RTX 3080 12 GB:
+Product smoke Qwen2.5-32B-Instruct on RTX 3080 12 GB:
 `python -m gpu.lab.h2_trace --no-timing` →
 `C:\dev\models\runs\h2-qwen25-32b-20260914-234048`
-(копия `data_path.md` / `messages.json` / `gate.txt` в
+(copy of `data_path.md` / `messages.json` / `gate.txt` in
 [`docs/runs/h2-qwen25-32b/`](runs/h2-qwen25-32b/)).
 
 | | |
 |---|---|
 | Decode | **2.31 tok/s** mean (2.30–2.32; ~432 ms/tok) |
-| TTFT | **1006 ms** mean (2 чанка, `LIVE_MAX_N=32`) |
+| TTFT | **1006 ms** mean (2 chunks, `LIVE_MAX_N=32`) |
 | Smoke | Paris / Berlin / 323 **3/3**, `gate.txt` PASS |
-| Packed NF4 | **16599 MiB** — на карту не влезает |
-| Resident HBM | **9716 MiB** (`report.device_mib`, не 16601) |
-| Host tail | **96** матриц, **6885 MiB**, pin 6885/6885, слот **71.72 MiB** |
-| smi decode | **11926–11933 MiB**, плоский |
-| Пол «везём хвост по PCIe» | бит (не 0.8; не 10) |
-| Потолок ~3 ток/с | не достигнут (стена 432 мс > copy-floor 277 мс) |
-| Hard-12 | **не запускали** |
-| BF16 32B | **не запускали** (не влезет) |
-| VQ | **нет** (`--codec auto` не выбирает VQ) |
+| Packed NF4 | **16599 MiB** — does not fit on the card |
+| Resident HBM | **9716 MiB** (`report.device_mib`, not 16601) |
+| Host tail | **96** matrices, **6885 MiB**, pin 6885/6885, slot **71.72 MiB** |
+| smi decode | **11926–11933 MiB**, flat |
+| Floor “haul the tail over PCIe” | beaten (not 0.8; not 10) |
+| ~3 tok/s ceiling | not reached (wall 432 ms > copy-floor 277 ms) |
+| Hard-12 | **not run** |
+| BF16 32B | **not run** (will not fit) |
+| VQ | **no** (`--codec auto` does not pick VQ) |
 
-Цель волны: 32B **говорит** быстрее пола 1–2 ток/с. Потолок ≈ текущее ядро
-(~3 ток/с, если бы overflow-веса уже были в HBM), не 10. Качество — NF4.
+Wave goal: 32B **talks** faster than the 1–2 tok/s floor. Ceiling ≈ current kernel
+(~3 tok/s if overflow weights were already in HBM), not 10. Quality is NF4.
 
-Пластина: [`docs/img/h2-qwen25-32b.png`](img/h2-qwen25-32b.png),
+Plate: [`docs/img/h2-qwen25-32b.png`](img/h2-qwen25-32b.png),
 `python -m gpu.lab.h2_plate --redraw`.
 
-## Заморожено (не оспаривать)
+## Frozen (do not dispute)
 
-Железо: sm_86, WDDM, дисплей. Pinned H2D **24.3 GB/s** (256 MiB); pageable 8.0 —
-мёртвый путь. Один H2D copy engine; два H2D не складываются. Compute ∥ один copy — да.
+Hardware: sm_86, WDDM, display. Pinned H2D **24.3 GB/s** (256 MiB); pageable 8.0 —
+dead path. One H2D copy engine; two H2Ds do not add up. Compute ∥ one copy — yes.
 
-Живой NF4 = **4.25 бит**, group 64. Packed 32B ≈ **16599–16601 MiB**, не бумажные
-17577 (4.5 бит в `vram-3080.md`). Дыра ≈ 6.1 GiB + overhead 1800 MiB.
+Live NF4 = **4.25 bit**, group 64. Packed 32B ≈ **16599–16601 MiB**, not the paper
+17577 (4.5 bit in `vram-3080.md`). Hole ≈ 6.1 GiB + overhead 1800 MiB.
 
-| Правило | Решение |
+| Rule | Decision |
 |---|---|
-| Слоты | **2** device-арены, размер = packed+scale худшей overflow-матрицы (**71.72 MiB** на 32B gate/up/down). Адреса статичны. Не слой, не lm_head. |
-| Третий слот | не v1 (нет второго H2D; 72 MiB лучше отдать resident FFN) |
-| Pin | плиты **256 MiB** при load; `.chr` на токене не читать. Проверять `cpu_is_pinned()`, не `bool(tensor.is_pinned)` — это метод, всегда true. |
-| Copy | один `copy_stream` (не default); `copy_(non_blocking)` с pinned. На WDDM: **timing `e_copy` + CPU join** перед prefetch. `elapsed_time` только если `timing=True`. CLI: `ring_timing=False` (join есть, счётчика copy нет). |
-| Единица H2D | целая матрица (data+scale), не тайл |
-| Ядро | `chr_nf4_gemm` не трогать. `LIVE_MAX_N=32`. Нет `[M,K]` BF16 в HBM. Нет managed. |
-| Prefetch | depth = 1 (следующая overflow-матрица; N=1 ещё prefetch lm_head) |
-| Graphs | plan A на DEVICE. HOST GEMM после bind — CUDA graph со статического слота (`HostSlotGemm`); copy в graph на WDDM нет. Graphs не headline скорости. |
-| QKV/gate-up fork | только если **все** члены DEVICE. Mixed: serial, resident не копировать в слот |
-| Prefill | один H2D на overflow-матрицу **на чанк** `N≤32`, не на колонку |
-| Embed / lm_head / norms / bias / все qkvo | **всегда resident** |
-| Overflow | все `down_proj`, затем хвостовые пары `gate+up` (политика **D**) |
-| `max_seq` чата | **2048** (KV 512 MiB на 32B). 4096 — отдельный режим |
-| `auto` | NF4 если влезает целиком; иначе **NF4 + overflow**. Никогда VQ. 70B-класс — refuse |
-| 32B | дерево и `.chr` на диске. Дым A записан. Hard-12 — только после явного «гоняй». |
+| Slots | **2** device arenas, size = packed+scale of the worst overflow matrix (**71.72 MiB** on 32B gate/up/down). Addresses are static. Not a layer, not lm_head. |
+| Third slot | not v1 (no second H2D; 72 MiB is better given to resident FFN) |
+| Pin | **256 MiB** slabs at load; do not read `.chr` on a token. Check `cpu_is_pinned()`, not `bool(tensor.is_pinned)` — that is a method, always true. |
+| Copy | one `copy_stream` (not default); `copy_(non_blocking)` from pinned. On WDDM: **timing `e_copy` + CPU join** before prefetch. `elapsed_time` only if `timing=True`. CLI: `ring_timing=False` (join exists, no copy counter). |
+| H2D unit | whole matrix (data+scale), not a tile |
+| Kernel | do not touch `chr_nf4_gemm`. `LIVE_MAX_N=32`. No `[M,K]` BF16 in HBM. No managed. |
+| Prefetch | depth = 1 (next overflow matrix; N=1 also prefetches lm_head) |
+| Graphs | plan A on DEVICE. HOST GEMM after bind — CUDA graph from a static slot (`HostSlotGemm`); no copy in graph on WDDM. Graphs are not the speed headline. |
+| QKV/gate-up fork | only if **all** members are DEVICE. Mixed: serial, do not copy resident into a slot |
+| Prefill | one H2D per overflow matrix **per chunk** `N≤32`, not per column |
+| Embed / lm_head / norms / bias / all qkvo | **always resident** |
+| Overflow | all `down_proj`, then tail `gate+up` pairs (policy **D**) |
+| Chat `max_seq` | **2048** (KV 512 MiB on 32B). 4096 is a separate mode |
+| `auto` | NF4 if it fits whole; else **NF4 + overflow**. Never VQ. 70B-class — refuse |
+| 32B | tree and `.chr` on disk. Smoke A recorded. Hard-12 — only after an explicit “run it”. |
 
-Canary без 32B: `qwen25-3b.nf4.chr` + фейковый cap (резать resident packed, не ballast-тензор).
-Дым Paris/Berlin/323. Калибр шины — **256 MiB / 10.31 ms**.
+Canary without 32B: `qwen25-3b.nf4.chr` + fake cap (cut resident packed, not a ballast tensor).
+Paris/Berlin/323 smoke. Bus caliber — **256 MiB / 10.31 ms**.
 `t_ms = size_MiB × 10.31 / 256`.
 
-**978 MiB** (17577 − 16601) — ошибка таблицы 4.5 бит в `vram-3080.md`, не
-«неизвестные веса». В бюджет **не** резервировать.
+**978 MiB** (17577 − 16601) is a 4.5-bit table error in `vram-3080.md`, not
+“unknown weights”. Do **not** reserve it in the budget.
 
-Потолок: если overflow **размазан** по слоям (все `down` каждое кольцо слоя),
-copy engine занят во время resident qkv/attn/gateup → `wall ≈ max(copy, gemm)`.
-DoD не 2.7; цель — бить пол 1–2, не обещать 10. Живая стена ~432 мс/ток —
-copy-floor 277 мс плюс WDDM join и неполный overlap.
+Ceiling: if overflow is **smeared** across layers (every `down` on every layer ring),
+the copy engine is busy during resident qkv/attn/gateup → `wall ≈ max(copy, gemm)`.
+DoD is not 2.7; the goal is to beat the 1–2 floor, not promise 10. Live wall ~432 ms/tok —
+copy-floor 277 ms plus WDDM join and incomplete overlap.
 
-### Баг, который не цитировать как дизайн
+### Bug not to cite as design
 
-`Tensor.is_pinned` — **метод**. `bool(arena.is_pinned)` всегда True, overflow
-ехал pageable (~0.76–0.82 ток/с, ~7.3 GiB/s). Чинить: `cpu_is_pinned()` в
-`gpu/host/host_image.py`. Продуктовая цифра — **2.31**, не 0.8.
+`Tensor.is_pinned` is a **method**. `bool(arena.is_pinned)` is always True, overflow
+ran pageable (~0.76–0.82 tok/s, ~7.3 GiB/s). Fix: `cpu_is_pinned()` in
+`gpu/host/host_image.py`. Product number is **2.31**, not 0.8.
 
-### Сторонний разбор (принять / нет)
+### Third-party breakdown (accept / no)
 
-| Ход | Вердикт |
+| Move | Verdict |
 |---|---|
-| Бить резидентный **префикс** (A): два слота не прокачивают хвост | **Да.** A мертва. D: все `down` едут каждый слой. |
-| Планировщик перестановок MLP / fork как v1 | **Нет.** D — seed. |
-| packed+scale = **один** H2D, `ready` = оба | **Да.** |
-| `record ready` → wait/GEMM/`record done` → wait/overwrite | **Да.** В CopyRing. |
-| Overflow GEMM в CUDA graph со статического слота | **Сделано** (`HostSlotGemm`). Не заявлять как win tok/s. |
-| Prefetch начала следующего токена во время lm_head | **Да, дёшево**; bytes/token не меняет. |
-| Вычитать 978 МиБ «на всякий» | **Нет.** |
-| Третий слот / half-M / embedding по строкам / `cudaHostRegister` всего `.chr` | **Не v1.** |
-| Цель 2.7 ток/с как gate 32B без файла | **Нет.** Gate чата — 3B canary + живой 32B дым. |
-| 10 ток/с / Marlin / llama.cpp | **Нет.** |
+| Beat the resident **prefix** (A): two slots do not pump the tail | **Yes.** A is dead. D: all `down` travel every layer. |
+| Permutation scheduler of MLP / fork as v1 | **No.** D is the seed. |
+| packed+scale = **one** H2D, `ready` = both | **Yes.** |
+| `record ready` → wait/GEMM/`record done` → wait/overwrite | **Yes.** In CopyRing. |
+| Overflow GEMM in a CUDA graph from a static slot | **Done** (`HostSlotGemm`). Do not claim as a tok/s win. |
+| Prefetch start of the next token during lm_head | **Yes, cheap**; does not change bytes/token. |
+| Subtract 978 MiB “just in case” | **No.** |
+| Third slot / half-M / embedding by rows / `cudaHostRegister` of the whole `.chr` | **Not v1.** |
+| 2.7 tok/s target as a 32B gate without a file | **No.** Chat gate is 3B canary + live 32B smoke. |
+| 10 tok/s / Marlin / llama.cpp | **No.** |
 
-## Волны
+## Waves
 
-Один чат = одна волна. Юниты без GPU после волны кода:
+One chat = one wave. Units without GPU after a code wave:
 
 ```
 python gpu/cli/test_codec.py
@@ -104,20 +104,20 @@ python gpu/lab/test_h2_trace.py
 python gpu/lab/test_h2_plate.py
 ```
 
-### H2-1 — `decide()` overflow, без CUDA — PASS
+### H2-1 — `decide()` overflow, no CUDA — PASS
 
-`Decision.overflow`. 32B/12 GB → nf4 + overflow, не raise, не VQ.
+`Decision.overflow`. 32B/12 GB → nf4 + overflow, not raise, not VQ.
 
 ### H2-2 — HostImage + residency plan, CPU — PASS
 
-Pin-плиты 256 MiB. `plan_residency` = **D**. `slot_nbytes = max(streamed)`.
+Pin slabs 256 MiB. `plan_residency` = **D**. `slot_nbytes = max(streamed)`.
 
 ### H2-3 — load: resident HBM + host tail + SlotPair — PASS
 
 ### H2-4 — CopyRing + decode eager — PASS
 
-### H2-5 — plan A только resident; CLI run на overflow — PASS
+### H2-5 — plan A resident only; CLI run on overflow — PASS
 
-### H2-6 — живой 32B — PASS (дым A)
+### H2-6 — live 32B — PASS (smoke A)
 
-Hard 12 не стартовать без явного «гоняй» (`docs/eval-32b.md`).
+Do not start Hard 12 without an explicit “run it” (`docs/eval-32b.md`).

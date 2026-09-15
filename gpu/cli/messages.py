@@ -80,9 +80,13 @@ Create a neighbor venv instead:
   bash scripts/setup.sh"""
 
 CHAT_HELP = (
-    "Enter sends. Ctrl+J adds a line. "
-    "Slash: /help /quit /exit /clear /stats. "
-    "Each turn prefills the whole chat (KV is not reused)."
+    "Enter sends. Ctrl+J newline. Ctrl+C stops a reply; "
+    "at an empty prompt, twice to quit. "
+    "Slash: /help /quit /exit /clear /stats /new /chats /copy /save /agent. "
+    "History is JSON on disk; each turn prefills it (KV is not reused). "
+    "Ctrl+C does not copy; use /copy or the terminal's copy (Ctrl+Shift+C). "
+    "Agent mode (--agent or /agent on) can list/read/write the workspace and "
+    "run pytest; writes and tests ask first. There is no general shell."
 )
 
 #: Kept for the doctor / catalog copy. It is *not* the generate authority any

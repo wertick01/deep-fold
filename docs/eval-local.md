@@ -1,72 +1,72 @@
-# Локальный eval: GSM8K parquet → JSON, WikiText, InternLM 20B
+# Local eval: GSM8K parquet → JSON, WikiText, InternLM 20B
 
-Инструкция для инженера **без** чата, в котором Pavel качал корпуса.
-Корпуса уже лежат на диске. **Не** качать с HuggingFace Hub. У
-`python -m gpu.lab.eval` **нет** `--download`. `DEEPFOLD_EVAL` должен
-указывать на **уже локальный** JSON/JSONL. Дочерние воркеры ставят
-`HF_HUB_OFFLINE=1`; `datasets.load_dataset` на eval не вызывать.
+Instructions for an engineer **without** the chat where Pavel downloaded the
+corpora. The corpora are already on disk. **Do not** download from HuggingFace
+Hub. `python -m gpu.lab.eval` has **no** `--download`. `DEEPFOLD_EVAL` must
+point at **already local** JSON/JSONL. Child workers set
+`HF_HUB_OFFLINE=1`; do not call `datasets.load_dataset` on eval.
 
-Python этой машины:
+Python on this machine:
 
 ```powershell
 $py = "C:\Users\Professional\anaconda3\envs\torch-gpu\python.exe"
 Set-Location C:\dev\deep-fold
 ```
 
-**Не** `pip install` в `torch-gpu`. **Не** коммитить `C:\dev\models\eval`.
-**Не** перезаписывать `docs/runs/qwen25-3b` и `docs/runs/internlm20b`.
-`LIVE_MAX_N` по-прежнему 32; n64 в этой задаче не поднимать.
+**Do not** `pip install` into `torch-gpu`. **Do not** commit `C:\dev\models\eval`.
+**Do not** overwrite `docs/runs/qwen25-3b` and `docs/runs/internlm20b`.
+`LIVE_MAX_N` stays 32; do not raise n64 in this task.
 
-Две разные тарелки:
+Two different plates:
 
-| Команда | Что это |
+| Command | What it is |
 |---|---|
-| `python -m gpu.lab.eval` | этот документ: JSON с `kind=gsm8k` / `ppl` / … |
-| `python -m gpu.lab.hard` | 12 независимых пунктов + optional history. **Не** WikiText |
+| `python -m gpu.lab.eval` | this document: JSON with `kind=gsm8k` / `ppl` / … |
+| `python -m gpu.lab.hard` | 12 independent items + optional history. **Not** WikiText |
 
-## 1. Что Pavel уже скачал и куда
+## 1. What Pavel already downloaded, and where
 
-Всё вне git-репозитория `C:\dev\deep-fold`:
+Everything lives outside the git repo `C:\dev\deep-fold`:
 
 ```
 C:\dev\models\eval\
-  gsm8k\                 клон Hub-датасета openai/gsm8k (git + LFS)
-    main\test-00000-of-00001.parquet     (~419 KB, 1319 строк)
-    main\train-00000-of-00001.parquet    (не брать на первый прогон)
-    socratic\...                        игнорировать, пока не понадобится
-  wikitext-2\            клон Hub-датасета wikitext-2 (git + LFS)
-    data\test-00000-of-00001.parquet      (2183 строки `text`)
+  gsm8k\                 Hub-dataset clone openai/gsm8k (git + LFS)
+    main\test-00000-of-00001.parquet     (~419 KB, 1319 rows)
+    main\train-00000-of-00001.parquet    (do not use on the first run)
+    socratic\...                        ignore until needed
+  wikitext-2\            Hub-dataset clone wikitext-2 (git + LFS)
+    data\test-00000-of-00001.parquet      (2183 `text` rows)
     data\validation-00000-of-00001.parquet
     data\train-00000-of-00001.parquet
-  gsm8k-200.json          конвертация harness (см. §2); ~105 KB, 200 items
+  gsm8k-200.json          harness conversion (see §2); ~105 KB, 200 items
 ```
 
-`eval_source()` смотрит только `*.json` / `*.jsonl` **в корне** каталога
-`DEEPFOLD_EVAL`, не внутри `gsm8k\main\*.parquet`. Пустой каталог →
-закоммиченная 8-пунктная фикстура `gpu/lab/data/eval_items.json` и
-пометка в логе, без скачивания.
+`eval_source()` only looks at `*.json` / `*.jsonl` **in the root** of
+`DEEPFOLD_EVAL`, not inside `gsm8k\main\*.parquet`. Empty directory →
+the committed 8-item fixture `gpu/lab/data/eval_items.json` and a
+log note, with no download.
 
-## 2. Конвертация GSM8K **main test** → JSON
+## 2. Convert GSM8K **main test** → JSON
 
-Схема harness (`gpu/lab/eval.py`): объекты с `id`, `kind`, `prompt`,
-`gold`, опционально `task`. Для GSM8K: `kind=gsm8k`, `task=gsm8k`,
-`gold` — целое (как строка), промпт просит финальный ответ в форме
-`#### N`, как фикстура.
+Harness schema (`gpu/lab/eval.py`): objects with `id`, `kind`, `prompt`,
+`gold`, optional `task`. For GSM8K: `kind=gsm8k`, `task=gsm8k`,
+`gold` is an integer (as a string), the prompt asks for the final answer as
+`#### N`, matching the fixture.
 
-Первый срез: **200–500** строк **test** (не train). На диске уже лежат
-**200** первых строк official test (1319 всего):
+First slice: **200–500** **test** rows (not train). Disk already has the
+**200** first rows of the official test (1319 total):
 
 `C:\dev\models\eval\gsm8k-200.json`
 
-`DEEPFOLD_EVAL` принимает **файл или каталог**. Файл однозначен
-(если в корне `C:\dev\models\eval` появятся другие `*.json`, каталог
-возьмёт первый по имени). Предпочтительно:
+`DEEPFOLD_EVAL` accepts a **file or a directory**. A file is unambiguous
+(if other `*.json` files appear in the root of `C:\dev\models\eval`, a
+directory takes the first by name). Prefer:
 
 ```powershell
 $env:DEEPFOLD_EVAL = "C:\dev\models\eval\gsm8k-200.json"
 ```
 
-Проверка без GPU:
+Check without GPU:
 
 ```powershell
 $py = "C:\Users\Professional\anaconda3\envs\torch-gpu\python.exe"
@@ -75,11 +75,12 @@ Set-Location C:\dev\deep-fold
 & $py -m gpu.lab.eval --list
 ```
 
-Ожидание: `200 items  source=local  C:\dev\models\eval\gsm8k-200.json`.
+Expected: `200 items  source=local  C:\dev\models\eval\gsm8k-200.json`.
 
-### Повторить конвертацию (pyarrow уже в torch-gpu)
+### Repeat the conversion (pyarrow is already in torch-gpu)
 
-Не ставить `datasets`. Не качать Hub. `pyarrow` 23 уже есть в env.
+Do not install `datasets`. Do not download from Hub. `pyarrow` 23 is already
+in the env.
 
 ```powershell
 $py = "C:\Users\Professional\anaconda3\envs\torch-gpu\python.exe"
@@ -124,24 +125,24 @@ print(f"wrote {out} items={len(items)}")
 '@
 ```
 
-Чтобы взять 500 вместо 200, смените `n = 200` и имя файла
-(`gsm8k-500.json`). Train не использовать на этом срезе.
+To take 500 instead of 200, change `n = 200` and the file name
+(`gsm8k-500.json`). Do not use train on this slice.
 
-## 3. Прогон Qwen2.5-3B: BF16, затем NF4
+## 3. Run Qwen2.5-3B: BF16, then NF4
 
-Карта 12 GB. Оба кодека **не** грузить в одном процессе. Harness уже
-изолирует: `run_eval` → по одному `gpu.lab.worker`, процесс выходит,
-VRAM возвращается, затем следующий кодек.
+12 GB card. **Do not** load both codecs in one process. The harness already
+isolates: `run_eval` → one `gpu.lab.worker` at a time, the process exits,
+VRAM is returned, then the next codec.
 
-Перед стартом карта должна быть почти пустой (~2 GiB display, **нет**
-жирного `python.exe` в `nvidia-smi`):
+Before starting, the card should be almost empty (~2 GiB display, **no**
+fat `python.exe` in `nvidia-smi`):
 
 ```powershell
 nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv
 nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv
 ```
 
-Если висит чужой lab / competitor / ncu — **не** стартовать.
+If a foreign lab / competitor / ncu is hanging around — **do not** start.
 
 ```powershell
 $py = "C:\Users\Professional\anaconda3\envs\torch-gpu\python.exe"
@@ -151,171 +152,170 @@ Set-Location C:\dev\deep-fold
 & $py -m gpu.lab.eval --lab qwen25-3b --codecs bf16,nf4 --out $out
 ```
 
-`--out` обязан быть **новым** каталогом под `C:\dev\models\runs\`, не
-`docs/runs/qwen25-3b`. Если `eval-qwen25-3b-gsm8k-200-20260913` уже
-существует (на этой машине первый прогон стартовал 2026-09-13), возьмите
-другую дату в имени. Не запускайте второй eval, пока `nvidia-smi` показывает
-`torch-gpu\python.exe` на карте.
+`--out` must be a **new** directory under `C:\dev\models\runs\`, not
+`docs/runs/qwen25-3b`. If `eval-qwen25-3b-gsm8k-200-20260913` already
+exists (on this machine the first run started 2026-09-13), pick
+another date in the name. Do not start a second eval while `nvidia-smi` shows
+`torch-gpu\python.exe` on the card.
 
-Воркер пишет CSV **после всех 200 пунктов**, не по одному. Пока жив
-`gpu.lab.worker`, в `$out\qwen25-3b-bf16\` может быть пусто — это не зависший
-прогон, если GPU ~8 GiB и utilization не ноль.
+The worker writes the CSV **after all 200 items**, not one by one. While
+`gpu.lab.worker` is alive, `$out\qwen25-3b-bf16\` may be empty — that is not a
+hung run if GPU ~8 GiB and utilization is not zero.
 
-Ожидание по времени: 200 пунктов × greedy × `max_new_tokens=256`
-(худший случай). На 3B это десятки минут на кодек, оба кодека —
-примерно час+. Это сознательный срез 200, не полный test 1319.
+Time expectation: 200 items × greedy × `max_new_tokens=256`
+(worst case). On 3B that is tens of minutes per codec, both codecs —
+about an hour+. This is a deliberate 200-item slice, not the full test 1319.
 
-Выход:
+Output:
 
 ```
-$out\eval_script.json          замороженные промпты + provenance
-$out\eval_scores.csv          слитый BF16+NF4 после каждого воркера
+$out\eval_script.json          frozen prompts + provenance
+$out\eval_scores.csv          merged BF16+NF4 after each worker
 $out\qwen25-3b-bf16\         isolated BF16 (messages.csv, eval_scores.csv, …)
 $out\qwen25-3b-nf4\
 ```
 
-## 4. WikiText-2: это не GSM8K, адаптер NLL есть, числа PPL ещё нет
+## 4. WikiText-2: this is not GSM8K, the NLL adapter exists, PPL numbers do not yet
 
-На диске: `C:\dev\models\eval\wikitext-2\data\`.
+On disk: `C:\dev\models\eval\wikitext-2\data\`.
 
-| Split | Файл | Зачем |
+| Split | File | Why |
 |---|---|---|
-| **test** | `data\test-00000-of-00001.parquet` | единственный split, с которого *когда-нибудь* можно публиковать PPL |
-| validation | `data\validation-00000-of-00001.parquet` | отладка адаптера, не «официальное» число |
-| train | `data\train-00000-of-00001.parquet` | не для отчёта |
+| **test** | `data\test-00000-of-00001.parquet` | the only split from which PPL may *eventually* be published |
+| validation | `data\validation-00000-of-00001.parquet` | adapter debugging, not an “official” number |
+| train | `data\train-00000-of-00001.parquet` | not for the report |
 
-Колонка `text` (статьи/абзацы), не `question`/`answer`. PPL — это
-**loglikelihood префикса**, не extract `#### N`.
+Column `text` (articles/paragraphs), not `question`/`answer`. PPL is
+**prefix loglikelihood**, not extract `#### N`.
 
-Адаптер: `gpu/lab/nll.py`. Оба кодека считают teacher-forced NLL
-(`logits[t]` → токен `t+1`), **без** chat template. `kind=ppl` больше не
-ходит в `generate`. Результат живёт в `loglikelihood.csv` рядом с
-`messages.csv` (схема messages заморожена, колонку `nll` туда нельзя).
-`score_messages` читает sidecar и пишет `eval_scores.csv`.
+Adapter: `gpu/lab/nll.py`. Both codecs compute teacher-forced NLL
+(`logits[t]` → token `t+1`), **without** a chat template. `kind=ppl` no longer
+goes through `generate`. The result lives in `loglikelihood.csv` next to
+`messages.csv` (the messages schema is frozen, you cannot add an `nll` column).
+`score_messages` reads the sidecar and writes `eval_scores.csv`.
 
-Пока **нет**:
+Still **missing**:
 
-1. JSON с `kind=ppl` из WikiText-2 test (parquet сам по себе harness не читает).
-2. Rolling windows для статей длиннее `max_seq` (сейчас: пустая ячейка,
-   не молчаливая обрезка).
-3. Опубликованного числа в README.
+1. JSON with `kind=ppl` from WikiText-2 test (parquet itself is not read by the harness).
+2. Rolling windows for articles longer than `max_seq` (currently: empty cell,
+   not silent truncation).
+3. A published number in the README.
 
-**Не выдумывать WikiText PPL.** Пустая ячейка честнее нуля. CPU-проверка
-адаптера: `python -m gpu.lab.test_nll` (без 3B).
+**Do not invent WikiText PPL.** An empty cell is more honest than a zero. CPU
+check of the adapter: `python -m gpu.lab.test_nll` (no 3B).
 
-Когда будет JSON: отдельный файл, `DEEPFOLD_EVAL` на него, карта свободна
-(не параллельно с GSM8K). Не смешивать accuracy GSM8K и PPL в одной цифре.
+When JSON exists: a separate file, `DEEPFOLD_EVAL` pointing at it, card free
+(not in parallel with GSM8K). Do not mix GSM8K accuracy and PPL into one figure.
 
-### WikiText-2 test → `kind=ppl` JSON (локальный срез, не official PPL)
+### WikiText-2 test → `kind=ppl` JSON (local slice, not official PPL)
 
-Parquet уже на диске. Harness **не** читает parquet сам. Конвертация —
-`C:\dev\models\eval\_convert_wikitext_ppl.py` (тоже вне git): Qwen2.5-3B
-tokenizer, `max_seq=2048`, префиксы короче 2 токенов и длиннее `max_seq`
-не попадают в срез (rolling windows нет). На этой машине весь test
-укладывается в 2048 (max 562 токена; 7 строк `<2`).
+Parquet is already on disk. The harness **does not** read parquet itself.
+Conversion is `C:\dev\models\eval\_convert_wikitext_ppl.py` (also outside git):
+Qwen2.5-3B tokenizer, `max_seq=2048`, prefixes shorter than 2 tokens and longer
+than `max_seq` do not enter the slice (no rolling windows). On this machine
+the entire test fits in 2048 (max 562 tokens; 7 rows `<2`).
 
-Срез, с которым гоняли тарелку 2026-09-13:
+Slice used for the 2026-09-13 plate:
 
-`C:\dev\models\eval\wikitext2-test-ppl-fit50.json` — первые 50 строк test,
-у которых длина в `[2, 2048]`. Это **не** official WikiText-2 test PPL
-(нет склейки корпуса, нет rolling windows). PPL только как
-`exp(nll / n_tokens)` по строкам с реальным NLL; пустую ячейку нулём
-не заполнять. Число не писать в README.
+`C:\dev\models\eval\wikitext2-test-ppl-fit50.json` — first 50 test rows
+whose length is in `[2, 2048]`. This is **not** official WikiText-2 test PPL
+(no corpus concatenation, no rolling windows). PPL only as
+`exp(nll / n_tokens)` on rows with a real NLL; do not fill an empty cell with
+zero. Do not write the number into the README.
 
-Живой прогон (teacher-forced, isolated workers):
+Live run (teacher-forced, isolated workers):
 `C:\dev\models\runs\eval-qwen25-3b-wikitext-ppl-20260913-fit50-nll`
-плюс `ppl_summary.json` в том же каталоге. Isolated `gpu.lab.worker`
-обязан прокинуть `--plate eval` и `--items-json` в `run_bf16` / `run_nf4`,
-иначе `kind=ppl` уходит в `generate` (так вышло у
-`eval-qwen25-3b-wikitext-ppl-20260913-fit50` — не PPL).
+plus `ppl_summary.json` in the same directory. Isolated `gpu.lab.worker`
+must pass `--plate eval` and `--items-json` into `run_bf16` / `run_nf4`,
+otherwise `kind=ppl` goes through `generate` (that is what happened with
+`eval-qwen25-3b-wikitext-ppl-20260913-fit50` — not PPL).
 
-## 5. InternLM 20B hard (только NF4)
+## 5. InternLM 20B hard (NF4 only)
 
-Это **`python -m gpu.lab.hard`**, 12 пунктов, не 200 GSM8K и не WikiText.
-BF16 20B на 12 GB — spill/OOM плюс stale
-`prepare_inputs_for_generation` на transformers 5; **не патчить**
-(см. `gpu/lab/sessions.py`: патч даёт fluent repetition, фейковый
-baseline). Только NF4 `.chr`.
+This is **`python -m gpu.lab.hard`**, 12 items, not 200 GSM8K and not WikiText.
+BF16 20B on 12 GB — spill/OOM plus stale
+`prepare_inputs_for_generation` on transformers 5; **do not patch**
+(see `gpu/lab/sessions.py`: the patch yields fluent repetition, a fake
+baseline). NF4 `.chr` only.
 
-Новый `--out`, **не** `docs/runs/internlm20b`:
+New `--out`, **not** `docs/runs/internlm20b`:
 
 ```powershell
 $py = "C:\Users\Professional\anaconda3\envs\torch-gpu\python.exe"
-# карта свободна (см. nvidia-smi выше)
+# card free (see nvidia-smi above)
 Set-Location C:\dev\deep-fold
 & $py -m gpu.lab.hard --lab internlm20b --codec nf4 --out C:\dev\models\runs\hard-internlm20b-nf4-YYYYMMDD
 ```
 
-У hard флаг **`--codec`** (единственное число), не `--codecs`.
-`--codec both` не запускать на 20B в этом env.
+Hard uses the **`--codec`** flag (a single value), not `--codecs`.
+Do not run `--codec both` on 20B in this env.
 
-Прогон 2026-09-14 (карта была свободна, OOM не было, ~17.6 мин):
+Run 2026-09-14 (card was free, no OOM, ~17.6 min):
 
 `C:\dev\models\runs\hard-internlm20b-nf4-20260914`
 
-**8/12**, все 12 пунктов. Промахи: train `30` vs `240`, machines `6` vs
-`108`, sheep `8` vs `9`, bat-and-ball `0` vs `0.05`. Среднее TTFT **1318 ms**,
-**4.4 tok/s**, пик `nvidia-smi` **12067 MiB**, `max_seq=1024`. Это **не**
-дым 605 ms / 5.01 tok/s при `max_seq=512` и **не** `docs/runs/internlm20b`.
-Не заголовок качества. BF16 не патчили.
+**8/12**, all 12 items. Misses: train `30` vs `240`, machines `6` vs
+`108`, sheep `8` vs `9`, bat-and-ball `0` vs `0.05`. Mean TTFT **1318 ms**,
+**4.4 tok/s**, peak `nvidia-smi` **12067 MiB**, `max_seq=1024`. This is **not**
+the smoke 605 ms / 5.01 tok/s at `max_seq=512` and **not** `docs/runs/internlm20b`.
+Not a quality headline. BF16 was not patched.
 
-## 6. Что никогда не попадает в git
+## 6. What never goes into git
 
-- Весь `C:\dev\models\eval\` — Hub-клоны, `.git`, LFS, parquet.
-- Сконвертированный JSON (даже 200 пунктов; тем более 1319 / train).
-- `C:\dev\models\runs\` — живые прогоны, логи, CSV.
-- `*.chr`, веса моделей.
-- Не коммитить и не пушить `C:\dev\models\eval`.
+- All of `C:\dev\models\eval\` — Hub clones, `.git`, LFS, parquet.
+- Converted JSON (even 200 items; even more so 1319 / train).
+- `C:\dev\models\runs\` — live runs, logs, CSV.
+- `*.chr`, model weights.
+- Do not commit or push `C:\dev\models\eval`.
 
-В репозитории остаются только крошечные фикстуры
-`gpu/lab/data/eval_items.json` (8) и `hard_items.json` (12).
+The repo keeps only the tiny fixtures
+`gpu/lab/data/eval_items.json` (8) and `hard_items.json` (12).
 
-## 7. Как читать скоры vs честность README
+## 7. How to read scores vs README honesty
 
 **GSM8K / eval plate** — `eval_scores.csv`:
 
-| Колонка | Смысл |
+| Column | Meaning |
 |---|---|
-| `correct` | `true`/`false` для `gsm8k`; пусто для `ppl` |
-| `extracted` vs `gold` | число после `####` / «the answer is» / последнее число |
-| `nll`, `n_tokens` | teacher-forced NLL из sidecar; пусто, если адаптер не посчитал (нет round-trip, prefix > max_seq, нет `kind=ppl`) |
-| accuracy | доля `correct=true` среди строк с непустым `correct` |
+| `correct` | `true`/`false` for `gsm8k`; empty for `ppl` |
+| `extracted` vs `gold` | number after `####` / “the answer is” / last number |
+| `nll`, `n_tokens` | teacher-forced NLL from the sidecar; empty if the adapter did not compute (no round-trip, prefix > max_seq, no `kind=ppl`) |
+| accuracy | share of `correct=true` among rows with non-empty `correct` |
 
-Корень `$out\eval_scores.csv` — оба кодека. Не путать с
+Root `$out\eval_scores.csv` is both codecs. Do not confuse with
 `hard_scores.csv`.
 
-**12-item hard** (`python -m gpu.lab.hard`) — `hard_scores.csv`. Это
-**не** WikiText, не lm-eval, не полный GSM8K test. Не ставить в README
-как «качество на WikiText» и не подменять 200-пунктный локальный срез
-заголовком «GSM8K».
+**12-item hard** (`python -m gpu.lab.hard`) — `hard_scores.csv`. This is
+**not** WikiText, not lm-eval, not the full GSM8K test. Do not put it in the
+README as “WikiText quality” and do not replace a 200-item local slice
+with the headline “GSM8K”.
 
-**8-item eval fixture** (если `DEEPFOLD_EVAL` не задан) — smoke
-harness, не качество.
+**8-item eval fixture** (if `DEEPFOLD_EVAL` is unset) — smoke
+harness, not quality.
 
-**Не** вписывать выдуманный accuracy в README. Когда 200-пунктный прогон
-закончится, цифра живёт в `$out\eval_scores.csv` и в логе harness
-(`codec  items  accuracy …`). README трогать только отдельным решением,
-с явной подписью «200 / 1319 main test, greedy, max_new=256».
+**Do not** write an invented accuracy into the README. When the 200-item run
+finishes, the figure lives in `$out\eval_scores.csv` and in the harness log
+(`codec  items  accuracy …`). Touch the README only as a separate decision,
+with an explicit caption “200 / 1319 main test, greedy, max_new=256”.
 
-Smoke Paris / Berlin / 323 по-прежнему не качество
-(см. [`eval.md`](eval.md)).
+Smoke Paris / Berlin / 323 is still not quality
+(see [`eval.md`](eval.md)).
 
-## Next — порядок работ после этого eval
+## Next — work order after this eval
 
-1. **WikiText PPL** — локальный срез уже гоняли; число **не** в README.
-2. **InternLM 20B hard** — сделано, §5 выше. Не затирать `docs/runs/internlm20b`.
-3. **Competitor isolated venvs** — bitsandbytes live smoke есть вне git;
-   остальные SKIP. Не `pip` в `torch-gpu`.
-4. **ncu: n32 vs 2×n16** — сделано:
-   `C:\dev\models\runs\ncu-n32-vs-2xn16-20260913`. True n32 на 3B `q_proj`
-   **69 µs** против двух n16 **113 µs** (**1.63×**). Occupancy не просел.
-   **Numerics `--plan-n` на живом 3B (2026-09-14).** Layer-0 `q_proj` N=32:
-   maxabs **0.05847** на одном элементе (`y[383,1]` −17.5 vs −17.44153).
-   n32 **бит-в-бит** равен 2×n16 на том же `x`; n16 на `x[:,:16]` даёт тот
-   же пик. Это half-ULP BF16, не баг тайла. Этаж: max(0.05, ½ ULP).
-   e2e 3B 2026-09-14 пара: `C:\dev\models\runs\qwen25-3b-paired-20260914`,
+1. **WikiText PPL** — local slice already ran; the number is **not** in the README.
+2. **InternLM 20B hard** — done, §5 above. Do not overwrite `docs/runs/internlm20b`.
+3. **Competitor isolated venvs** — bitsandbytes live smoke exists outside git;
+   the rest SKIP. Do not `pip` into `torch-gpu`.
+4. **ncu: n32 vs 2×n16** — done:
+   `C:\dev\models\runs\ncu-n32-vs-2xn16-20260913`. True n32 on 3B `q_proj`
+   **69 µs** vs two n16 **113 µs** (**1.63×**). Occupancy did not drop.
+   **Numerics `--plan-n` on live 3B (2026-09-14).** Layer-0 `q_proj` N=32:
+   maxabs **0.05847** on one element (`y[383,1]` −17.5 vs −17.44153).
+   n32 is **bit-identical** to 2×n16 on the same `x`; n16 on `x[:,:16]` gives the
+   same peak. This is half-ULP BF16, not a tile bug. Floor: max(0.05, ½ ULP).
+   e2e 3B 2026-09-14 pair: `C:\dev\models\runs\qwen25-3b-paired-20260914`,
    `prefill_chunk=32`, TTFT **48 vs 92 ms**, decode **24.8 vs 28.7 tok/s**.
-   NF4-only n32 в тот же день: 91 ms / 28.6. `LIVE_MAX_N=32`. n64 не мерили.
-5. **Не утверждать vs Marlin.** Occupancy / DRAM из `docs/runs/ncu/` —
-   наше ядро, не tok/s против Marlin / AWQ / bitsandbytes / llama.cpp.
-)
+   NF4-only n32 same day: 91 ms / 28.6. `LIVE_MAX_N=32`. n64 was not measured.
+5. **Do not claim vs Marlin.** Occupancy / DRAM from `docs/runs/ncu/` —
+   our kernel, not tok/s against Marlin / AWQ / bitsandbytes / llama.cpp.

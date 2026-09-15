@@ -3,7 +3,9 @@
 Короткий список команд. Полная справка (`-h`, флаги, ошибки): [`install.ru.md`](install.ru.md).
 
 После `scripts/setup.ps1` команда `deepfold` и `python -m gpu.cli` — одно и то же.
-Ниже — `deepfold`. Если её нет на PATH: подставьте `python -m gpu.cli`.
+Ниже — `deepfold`. Если её нет на PATH: `python -m gpu.cli` (так и задумано в
+conda env `torch-gpu`). После setup активируйте `.venv` или зовите
+`.\.venv\Scripts\deepfold.exe`.
 
 Smoke Paris / Berlin / 323 **не** измеряет качество. Tok/s с авторской 3080
 на другой карте не обещать.
@@ -105,7 +107,8 @@ chr verify --orig D:\weights\Qwen2.5-3B-Instruct --chr D:\weights\qwen25-3b.nf4.
 deepfold chat --model D:\weights\Qwen2.5-3B-Instruct
 ```
 
-Enter — отправить, Ctrl+J — новая строка. `/help` `/quit` `/clear` `/stats`.
+Enter — отправить, Ctrl+J — новая строка. Ctrl+C останавливает ответ. `/help` `/quit` `/clear` `/stats` `/new` `/chats` `/copy` `/save` `/agent`. Ответы рисуют markdown (жирный, списки, ограды) и переводят LaTeX `$...$` / `$$` в Unicode. По желанию: `--agent --workspace .` — инструменты в каталоге (запись и pytest спрашивают сначала).
+У `chat` по умолчанию 256 новых токенов (не дымовой лимит 64).
 
 Скрипт / пайп:
 

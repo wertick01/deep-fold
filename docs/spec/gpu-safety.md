@@ -1,158 +1,158 @@
-# Протокол этажа 1: оракул GPU-NF4, VRAM и безопасность
+# Floor 1 protocol: GPU-NF4 oracle, VRAM, and safety
 
-Приёмка волны 2.0 со стороны агента 4. Если ядро, лоадер или хост спорят с этой страницей про **пороги и смысл FAIL** — побеждает эта страница; про байты и стыки побеждают [stitch-gpu.md](stitch-gpu.md), [nf4.md](nf4.md), [chr0.md](chr0.md).
+Wave 2.0 acceptance from agent 4. If the kernel, loader, or host argue with this page about **thresholds and what FAIL means** — this page wins; about bytes and stitches, [stitch-gpu.md](stitch-gpu.md), [nf4.md](nf4.md), [chr0.md](chr0.md) win.
 
-Этаж 1 из [token-loop.md](../token-loop.md) §7.3 — это **ядро против CPU-decode нашего же кодека**. Этаж 2 (KL против BF16-дампа, WikiText, greedy-match) — не эта волна и не этот файл.
+Floor 1 from [token-loop.md](../token-loop.md) §7.3 is **the kernel against CPU-decode of our own codec**. Floor 2 (KL against a BF16 dump, WikiText, greedy-match) is not this wave and not this file.
 
 ---
 
-## 1. Одна команда
+## 1. One command
 
 ```text
 conda activate torch-gpu
 python gpu/tests/oracle_gate.py --chr C:\dev\models\qwen25-3b.nf4.chr
 ```
 
-Печатает таблицу проверок, затем `maxabs`, `rmse`, `smi_before`, `smi_after`, `display_reserved_mib` и вердикт.
+Prints a check table, then `maxabs`, `rmse`, `smi_before`, `smi_after`, `display_reserved_mib`, and a verdict.
 
-| Код выхода | Вердикт | Что это значит |
+| Exit code | Verdict | What it means |
 |---:|---|---|
-| 0 | `PASS` | все обязательные проверки прошли; это и есть приёмка |
-| 2 | `FAIL` | численный или safety-инвариант нарушен (как `chr verify`) |
-| 3 | `BLOCKED` | обязательная проверка **не смогла** запуститься (нет `gpu/nf4`, нет `.chr`, нет CUDA) |
+| 0 | `PASS` | every required check passed; this *is* acceptance |
+| 2 | `FAIL` | a numeric or safety invariant was broken (same as `chr verify`) |
+| 3 | `BLOCKED` | a required check **could not** run (no `gpu/nf4`, no `.chr`, no CUDA) |
 
-`3` — **не** зелёный. Он отличает «ядро врёт» от «ядра ещё нет»: смешивать эти два состояния в один код нельзя, иначе отсутствие ядра выглядит как успех.
+`3` is **not** green. It distinguishes “the kernel lies” from “there is no kernel yet”: those two states must not share one code, or the absence of a kernel looks like success.
 
-Полезные флаги: `--name` (другой тензор), `--tol` (порог maxabs), `--vram-extra-mib`, `--json <path>` (полный отчёт машинно), `--crosscheck-f32 <path>` (см. §7).
+Useful flags: `--name` (a different tensor), `--tol` (maxabs threshold), `--vram-extra-mib`, `--json <path>` (full machine-readable report), `--crosscheck-f32 <path>` (see §7).
 
-Без `--chr` осмысленно гоняются self-checks и toy-проверки; вердикт будет `BLOCKED`.
+Without `--chr`, self-checks and toy checks still run in a meaningful way; the verdict will be `BLOCKED`.
 
 ---
 
-## 2. Что именно считает оракул
+## 2. What the oracle actually computes
 
 ```
 W_hat[r, c] = float32(LUT[nib(r, c)]) * float32(scale[r, c / 64])     # nf4.md §1, §3
-Y_cpu       = W_hat @ x                                               # матмул float32
+Y_cpu       = W_hat @ x                                               # float32 matmul
 ```
 
-- `LUT` — 16 литералов [nf4.md](nf4.md) §1, сверенных **побитово** (`struct.unpack` == столбец bits).
-- Младший ниббл байта = **чётный** `K` (не packing CUDA bitsandbytes).
-- `scale` FP16 → float32 точным расширением, потом умножение. Не «через BF16».
-- `x` — тот же BF16, который получило ядро, поднятый в float32: округление входа **не** записывается ядру в ошибку.
-- `y_gpu` (BF16) поднимается в float32; сравнение в float64.
+- `LUT` — 16 literals from [nf4.md](nf4.md) §1, checked **bit-exact** (`struct.unpack` == the bits column).
+- The low nibble of a byte = **even** `K` (not CUDA bitsandbytes packing).
+- `scale` FP16 → float32 by exact expand, then multiply. Not “via BF16”.
+- `x` is the same BF16 the kernel received, lifted to float32: input rounding is **not** charged to the kernel as error.
+- `y_gpu` (BF16) is lifted to float32; comparison is in float64.
 
-Оракул читает packed **из файла** своим read-only парсером ([chr0_min.py](../../gpu/tests/chr0_min.py)), а не из тензоров лоадера. Это позволяет отдельно проверить, что у лоадера в VRAM лежат ровно байты диска (X1), не завязывая оракула на проверяемый код.
+The oracle reads packed **from the file** with its own read-only parser ([chr0_min.py](../../gpu/tests/chr0_min.py)), not from the loader’s tensors. That lets us separately check that the loader’s VRAM holds exactly the disk bytes (X1), without tying the oracle to the code under test.
 
-**Запрещено** сравнивать `y_gpu` с `F.linear` по оригинальным BF16-весам: это цена квантования, другой этаж. Оригинальные safetensors в этом гейте не открываются вообще.
+**Forbidden** to compare `y_gpu` with `F.linear` on the original BF16 weights: that is the quantization cost, a different floor. Original safetensors are not opened by this gate at all.
 
-### Пороги
+### Thresholds
 
-| Величина | Порог | Почему |
+| Quantity | Threshold | Why |
 |---|---|---|
-| `maxabs(Y_gpu − Y_cpu)` | **≤ max(0.05, ½ ULP BF16(\|Y_cpu\|))** при `rms(x) ≈ 1` | [stitch-gpu.md](stitch-gpu.md), token-loop §7.3 этаж 1 |
-| `rmse` | репортить, гейта нет | ловит «плохо везде» против «плохо в одном элементе» |
+| `maxabs(Y_gpu − Y_cpu)` | **≤ max(0.05, ½ ULP BF16(\|Y_cpu\|))** at `rms(x) ≈ 1` | [stitch-gpu.md](stitch-gpu.md), token-loop §7.3 floor 1 |
+| `rmse` | report, no gate | catches “bad everywhere” vs “bad in one element” |
 
-Элемент выше 0.05 при `|Y| ~ O(1)` — **баг ядра**, а не квантования. Пик 0.058 на `y≈17` при том же ответе, что 2×n16, — округление BF16, не FAIL. Смотреть в первую очередь: маска `k >= K` на хвосте, шкала группы `k/64`, порядок нибблов, гонка стейджей `cp.async` на `K >= 512`.
+An element above 0.05 when `|Y| ~ O(1)` is a **kernel bug**, not quantization. A peak of 0.058 on `y≈17` with the same answer as 2×n16 is BF16 rounding, not FAIL. Look first at: the `k >= K` mask on the tail, group scale `k/64`, nibble order, `cp.async` stage race at `K >= 512`.
 
-Ориентир измеренного (RTX 3080, sm_86, torch 2.5.1, Qwen2.5-3B `model.layers.0.mlp.gate_proj`, `M=11008`, `K=2048`, `N=1`):
+Measured reference (RTX 3080, sm_86, torch 2.5.1, Qwen2.5-3B `model.layers.0.mlp.gate_proj`, `M=11008`, `K=2048`, `N=1`):
 
-| Проверка | maxabs | rmse |
+| Check | maxabs | rmse |
 |---|---:|---:|
 | F1 toy 128×256 | 0.003191 | 0.000620 |
 | F2 toy 130×65 | 0.001399 | 0.000305 |
 | F3 3B `gate_proj` | **0.015759** | 0.002654 |
-| F4 3B, другой seed `x` | 0.018568 | 0.002683 |
+| F4 3B, different seed `x` | 0.018568 | 0.002683 |
 
-Собственный шум оракула (тот же продукт, аккумуляция float64 против float32) — `7.4e-06`, то есть на три порядка меньше порога: 0.0158 — это BF16-выход и порядок суммирования ядра, а не арифметика numpy.
+The oracle’s own noise (the same product, float64 accumulation vs float32) is `7.4e-06`, three orders of magnitude below the threshold: 0.0158 is the BF16 output and the kernel’s summation order, not numpy arithmetic.
 
 ---
 
-## 3. Проверки работоспособности
+## 3. Functional checks
 
-| ID | Что | PASS значит |
+| ID | What | PASS means |
 |---|---|---|
-| L0–L5 | LUT/packing/decode/encode против золотых фикстур [nf4.md](nf4.md) §1, §5.2, §6.1, §8, §9.4 | оракул имеет право что-то утверждать; FAIL здесь обесценивает все числа ниже |
-| C0 | toy-писалка CHR0 против байт-эталона [chr0.md](chr0.md) §2.4 | `N=516`, офсеты и размер файла совпали; фикстуры S4 законны |
-| K0 | ядро импортируется и запускается | `gpu.nf4` найдено, один launch прошёл |
-| K1 | бинарь ядра новее своих исходников | гейт не аттестует устаревший `.pyd` (§6) |
+| L0–L5 | LUT/packing/decode/encode against golden fixtures [nf4.md](nf4.md) §1, §5.2, §6.1, §8, §9.4 | the oracle is allowed to claim anything; FAIL here voids every number below |
+| C0 | toy CHR0 writer against the byte gold [chr0.md](chr0.md) §2.4 | `N=516`, offsets and file size matched; S4 fixtures are legal |
+| K0 | the kernel imports and launches | `gpu.nf4` found, one launch succeeded |
+| K1 | the kernel binary is newer than its sources | the gate does not attest a stale `.pyd` (§6) |
 | F1 | toy 128×256, `N=1` | `maxabs ≤ 0.05` |
-| F2 | toy 130×65 (`K_pad=128`) | `maxabs ≤ 0.05`; и `y` **бит-в-бит одинаков** для packed с мусором в паддинге и с ниббл-7 там же |
+| F2 | toy 130×65 (`K_pad=128`) | `maxabs ≤ 0.05`; and `y` is **bit-identical** for packed with garbage in the padding and with nibble-7 there |
 | F3 | 3B `gate_proj`, `N=1` | `maxabs ≤ 0.05` |
-| F4 | тот же `W`, другой seed `x` | снова `maxabs ≤ 0.05`, и blake2b-дайджест `packed`/`scale` не изменился |
-| F5 | два вызова подряд с тем же `x` | `torch.equal(y1, y2)` — бит-стабильно |
-| X1 | байты лоадера == байты `.chr` | `packed`/`scale` совпали побайтно, `M/K/K_pad` совпали |
+| F4 | same `W`, different seed `x` | `maxabs ≤ 0.05` again, and the blake2b digest of `packed`/`scale` did not change |
+| F5 | two calls in a row with the same `x` | `torch.equal(y1, y2)` — bit-stable |
+| X1 | loader bytes == `.chr` bytes | `packed`/`scale` matched bytewise, `M/K/K_pad` matched |
 
-F2 намеренно кладёт в столбцы `K … K_pad−1` **случайный мусор**, хотя реальный `.chr` пишет там ниббл 7. Так строже: если ядро читает pad как живой `K`, `y` разъедется. Вариант с ниббл-7 считается вторым и сравнивается с первым бит-в-бит.
+F2 deliberately puts **random garbage** in columns `K … K_pad−1`, even though a real `.chr` writes nibble 7 there. That is stricter: if the kernel treats pad as live `K`, `y` will diverge. The nibble-7 variant is computed second and compared bit-identical to the first.
 
 ---
 
-## 4. Проверки безопасности
+## 4. Safety checks
 
-| ID | Что | PASS значит | FAIL значит |
+| ID | What | PASS means | FAIL means |
 |---|---|---|---|
-| S1 | `nvidia-smi memory.used` до/после `materialize` + одной `gate_proj` | `Δ < sizeof(W_bf16)` **и** `Δ ≤ packed+scale+x+y + 20 МиБ`, и пик torch-аллокатора в том же бюджете | в HBM появился черновик `W` или лишняя арена |
-| S2 | нет тензора `[M, K]` fp16/bf16/fp32 на device | ни один aten-оп не выдал cuda-тензор float размером ≥ `M*K`; в `gpu/nf4/*.cu,cpp` нет `cudaMalloc`/`malloc(` | деквант поехал через HBM |
-| S3 | `.chr` только на чтение | все `open` этого пути — `"rb"`, `mtime_ns` и размер не изменились | тест портит артефакт |
-| S4 | битый заголовок | 5 порчей (обрезание, `start` не кратен 64, перекрытие блобов, `group_size=32`, длина `data` ≠ формуле) отвергнуты **и** лоадером, и парсером гейта; **0** launch ядра | лоадер доверяет заголовку |
-| S5 | NaN | поведение зафиксировано, без «тихого» результата (§5) | NaN проглочен или течёт между строками |
-| S6 | `packed` immutable после HtoD | дайджест и `data_ptr` не изменились, `dtype=uint8`, никакого `.mul_` | ядро правит вход на месте |
-| S7 | дисплей | `display_reserved_mib` в логе числом (§8) | цифру проигнорировали |
-| S8 | полный `chr decode` не входит в тест | в дереве `gpu/tests` **AST-скан** не находит запуска процессов нигде, кроме `nvidia-smi` в `gpu_probe.py`; cross-check ограничен 256 МиБ | тест может выгрузить 12 ГиБ |
-| S9 | ложь про `M`/`K`/`K_pad` | граница Python отвергает недомерные `packed`/`scale`, неверный `K_pad`, короткий/CPU/fp16 `x`; контекст жив после серии отказов | OOB-чтение за концом блоба (§6) |
+| S1 | `nvidia-smi memory.used` before/after `materialize` + one `gate_proj` | `Δ < sizeof(W_bf16)` **and** `Δ ≤ packed+scale+x+y + 20 MiB`, and the torch allocator peak is in the same budget | a scratch `W` or an extra arena appeared in HBM |
+| S2 | no `[M, K]` fp16/bf16/fp32 tensor on device | no aten op produced a cuda float tensor of size ≥ `M*K`; no `cudaMalloc`/`malloc(` in `gpu/nf4/*.cu,cpp` | dequant went through HBM |
+| S3 | `.chr` read-only | every `open` of this path is `"rb"`, `mtime_ns` and size did not change | the test mutates the artifact |
+| S4 | corrupt header | 5 corruptions (truncation, `start` not a multiple of 64, overlapping blobs, `group_size=32`, `data` length ≠ formula) rejected **by both** the loader and the gate parser; **0** kernel launches | the loader trusts the header |
+| S5 | NaN | behavior is pinned, no “silent” result (§5) | NaN was swallowed or leaked across rows |
+| S6 | `packed` immutable after HtoD | digest and `data_ptr` did not change, `dtype=uint8`, no `.mul_` | the kernel mutates the input in place |
+| S7 | display | `display_reserved_mib` in the log as a number (§8) | the figure was ignored |
+| S8 | a full `chr decode` is not part of the test | an **AST scan** of the `gpu/tests` tree finds no process launches except `nvidia-smi` in `gpu_probe.py`; cross-check capped at 256 MiB | the test could dump 12 GiB |
+| S9 | lying about `M`/`K`/`K_pad` | the Python boundary rejects undersized `packed`/`scale`, a wrong `K_pad`, a short/CPU/fp16 `x`; the context is alive after a series of refusals | OOB read past the end of the blob (§6) |
 
-Ориентир измеренного, `gate_proj` 3B, `N=1`:
+Measured reference, 3B `gate_proj`, `N=1`:
 
 ```
-packed 10.75 МиБ + scale 0.67 + x 0.004 + y 0.021 = legit 11.45 МиБ
-smi_before 1673 -> smi_after 1687, delta 14 МиБ  (лимит 31.45, W_bf16 = 43.0, W_f32 = 86.0)
-torch peak allocated delta 12.07 МиБ
+packed 10.75 MiB + scale 0.67 + x 0.004 + y 0.021 = legit 11.45 MiB
+smi_before 1673 -> smi_after 1687, delta 14 MiB  (limit 31.45, W_bf16 = 43.0, W_f32 = 86.0)
+torch peak allocated delta 12.07 MiB
 load_s 0.024, gemm_ms 0.638
 ```
 
-`Δ = 14` против `legit = 11.45`: разница — гранулярность драйверных аллокаций и модуль ядра, не второй буфер весов. Порог по TZ — «< 20 МиБ сверх legit», то есть 31.45.
+`Δ = 14` vs `legit = 11.45`: the gap is driver allocation granularity and the kernel module, not a second weight buffer. The spec threshold is “< 20 MiB above legit”, i.e. 31.45.
 
-### Разрешающая способность smi (почему S1 не для любой матрицы)
+### smi resolution (why S1 is not for every matrix)
 
-`memory.used` показывает **зарезервированное**, а torch резервирует крупные блоки сегментами ~20 МиБ. Измеренное на `q_proj` `[2048, 2048]`: `Δ smi = 22 МиБ` при `torch peak = 2.14 МиБ` и `legit = 2.13`. Никакого черновика `W` там нет — это один свежий сегмент аллокатора.
+`memory.used` reports **reserved**, and torch reserves large blocks in ~20 MiB segments. Measured on `q_proj` `[2048, 2048]`: `Δ smi = 22 MiB` with `torch peak = 2.14 MiB` and `legit = 2.13`. There is no scratch `W` there — it is one fresh allocator segment.
 
-Отсюда правило гейта:
+Hence the gate rule:
 
-- если `sizeof(W_bf16) ≥ 24 МиБ` — **smi решает** (плюс счётчик аллокатора). Матрица приёмки `gate_proj` (43 МиБ) сюда попадает;
-- если меньше — smi физически не может отличить `W` от гранулярности сегмента, решает `torch peak allocated`, а `Δ smi` остаётся в логе с пометкой. Так S1 не превращается в ложную тревогу на `q_proj` и не теряет зубы на `gate_proj`.
+- if `sizeof(W_bf16) ≥ 24 MiB` — **smi decides** (plus the allocator counter). The acceptance matrix `gate_proj` (43 MiB) falls here;
+- if smaller — smi physically cannot tell `W` from segment granularity, `torch peak allocated` decides, and `Δ smi` stays in the log with a note. That way S1 does not become a false alarm on `q_proj` and does not lose its teeth on `gate_proj`.
 
-Ослаблять порог для больших матриц запрещено: там `Δ smi` разрешает `W` уверенно.
+Weakening the threshold for large matrices is forbidden: there `Δ smi` resolves `W` confidently.
 
 ---
 
-## 5. NaN: зафиксированное поведение (S5)
+## 5. NaN: pinned behavior (S5)
 
-Ядро **не обязано** ловить NaN. Гейт фиксирует, что происходит, и запрещает два конкретных сценария: тихое проглатывание и утечку между строками.
+The kernel is **not required** to catch NaN. The gate records what happens and forbids two specific scenarios: silent swallowing and leakage across rows.
 
-| Источник NaN | Наблюдаемое | Норма |
+| NaN source | Observed | Norm |
 |---|---|---|
-| `x[k] = NaN`, `N=1` | **все** `M` элементов `y` не-finite | так и должно быть: каждая строка суммирует по всему `K`. FAIL, если `y` целиком finite — это значит NaN проглотили |
-| `scale[r, g] = NaN` (синтетика) | не-finite только строка `r`; остальные строки finite | FAIL, если заражены другие строки: строка `y[i]` читает только `W[i, :]`, всё прочее — гонка или OOB |
+| `x[k] = NaN`, `N=1` | **all** `M` elements of `y` are non-finite | that is how it should be: every row sums over all of `K`. FAIL if `y` is entirely finite — that means NaN was swallowed |
+| `scale[r, g] = NaN` (synthetic) | only row `r` is non-finite; the other rows are finite | FAIL if other rows are infected: row `y[i]` reads only `W[i, :]`, anything else is a race or OOB |
 
-Шкала NaN **не может** прийти с диска: [nf4.md](nf4.md) §6.3 делает не-finite шкалу ошибкой encode, а `+0` запрещён. Поэтому вторая строка таблицы — синтетический тензор, а не файл. Если такая шкала когда-нибудь встретится в реальном `.chr`, виноват компрессор, не ядро.
+A NaN scale **cannot** come from disk: [nf4.md](nf4.md) §6.3 makes a non-finite scale an encode error, and `+0` is forbidden. So the second table row is a synthetic tensor, not a file. If such a scale ever appears in a real `.chr`, the compressor is at fault, not the kernel.
 
-Отдельного флага «в `y` был NaN» ядро не выставляет и в этой волне не должно: цена — ветка на каждый MMA. Гарантия слабее и сформулирована так: **не-finite вход даёт не-finite выход, а не тихий нуль**.
+The kernel does not raise a separate “there was a NaN in `y`” flag and must not in this wave: the cost is a branch on every MMA. The weaker guarantee is stated as: **a non-finite input yields a non-finite output, not a silent zero**.
 
 ---
 
-## 6. Найдено и починено: OOB на границе Python (S9)
+## 6. Found and fixed: OOB at the Python boundary (S9)
 
-Граница `gpu/nf4/bindings.cpp` проверяла dtype, device и `x.size(0) == K`, но **не** проверяла, что `packed`/`scale` вообще покрывают заявленные `M` и `K_pad`. Ядро индексирует `packed` шагом `K_pad/2` до строки `M−1`, поэтому недомерный блоб приводил к чтению за концом аллокации.
+The `gpu/nf4/bindings.cpp` boundary checked dtype, device, and `x.size(0) == K`, but **did not** check that `packed`/`scale` even cover the claimed `M` and `K_pad`. The kernel indexes `packed` with stride `K_pad/2` up to row `M−1`, so an undersized blob read past the end of the allocation.
 
-Воспроизведение до патча: `packed`/`scale` на 64 строки, заявлено `M=128` → **исключения нет**, ядро прочитало ~8 КиБ за концом буфера и вернуло правдоподобные числа. Именно это опаснее падения: тест бы «прошёл».
+Repro before the patch: `packed`/`scale` for 64 rows, claimed `M=128` → **no exception**, the kernel read ~8 KiB past the end of the buffer and returned plausible numbers. That is more dangerous than a crash: the test would have “passed”.
 
-Патч (агент 4, только host-side валидация, логика `.cu` не тронута) — три `TORCH_CHECK` в `nf4_gemm`: `K_pad == 64*ceil(K/64)`, `packed.numel() >= M*K_pad/2`, `scale.numel() >= M*K_pad/64`. Тест — S9. Это единственная причина, по которой из `gpu/tests` вообще можно править `gpu/nf4`: OOB/safety, с тестом, без «ускорений» и без подкрутки чисел.
+The patch (agent 4, host-side validation only, `.cu` logic untouched) — three `TORCH_CHECK`s in `nf4_gemm`: `K_pad == 64*ceil(K/64)`, `packed.numel() >= M*K_pad/2`, `scale.numel() >= M*K_pad/64`. The test is S9. This is the only reason `gpu/tests` is allowed to patch `gpu/nf4` at all: OOB/safety, with a test, no “speedups” and no number-fudging.
 
-### K1: почему гейт проверяет дату бинаря
+### K1: why the gate checks the binary’s date
 
-`torch.utils.cpp_extension` держит версию сборки **в процессе**. Если пересборка падает (нет `cl.exe`/`ninja` в PATH), повторный импорт может тихо загрузить предыдущий `.pyd` — и все числа гейта будут описывать код, которого нет в репозитории. K1 сравнивает mtime загруженного бинаря с `bindings.cpp`, `nf4_gemm.cu`, `chr_gpu.h` и валит гейт, если бинарь старше.
+`torch.utils.cpp_extension` keeps the build version **in-process**. If a rebuild fails (no `cl.exe`/`ninja` on PATH), a later import can silently load the previous `.pyd` — and every gate number will describe code that is not in the repository. K1 compares the loaded binary’s mtime with `bindings.cpp`, `nf4_gemm.cu`, `chr_gpu.h` and fails the gate if the binary is older.
 
-Пересборка на машине Павла (нужны и MSVC, и ninja в PATH):
+Rebuild on Pavel’s machine (both MSVC and ninja must be on PATH):
 
 ```text
 call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
@@ -160,151 +160,151 @@ conda activate torch-gpu
 python gpu/nf4/setup.py build_ext --inplace
 ```
 
-`ninja.exe` лежит в `<env>\Scripts`, поэтому без `conda activate` JIT-сборка не находит его; гейт на всякий случай сам добавляет `<prefix>`, `<prefix>\Scripts`, `<prefix>\Library\bin` в `PATH`.
+`ninja.exe` lives in `<env>\Scripts`, so without `conda activate` the JIT build cannot find it; the gate adds `<prefix>`, `<prefix>\Scripts`, `<prefix>\Library\bin` to `PATH` just in case.
 
 ---
 
-## 7. Границы покрытия (что этот гейт **не** доказывает)
+## 7. Coverage bounds (what this gate does **not** prove)
 
-- **`nvidia-smi` — источник истины по VRAM**, и он общий на карту: чужой процесс, менеджер окон или второй агент двигают `memory.used`. Гейт берёт медиану трёх выборок и мерит дельту вокруг узкого участка, но при параллельной работе на той же карте S1 может дрогнуть. Пересдать в одиночку.
-- **Watcher S2 видит только aten-операции.** Прямой `cudaMalloc` внутри C++-расширения ему невидим; его ловит только smi (S1) и скан исходников. Отсюда правило: `Δ smi` — гейт, watcher — уточнение.
-- **S3 не может запретить mmap на запись** из чужого кода: он патчит `builtins.open`/`os.open` и сверяет `mtime`/размер. Реальную запись это поймает, «право на запись» — нет.
-- **Два потока/два stream на одну матрицу не проверяются** (S6 в TZ этого и не требует): `packed` считается immutable после HtoD, что и подтверждается дайджестом.
-- **`N > 1` (prefill) этим гейтом не проверяется**: `oracle_gate.py` гоняет только decode. Prefill — отдельный файл `gpu/tests/oracle_prefill.py`, см. §11.
-- **SASS не читается** (нет `cuobjdump` в этом окружении): «есть `HMMA.16816`» — проверка агента 2, не эта.
-- **Этаж 2 отсутствует**: ни KL, ни PPL, ни greedy-match, ни `generate`.
+- **`nvidia-smi` is the source of truth for VRAM**, and it is shared across the card: another process, the window manager, or a second agent moves `memory.used`. The gate takes the median of three samples and measures the delta around a narrow window, but under concurrent work on the same card S1 can wobble. Re-run alone.
+- **The S2 watcher sees only aten ops.** A direct `cudaMalloc` inside the C++ extension is invisible to it; only smi (S1) and the source scan catch it. Hence the rule: `Δ smi` is the gate, the watcher is a refinement.
+- **S3 cannot forbid a write mmap** from foreign code: it patches `builtins.open`/`os.open` and checks `mtime`/size. That will catch an actual write; it will not catch a “right to write”.
+- **Two threads/two streams on one matrix are not checked** (S6 in the spec does not require this either): `packed` is treated as immutable after HtoD, which the digest confirms.
+- **`N > 1` (prefill) is not checked by this gate**: `oracle_gate.py` runs decode only. Prefill is a separate file `gpu/tests/oracle_prefill.py`, see §11.
+- **SASS is not read** (no `cuobjdump` in this environment): “there is `HMMA.16816`” is agent 2’s check, not this one.
+- **Floor 2 is absent**: no KL, no PPL, no greedy-match, no `generate`.
 
-### Опционально: X2, сверка с уже существующим F32-дампом
+### Optional: X2, check against an already existing F32 dump
 
-`--crosscheck-f32 <file>` читает **один** тензор из уже лежащего на диске дампа `chr decode` (жёсткий предел 256 МиБ на срез) и сверяет его с numpy-decode того же `packed`. Смысл: доказать, что Python-оракул совпадает с канонической Go-реализацией, а не только сам с собой.
+`--crosscheck-f32 <file>` reads **one** tensor from an already-on-disk `chr decode` dump (hard cap 256 MiB per slice) and checks it against numpy-decode of the same `packed`. The point: prove that the Python oracle matches the canonical Go implementation, not only itself.
 
-Измерено на `qwen25-3b.nf4.f32.safetensors`, `gate_proj`: **бит-в-бит равно**, `maxabs = 0`, срез 86 МиБ.
+Measured on `qwen25-3b.nf4.f32.safetensors`, `gate_proj`: **bit-identical**, `maxabs = 0`, slice 86 MiB.
 
-Проверка **опциональна** и на вердикт не влияет: дамп — не обязательный артефакт. Создавать его гейтом запрещено (§S8): 12 ГиБ на этом диске — не часть теста.
+The check is **optional** and does not affect the verdict: the dump is not a required artifact. Creating it from the gate is forbidden (§S8): 12 GiB on this disk is not part of the test.
 
 ---
 
-## 8. Негативные контроли: у гейта есть зубы
+## 8. Negative controls: the gate has teeth
 
-Гейт, который никогда не падал, ничего не доказывает. Проверено подменой ядра через `DEEPFOLD_NF4_GEMM="module:attr"` (обёртка вокруг настоящего `nf4_gemm`, файл вне репозитория):
+A gate that never failed proves nothing. Verified by swapping the kernel via `DEEPFOLD_NF4_GEMM="module:attr"` (a wrapper around the real `nf4_gemm`, file outside the repo):
 
-| Подмена | Результат |
+| Swap | Result |
 |---|---|
-| `y[0,0] += 0.30` | F1, F2, F3, F4 → FAIL (`maxabs ≈ 0.300`), выход 2. F5 остался PASS — смещение детерминированное, и это правильно |
-| `torch.empty(M, K, bf16, device)` перед честным вызовом | S1 → FAIL (`Δ smi = 100 МиБ`, `torch peak = 100.07`), S2 → FAIL (пойман `aten.empty.memory_format (11008, 2048) torch.bfloat16`). **F3 при этом PASS**: числа верные, но черновик `W` в HBM — всё равно провал |
-| недомерные `packed`/`scale` (до патча §6) | ядро молча читало за концом буфера, исключения не было → это и стало S9 |
+| `y[0,0] += 0.30` | F1, F2, F3, F4 → FAIL (`maxabs ≈ 0.300`), exit 2. F5 stayed PASS — the shift is deterministic, and that is correct |
+| `torch.empty(M, K, bf16, device)` before the honest call | S1 → FAIL (`Δ smi = 100 MiB`, `torch peak = 100.07`), S2 → FAIL (caught `aten.empty.memory_format (11008, 2048) torch.bfloat16`). **F3 still PASS**: the numbers are right, but a scratch `W` in HBM is still a fail |
+| undersized `packed`/`scale` (before the §6 patch) | the kernel silently read past the end of the buffer, no exception → this became S9 |
 
-Второй случай — главный: он показывает, что safety-половина ловит скрытый деквант **даже когда математика сходится**. Переменную `DEEPFOLD_NF4_GEMM` в приёмочном прогоне не выставлять.
+The second case is the main one: it shows that the safety half catches a hidden dequant **even when the math agrees**. Do not set `DEEPFOLD_NF4_GEMM` in an acceptance run.
 
 ---
 
-## 9. Как читать `display_reserved_mib`
+## 9. How to read `display_reserved_mib`
 
-По TZ это `smi_used − torch_allocated` после пустого контекста, поэтому число большое и **включает не только дисплей**:
+Per the spec this is `smi_used − torch_allocated` after an empty context, so the number is large and **includes more than the display**:
 
 ```
-display_reserved_mib : 1675.0   (smi_boot=1415 МиБ — дисплей + чужие процессы, cuda_ctx=260 МиБ)
+display_reserved_mib : 1675.0   (smi_boot=1415 MiB — display + foreign processes, cuda_ctx=260 MiB)
 ```
 
-- `smi_boot` — `memory.used` до того, как гейт создал контекст: дисплей, браузер, чужие сессии.
-- `cuda_ctx` — `smi_after_ctx − smi_boot`, цена одного пустого CUDA-контекста torch (~260 МиБ на этой машине).
-- Планировщику 12 ГБ закладывать **оба**: на 3080 с подключённым монитором «свободно» ≈ `12288 − smi_boot − cuda_ctx`.
+- `smi_boot` — `memory.used` before the gate created a context: display, browser, foreign sessions.
+- `cuda_ctx` — `smi_after_ctx − smi_boot`, the cost of one empty torch CUDA context (~260 MiB on this machine).
+- The 12 GB planner must budget **both**: on a 3080 with a monitor attached, “free” ≈ `12288 − smi_boot − cuda_ctx`.
 
-Число печатается всегда; игнорировать его — отдельный FAIL (S7).
-
----
-
-## 10. Владение
-
-Агент 4 владеет `gpu/tests/` и этим файлом. Правки в `gpu/nf4`, `gpu/chr0`, `gpu/host`, Go-пакетах, ноутбуках — только чтение и импорт, с единственным исключением §6 (OOB + тест). «Подкрутить» LUT, шкалу или порог, чтобы что-то сошлось, нельзя: тогда гейт перестаёт быть доказательством и становится украшением.
-
-Раздел §11 и файл `gpu/tests/oracle_prefill.py` — агент 9 (волна 3). Тот же запрет на «подкрутить» действует и там.
+The number is always printed; ignoring it is a separate FAIL (S7).
 
 ---
 
-## 11. Этаж 1 для prefill: `N > 1` (волна 3)
+## 10. Ownership
 
-Тот же этаж, тот же порог, другая размерность. Оракул не меняется: `W_hat` — CPU-decode наших же байтов, `Y_cpu = W_hat @ X` в float32, `X` теперь `[K, N]`. Всё, что §2 говорит про LUT, ниббли, шкалы и float32, действует без изменений; новое — только маскирование по `N` и второй хвост.
+Agent 4 owns `gpu/tests/` and this file. Edits in `gpu/nf4`, `gpu/chr0`, `gpu/host`, Go packages, notebooks — read and import only, with the single exception of §6 (OOB + test). “Fudging” the LUT, the scale, or a threshold so something matches is not allowed: then the gate stops being a proof and becomes decoration.
+
+Section §11 and the file `gpu/tests/oracle_prefill.py` — agent 9 (wave 3). The same ban on “fudging” applies there.
+
+---
+
+## 11. Floor 1 for prefill: `N > 1` (wave 3)
+
+The same floor, the same threshold, a different dimension. The oracle does not change: `W_hat` is CPU-decode of our own bytes, `Y_cpu = W_hat @ X` in float32, `X` is now `[K, N]`. Everything §2 says about the LUT, nibbles, scales, and float32 still holds; what is new is only masking on `N` and a second tail.
 
 ```text
 conda activate torch-gpu
 python gpu/tests/oracle_prefill.py --chr C:\dev\models\qwen25-3b.nf4.chr
 ```
 
-Коды выхода те же: `0` PASS, `2` FAIL, `3` BLOCKED. Полезные флаги: `--n` (ширина prefill, по умолчанию 16), `--n-tail` (хвост, 3), `--n-over` (на 1 больше потолка ядра, 17), `--allow-skip`, `--no-l1`, `--json`.
+Exit codes are the same: `0` PASS, `2` FAIL, `3` BLOCKED. Useful flags: `--n` (prefill width, default 16), `--n-tail` (tail, 3), `--n-over` (one above the kernel cap, 17), `--allow-skip`, `--no-l1`, `--json`.
 
-### 11.1 Проверки
+### 11.1 Checks
 
-| ID | Что | PASS значит |
+| ID | What | PASS means |
 |---|---|---|
-| P0 | `oracle_gate.py` целиком, **импортом** | `main()` вернул 0; вся волна 2 (N=1) на месте |
-| K2 | диапазон `N` ядра | `N=16` считается; `N` выше потолка **отказан или верен** (см. §11.3) |
+| P0 | `oracle_gate.py` in full, **by import** | `main()` returned 0; all of wave 2 (N=1) is in place |
+| K2 | kernel `N` range | `N=16` is computed; `N` above the cap is **refused or correct** (see §11.3) |
 | P1 | toy 128×256, `N=16` | `maxabs ≤ 0.05` |
-| P2 | toy 130×65 (`K_pad=128`), `N=3` | `maxabs ≤ 0.05`; pad по `K` не попал в `y`; pad по `N` не попал в живые столбцы |
+| P2 | toy 130×65 (`K_pad=128`), `N=3` | `maxabs ≤ 0.05`; pad along `K` did not enter `y`; pad along `N` did not enter live columns |
 | P3 | 3B `gate_proj`, `N=16` | `maxabs ≤ 0.05` |
-| S | `Δ smi` вокруг одного prefill | `Δ < sizeof(W_bf16)` и `Δ ≤ legit(N) + 20 МиБ`, ни одного cuda-float `≥ M*K` |
-| P4 | `N=1` после prefill-правок | `maxabs ≤ 0.05` **и число совпало с F1/F2/F3 из P0 точно** |
-| L1 | `gpu/loop/smoke.py`, если есть | «Paris» получен, tok/s записан; иначе SKIP (§11.4) |
+| S | `Δ smi` around one prefill | `Δ < sizeof(W_bf16)` and `Δ ≤ legit(N) + 20 MiB`, no cuda-float `≥ M*K` |
+| P4 | `N=1` after prefill edits | `maxabs ≤ 0.05` **and the number matched F1/F2/F3 from P0 exactly** |
+| L1 | `gpu/loop/smoke.py`, if present | “Paris” obtained, tok/s recorded; otherwise SKIP (§11.4) |
 
-Осторожно с ID `L1`: у `oracle_gate.py` это LUT-самопроверка (§3), у `oracle_prefill.py` — token-loop smoke. Имя пришло из ТЗ волны 3; в одном логе видны оба, потому что P0 печатает таблицу гейта целиком. Смотреть на текст проверки, не на букву.
+Be careful with the ID `L1`: in `oracle_gate.py` it is a LUT self-check (§3), in `oracle_prefill.py` it is the token-loop smoke. The name came from the wave 3 spec; both show up in one log because P0 prints the whole gate table. Look at the check text, not the letter.
 
-**P0 запускается импортом, а не процессом.** `subprocess` из `gpu/tests` запрещён (S8), и `oracle_prefill.py` сам проходит тот же AST-скан. Поэтому вызывается `oracle_gate.main(argv)` в этом же процессе, а его `--json` читается обратно — оттуда P4 берёт эталонные числа N=1.
+**P0 is launched by import, not as a process.** `subprocess` from `gpu/tests` is forbidden (S8), and `oracle_prefill.py` itself passes the same AST scan. So `oracle_gate.main(argv)` is called in this same process, and its `--json` is read back — that is where P4 takes the N=1 reference numbers.
 
-**P4 сравнивает не с порогом, а с числом.** Тот же seed даёт тот же `x`, тот же `W` и то же ядро, значит `maxabs` обязан совпасть *бит-в-бит*, а не «тоже пройти 0.05». Это и есть регрессионный датчик: правка prefill, которая тихо сдвинула путь `N=1`, видна здесь, даже если 0.05 всё ещё держится.
+**P4 compares against the number, not the threshold.** The same seed gives the same `x`, the same `W`, and the same kernel, so `maxabs` must match *bit-exact*, not “also pass 0.05”. That is the regression sensor: a prefill edit that quietly shifted the `N=1` path shows up here even if 0.05 still holds.
 
-**P2 проверяет два независимых хвоста.** Хвост по `K`: столбцы `K … K_pad−1` заполняются мусором и, вторым прогоном, нибблом 7 — `y` обязан быть бит-в-бит одинаков (как F2, §3). Хвост по `N`: тот же `x` расширяется одним «диким» столбцом (`137.0`) до `N+1`, и первые `N` столбцов результата обязаны не шевельнуться. Ядро паддит `N` до 16 внутри, так что маска эпилога — ровно то место, где `N=3` ломается незаметно.
+**P2 checks two independent tails.** Tail along `K`: columns `K … K_pad−1` are filled with garbage and, on a second run, with nibble 7 — `y` must be bit-identical (like F2, §3). Tail along `N`: the same `x` is expanded by one “wild” column (`137.0`) to `N+1`, and the first `N` columns of the result must not move. The kernel pads `N` to 16 internally, so the epilogue mask is exactly where `N=3` breaks unnoticed.
 
-### 11.2 Измеренное
+### 11.2 Measured
 
-RTX 3080, sm_86, torch 2.5.1 / cu124, Qwen2.5-3B `model.layers.0.mlp.gate_proj` (`M=11008`, `K=2048`), ядро с prefill-тайлом `BM=64, BN=16, BK=128`:
+RTX 3080, sm_86, torch 2.5.1 / cu124, Qwen2.5-3B `model.layers.0.mlp.gate_proj` (`M=11008`, `K=2048`), kernel with prefill tile `BM=64, BN=16, BK=128`:
 
-| Проверка | `maxabs` | `rmse` |
+| Check | `maxabs` | `rmse` |
 |---|---:|---:|
 | P1 toy 128×256, `N=16` | 0.002756 | 0.000662 |
 | P2 toy 130×65, `N=3` | 0.001829 | 0.000363 |
 | P3 3B `gate_proj`, `N=16` | **0.018726** | 0.002676 |
 | P4 `N=1` (F1 / F2 / F3) | 0.003191 / 0.001399 / 0.015759 | — |
 
-`0.0187` при `N=16` против `0.0158` при `N=1` (F3) — та же природа: BF16-выход и порядок суммирования, просто максимум берётся по 16 столбцам вместо одного. Порог не тронут.
+`0.0187` at `N=16` vs `0.0158` at `N=1` (F3) is the same nature: BF16 output and summation order, just the max is taken over 16 columns instead of one. The threshold is untouched.
 
-Prefill бит-в-бит совпал с покомпонентным decode: на P1 `maxabs(y_prefill − y_столбец-за-столбцом) = 0.000000`. Это не требование (два тайлинга имеют право округлять по-разному), но полезная новость: `N=16` не «почти то же», а ровно то же.
+Prefill was bit-identical to per-column decode: on P1 `maxabs(y_prefill − y_column-by-column) = 0.000000`. That is not a requirement (two tilings are allowed to round differently), but useful news: `N=16` is not “almost the same”, it is exactly the same.
 
-VRAM и время:
+VRAM and time:
 
 ```
-S: legit(packed 10.75 + scale 0.67 + x 0.062 + y 0.336) = 11.82 МиБ
-   smi_before 2148 -> smi_after 2160, delta 12 МиБ  (лимит 31.82, W_bf16 = 43.0)
-   torch peak allocated delta 12.67 МиБ, cuda-float тензоров >= M*K: 0
-   prefill N=16: 0.765 ms => 0.048 ms/столбец  (decode N=1: ~0.70 ms/столбец, ~15x)
+S: legit(packed 10.75 + scale 0.67 + x 0.062 + y 0.336) = 11.82 MiB
+   smi_before 2148 -> smi_after 2160, delta 12 MiB  (limit 31.82, W_bf16 = 43.0)
+   torch peak allocated delta 12.67 MiB, cuda-float tensors >= M*K: 0
+   prefill N=16: 0.765 ms => 0.048 ms/column  (decode N=1: ~0.70 ms/column, ~15x)
 ```
 
-`x` и `y` растут ровно в `N` раз (0.004 → 0.062 и 0.021 → 0.336 МиБ), `packed`/`scale` не растут вовсе — черновика `W` в HBM нет, и это главное, что S должен был показать. Правило разрешающей способности smi из §4 действует без изменений: `W_bf16 = 43 МиБ ≥ 24`, поэтому здесь решает smi.
+`x` and `y` grow exactly by `N` (0.004 → 0.062 and 0.021 → 0.336 MiB), `packed`/`scale` do not grow at all — there is no scratch `W` in HBM, and that is the main thing S was supposed to show. The smi-resolution rule from §4 applies unchanged: `W_bf16 = 43 MiB ≥ 24`, so smi decides here.
 
-### 11.3 Потолок по `N` и «тихо неверный» ответ
+### 11.3 Cap on `N` and a “silently wrong” answer
 
-`nf4_gemm.cu` запускает не больше `N=16` за вызов и ждёт, что хост нарежет более широкий prefill; `N=17` отвергается (`-2`, а на границе Python — `RuntimeError: N=17 not in 1..16`). K2 принимает **любой из двух честных ответов**: исключение («нарезай сам») или правильный `y` («потолок поднят», сверяется с оракулом). Запрещён третий: правдоподобный `y`, посчитанный тайлом, который покрывает только 16 столбцов. Именно он отравил бы prefill молча — как недомерный `packed` в §6.
+`nf4_gemm.cu` launches at most `N=16` per call and expects the host to slice a wider prefill; `N=17` is refused (`-2`, and at the Python boundary — `RuntimeError: N=17 not in 1..16`). K2 accepts **either of two honest answers**: an exception (“slice it yourself”) or a correct `y` (“the cap was raised”, checked against the oracle). The third is forbidden: a plausible `y` computed by a tile that only covers 16 columns. That is the one that would poison prefill silently — like the undersized `packed` in §6.
 
-### 11.4 L1 — свидетель, а не гейт
+### 11.4 L1 is a witness, not a gate
 
-Если `gpu/loop/smoke.py` есть, он **импортируется** (снова: никаких дочерних процессов) и вызывается с подменённым `sys.argv`; его `sys.exit()` перехватывается. Без этого чужой `argparse` убивал бы гейт до печати вердикта.
+If `gpu/loop/smoke.py` exists, it is **imported** (again: no child processes) and called with a substituted `sys.argv`; its `sys.exit()` is caught. Without that, a foreign `argparse` would kill the gate before the verdict is printed.
 
-Измерено (graph=linears, 64 токена после 16 разогревочных, два прогона): `decode_tok_s = 12.4` оба раза, `prefill_5_ms = 96.7 … 97.9` при `prefill_chunk = 16`, `N>1 = True`.
+Measured (graph=linears, 64 tokens after 16 warmup, two runs): `decode_tok_s = 12.4` both times, `prefill_5_ms = 96.7 … 97.9` at `prefill_chunk = 16`, `N>1 = True`.
 
-L1 считается PASS по `greedy_en_paris`, а не по итоговому коду smoke: в его `rc` входят гейты, которыми этот оракул не владеет (RU chat template, например), и падение чужого токенайзера не должно краснить prefill. Итоговый вердикт smoke и его строка гейтов печатаются целиком — ничего не спрятано. `--no-l1` выключает L1: он поднимает всю модель (~20–40 с).
+L1 is PASS on `greedy_en_paris`, not on smoke’s overall exit code: its `rc` includes gates this oracle does not own (the RU chat template, for example), and a foreign tokenizer failure must not redden prefill. Smoke’s overall verdict and its gate line are printed in full — nothing is hidden. `--no-l1` turns L1 off: it loads the whole model (~20–40 s).
 
-**VRAM-числа L1 внутри этого гейта не эталонные.** Smoke живёт в том же процессе, что и оракул, поэтому его `vram_decode_mb` включает контекст и блобы гейта (замерено 3849 и 5703 МиБ в двух прогонах), а его собственный leak-гейт `smi_flat_16_to_64` дрожит от чужой работы на той же карте (§7). За VRAM prefill отвечает S, который мерит узкий участок до загрузки модели. Настоящую цифру smoke надо брать его отдельным запуском, а не отсюда.
+**L1 VRAM numbers inside this gate are not canonical.** Smoke lives in the same process as the oracle, so its `vram_decode_mb` includes the gate’s context and blobs (measured 3849 and 5703 MiB in two runs), and its own leak gate `smi_flat_16_to_64` wobbles from foreign work on the same card (§7). Prefill VRAM is S’s job, which measures a narrow window before the model is loaded. The real smoke figure must be taken from a separate run, not from here.
 
-### 11.5 Если ядро всё ещё умеет только `N=1`
+### 11.5 If the kernel still only does `N=1`
 
-Тогда P1–P3 запустить нечем. Скрипт печатает, **кто именно** отказал — обёртка `gpu/nf4/__init__.py` или сам `.cu`, — и выходит с кодом `3`. Это различие не косметическое: обёртка может запрещать `N>1` уже после того, как ядро научилось, и тогда «prefill не работает» — неправда.
+Then P1–P3 have nothing to launch. The script prints **who exactly** refused — the `gpu/nf4/__init__.py` wrapper or the `.cu` itself — and exits with code `3`. That distinction is not cosmetic: the wrapper can forbid `N>1` after the kernel has already learned it, and then “prefill does not work” is untrue.
 
-С `--allow-skip` P1–P3 становятся SKIP, а гейтом остаются P0, P4 и S: регресс `N=1` и отсутствие черновика `W` проверяются всё равно. Без флага такой прогон **не зелёный**, ровно по логике §1: «ядра ещё нет» нельзя показывать как успех.
+With `--allow-skip`, P1–P3 become SKIP, and the remaining gates are P0, P4, and S: `N=1` regression and the absence of a scratch `W` are still checked. Without the flag such a run is **not green**, exactly by the logic of §1: “there is no kernel yet” must not be shown as success.
 
-Пока ядро было decode-only, скрипт всё равно печатал числа для `N=16`/`N=3`, собранные из `N`-кратного вызова `N=1` (строки `R1`–`R3`). Это **не** prefill, на P1–P3 они не влияют и помечены как reference: их смысл — проверить сам оракул для `N>1` и заранее знать, какое число обязано получиться. Замеренные тогда `0.002756 / 0.001829 / 0.018726` совпали с тем, что позже выдал настоящий prefill-тайл.
+While the kernel was decode-only, the script still printed numbers for `N=16`/`N=3` assembled from an `N`-fold `N=1` call (rows `R1`–`R3`). That is **not** prefill, it does not affect P1–P3, and it is marked as reference: the point is to check the oracle itself for `N>1` and to know in advance which number must come out. The then-measured `0.002756 / 0.001829 / 0.018726` matched what the real prefill tile later produced.
 
-### 11.6 Чего этот файл не доказывает
+### 11.6 What this file does not prove
 
-- **Запись за пределы `y` не проверяется.** ABI возвращает `y`, выделенный самим ядром, поэтому положить страж-байты за последним столбцом нечем. Ловится только косвенно: хвост по `N` (P2) проверяет чтение, а не запись.
-- **Нарезка `N > 16` не проверяется end-to-end.** K2 фиксирует, что граница честно отказывает; что хост нарезает правильно — вопрос `gpu/loop`, не этого файла.
-- **Всё из §7 действует без изменений**: smi общий на карту, watcher видит только aten-операции, SASS не читается, этажа 2 (KL/PPL/greedy-match против BF16) здесь по-прежнему нет.
-- **`N` между 4 и 15 берётся выборочно** (`--n-tail`): проверены 1, 3, 4, 16, 17. Полного свипа по `N` нет.
+- **Writes past the end of `y` are not checked.** The ABI returns a `y` allocated by the kernel itself, so there is nothing to put as guard bytes past the last column. It is caught only indirectly: the `N` tail (P2) checks reads, not writes.
+- **Slicing `N > 16` is not checked end-to-end.** K2 pins that the boundary honestly refuses; that the host slices correctly is a `gpu/loop` question, not this file’s.
+- **Everything in §7 still holds**: smi is shared across the card, the watcher sees only aten ops, SASS is not read, floor 2 (KL/PPL/greedy-match against BF16) is still absent here.
+- **`N` between 4 and 15 is sampled** (`--n-tail`): 1, 3, 4, 16, 17 were checked. There is no full sweep over `N`.

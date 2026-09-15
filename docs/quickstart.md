@@ -3,7 +3,9 @@
 Short command list. Full `-h` dumps and flags: [`install.md`](install.md).
 
 After `scripts/setup.ps1`, `deepfold` and `python -m gpu.cli` are the same.
-If `deepfold` is not on PATH, use `python -m gpu.cli`.
+If `deepfold` is not on PATH, use `python -m gpu.cli` (this is normal in conda
+env `torch-gpu`). After setup, activate `.venv` or call
+`.\\.venv\\Scripts\\deepfold.exe`.
 
 Paris / Berlin / 323 smoke is **not** a quality score. Do not expect the
 author’s 3080 tok/s on another card.
@@ -106,7 +108,8 @@ A real terminal window (not a pipe):
 deepfold chat --model D:\weights\Qwen2.5-3B-Instruct
 ```
 
-Enter sends, Ctrl+J newline. `/help` `/quit` `/clear` `/stats`.
+Enter sends, Ctrl+J newline. Ctrl+C stops a reply. `/help` `/quit` `/clear` `/stats` `/new` `/chats` `/copy` `/save` `/agent`. Replies render markdown (bold, lists, fences) and turn `$...$` / `$$` LaTeX into Unicode. Optional: `--agent --workspace .` for workspace tools (writes and pytest ask first).
+Chat default is 256 new tokens (not the smoke cap of 64).
 
 Scripts / pipes:
 

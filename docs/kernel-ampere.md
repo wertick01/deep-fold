@@ -1,138 +1,138 @@
-# Ядро Ampere: fused dequant-MMA на RTX 3080 12 ГБ
+# Ampere kernel: fused dequant-MMA on RTX 3080 12 GB
 
-Железо (фиксируем цифры): GA102, **sm_86**, **70 SM**, 8960 CUDA cores, 280 Tensor Cores (4/SM), boost 1.71 ГГц, **912 ГБ/с** GDDR6X, L2 **5 МиБ**, регистры 64 Ки регистров/SM, потоков/SM **1536**, варпов/SM **48**. Shared: **100 КБ/SM**, **99 КБ/блок** (101376 Б). Есть `cp.async`. Нет TMA, нет TMEM, нет WGMMA, нет Blackwell DE.
+Hardware (numbers are locked): GA102, **sm_86**, **70 SM**, 8960 CUDA cores, 280 Tensor Cores (4/SM), boost 1.71 GHz, **912 GB/s** GDDR6X, L2 **5 MiB**, registers 64 Ki registers/SM, threads/SM **1536**, warps/SM **48**. Shared: **100 KB/SM**, **99 KB/block** (101376 B). Has `cp.async`. No TMA, no TMEM, no WGMMA, no Blackwell DE.
 
-Договор из [schema.md](schema.md): веса сжаты в GDDR; тайл `(layer, matrix, row_tile, col_group)` → регистры → MMA → выбросить. Полный BF16-слой не материализуем. Два кодека, один скелет.
+Contract from [schema.md](schema.md): weights stay compressed in GDDR; tile `(layer, matrix, row_tile, col_group)` → registers → MMA → discard. Do not materialize a full BF16 layer. Two codecs, one skeleton.
 
-Кодеки:
+Codecs:
 
-| | A: group-wise INT4 / NF4 | B: книга на матрицу |
+| | A: group-wise INT4 / NF4 | B: codebook per matrix |
 |---|---|---|
-| Символ | ниббл + `scale` на группу 32 или 128 вдоль K | группа 8 весов = 1 или 2 индекса |
-| Книга | NF4: LUT 16×BF16 = 32 Б | **256×8 BF16 = 4096 Б** (держать). **2¹⁶×8 = 1 МиБ — выкинуть** (§3) |
-| Бит/вес | 4 + 16/G (G=32 → 4.50; G=128 → 4.125) | 1 индекс×8 бит → 1.00; 2×8 бит → **2.00**; 1×16 бит в 2¹⁶ → 2.00, но книга не влезает |
+| Symbol | nibble + `scale` per group of 32 or 128 along K | group of 8 weights = 1 or 2 indices |
+| Codebook | NF4: LUT 16×BF16 = 32 B | **256×8 BF16 = 4096 B** (keep). **2¹⁶×8 = 1 MiB — drop** (§3) |
+| Bits/weight | 4 + 16/G (G=32 → 4.50; G=128 → 4.125) | 1 index×8 bit → 1.00; 2×8 bit → **2.00**; 1×16 bit into 2¹⁶ → 2.00, but the codebook does not fit |
 
 ---
 
-## 1. Какая MMA и как деквант кормит Tensor Cores
+## 1. Which MMA, and how dequant feeds Tensor Cores
 
-**Инструкция (одна на оба кодека):**
+**Instruction (one for both codecs):**
 
 ```
 mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32
 ```
 
-SASS: `HMMA.16816.F32.BF16`. Форма 16×8×16. Накопление FP32.
+SASS: `HMMA.16816.F32.BF16`. Shape 16×8×16. Accumulate in FP32.
 
-Фрагменты на нить (warp-synchronous, 32 нити):
+Fragments per thread (warp-synchronous, 32 threads):
 
-| Операнд | Регистры PTX | Содержимое |
+| Operand | PTX registers | Contents |
 |---|---|---|
-| A (веса, row) | 4×`.b32` `{a0,a1,a2,a3}` | 8×BF16 |
-| B (активации, col) | 2×`.b32` `{b0,b1}` | 4×BF16 |
+| A (weights, row) | 4×`.b32` `{a0,a1,a2,a3}` | 8×BF16 |
+| B (activations, col) | 2×`.b32` `{b0,b1}` | 4×BF16 |
 | C/D | 4×`.f32` `{d0,d1,d2,d3}` | 4×FP32 |
 
-Запасная, если BK не кратен 16: `mma.sync.aligned.m16n8k8.row.col.f32.bf16.bf16.f32` (A: 2×`.b32`, B: 1×`.b32`). На sm_86 она слабее — **не базовая**.
+Fallback if BK is not a multiple of 16: `mma.sync.aligned.m16n8k8.row.col.f32.bf16.bf16.f32` (A: 2×`.b32`, B: 1×`.b32`). On sm_86 it is weaker — **not the baseline**.
 
-**Чего не использовать**
+**What not to use**
 
-| PTX | Почему нет |
+| PTX | Why not |
 |---|---|
-| `mma.sync.aligned.m8n8k4.*` | На Ampere это **FPU**, не Tensor Core |
-| `wmma.mma.sync.aligned.m16n16k16.*` | Старый путь, 2× HMMA.16816 + лишний shuffles |
-| `mma.sync.*.s32.s4.s4.s32` (`m16n8k32` / `k64`) | Нужны INT4 **активации**. У нас x в BF16, шкалы по группам |
-| `mma.sync.*.s32.s8.s8.s32` (`m16n8k16` / `k32`) | Имеет смысл только если квантовать x на лету (SmoothQuant). Не v1 |
+| `mma.sync.aligned.m8n8k4.*` | On Ampere this is **FPU**, not Tensor Core |
+| `wmma.mma.sync.aligned.m16n16k16.*` | Old path, 2× HMMA.16816 + extra shuffles |
+| `mma.sync.*.s32.s4.s4.s32` (`m16n8k32` / `k64`) | Needs INT4 **activations**. Our x is BF16, scales are per group |
+| `mma.sync.*.s32.s8.s8.s32` (`m16n8k16` / `k32`) | Only makes sense if we quantize x on the fly (SmoothQuant). Not v1 |
 | `wgmma.mma_async` / TMA / TMEM | Hopper / Blackwell |
 
-**Как деквант попадает в A-фрагмент (не в HBM):**
+**How dequant lands in the A fragment (not in HBM):**
 
 ```
 GDDR packed  --cp.async.cg-->  smem[stage]  --dequant ALU-->  A_regs (BF16)
 GDDR x BF16  --cp.async.ca-->  smem_x[stage] --ldmatrix.x2/x4--> B_regs
 A_regs, B_regs  --mma.sync.m16n8k16-->  acc FP32
-acc остаётся в регистрах на весь K; epilogue: BF16 store в y
+acc stays in registers for the whole K; epilogue: BF16 store to y
 ```
 
-Кодек A, группа G, вес `w` в строке `m`, столбец `k`:
+Codec A, group G, weight `w` in row `m`, column `k`:
 
-1. Упаковка: 8 нибблов на `uint32`, 32 ниббла на 16 Б — гранула `cp.async` 16 Б.
-2. `nib = (word >> (4*(k&7))) & 0xF` — 2 сдвига + AND.
-3. INT4: `bf16(nib − 8) * scale[m, k/G]`. NF4: `lut[nib] * scale[...]`, LUT 16×BF16 = **32 Б** в smem (или 8×`.b32` в константных регистрах).
-4. Результат сразу пакуется в `.b32` пары для `{a0..a3}`. Промежуточный BF16-тайл в smem **не пишем** (Marlin-стиль). Иначе 64×128 BF16 = 16 КБ лишних на стейдж.
+1. Packing: 8 nibbles per `uint32`, 32 nibbles per 16 B — `cp.async` granule is 16 B.
+2. `nib = (word >> (4*(k&7))) & 0xF` — 2 shifts + AND.
+3. INT4: `bf16(nib − 8) * scale[m, k/G]`. NF4: `lut[nib] * scale[...]`, LUT 16×BF16 = **32 B** in smem (or 8×`.b32` in constant registers).
+4. The result is packed immediately into `.b32` pairs for `{a0..a3}`. Do **not** write an intermediate BF16 tile to smem (Marlin-style). Otherwise 64×128 BF16 = 16 KB extra per stage.
 
-Кодек B, группа 8:
+Codec B, group of 8:
 
-1. 1 индекс (`uint8`) или 2 индекса (`uint8`+`uint8`) на 8 весов.
-2. `v = book[i0]` (16 Б = 8×BF16). Если два индекса: `v = book0[i0] + book1[i1]` покомпонентно в FP32, pack обратно в BF16 **или** два MMA по одному вектору (дороже в 2 раза по TC, зато без add). Рекомендация: **add в FP32 → pack BF16**, один MMA.
-3. 8 BF16 = ровно половина A-фрагмента на нить при k16; две группы → полный `{a0..a3}`.
+1. 1 index (`uint8`) or 2 indices (`uint8`+`uint8`) per 8 weights.
+2. `v = book[i0]` (16 B = 8×BF16). If two indices: `v = book0[i0] + book1[i1]` componentwise in FP32, pack back to BF16 **or** two MMA passes, one vector each (2× more TC, but no add). Recommendation: **add in FP32 → pack BF16**, one MMA.
+3. 8 BF16 = exactly half of the per-thread A fragment at k16; two groups → full `{a0..a3}`.
 
-Загрузка B после того, как x лежат в smem:
+Loading B after x is in smem:
 
 ```
 ldmatrix.sync.aligned.x2.m8n8.shared.b16   // 1× m16n8k8  B
-ldmatrix.sync.aligned.x4.m8n8.shared.b16   // лучше: сразу под k16, 4×.b32 если берём A из smem
+ldmatrix.sync.aligned.x4.m8n8.shared.b16   // better: enough for k16 at once, 4×.b32 if we take A from smem
 ```
 
-A после регистрового декванта — **без** `ldmatrix`. Если когда-нибудь понадобится деквант в smem: `ldmatrix.sync.aligned.x4.m8n8.shared.b16`.
+A after register dequant — **without** `ldmatrix`. If dequant into smem is ever needed: `ldmatrix.sync.aligned.x4.m8n8.shared.b16`.
 
-На GEMV (N=1) 7 из 8 столбцов B — нули. Считаем это налогом TC (~1–2 мкс на `gate_proj`, §6). Шина важнее. Не переключаемся на CUDA-core GEMV: сломаем общий скелет с префиллом.
+On GEMV (N=1), 7 of 8 B columns are zeros. Treat this as a TC tax (~1–2 µs on `gate_proj`, §6). The bus matters more. Do not switch to a CUDA-core GEMV: that would break the shared skeleton with prefill.
 
 ---
 
-## 2. Тайлы, которые влезают в 99 КБ с double/triple buffer
+## 2. Tiles that fit in 99 KB with double/triple buffer
 
-Соглашение матрицы: `W[M, K]` row-major сжатый, `x[K, N]`, `y[M, N]`.  
+Matrix convention: `W[M, K]` row-major compressed, `x[K, N]`, `y[M, N]`.  
 `gate_proj`: **M=14336, K=4096, N=1…32**.  
-`row_tile` = блок строк `BM`. `col_group` = блок по K: `BK`, кратный G (32/128) и 8 (книга) → **BK ∈ {64, 128, 256}**.
+`row_tile` = block of rows `BM`. `col_group` = block along K: `BK`, a multiple of G (32/128) and of 8 (codebook) → **BK ∈ {64, 128, 256}**.
 
-Базовый тайл **decode (N=1, pad BN=8)** и **префилл N≤16 (BN=16)** — один и тот же packed-прямоугольник `BM×BK`.
+The baseline tile for **decode (N=1, pad BN=8)** and **prefill N≤16 (BN=16)** is the same packed rectangle `BM×BK`.
 
-### Рекомендуемые формы
+### Recommended shapes
 
-| Режим | BM | BN | BK | stages | нитей | Зачем |
+| Mode | BM | BN | BK | stages | threads | Why |
 |---|---|---|---|---|---|---|
-| Decode GEMV | **128** | 8 (pad) | **256** | **3** | 256 | мало блоков по M не будет; K-итераций 16 |
-| Prefill N≤16 | **64** | **16** | **128** | **3** | 256 | 8 варпов: 4 по M × 2 по N |
-| Prefill N≤32 | **64** | **32** | **64** | **2** | 256 | 4 варпа по N (4× m16n8) |
-| Мелкая матрица (k_proj M=1024) | 64 | 8 | 128 | 3 | 128 | + split-K, см. §8 |
+| Decode GEMV | **128** | 8 (pad) | **256** | **3** | 256 | we will not have too few blocks along M; 16 K-iterations |
+| Prefill N≤16 | **64** | **16** | **128** | **3** | 256 | 8 warps: 4 along M × 2 along N |
+| Prefill N≤32 | **64** | **32** | **64** | **2** | 256 | 4 warps along N (4× m16n8) |
+| Small matrix (k_proj M=1024) | 64 | 8 | 128 | 3 | 128 | + split-K, see §8 |
 
-### Байты одного стейджа (без книги)
+### Bytes of one stage (without codebook)
 
-**INT4 / NF4, G=32** (худший scale-бюджет):
+**INT4 / NF4, G=32** (worst scale budget):
 
-| Буфер | Формула | BM=128, BK=256 | BM=64, BK=128 | BM=64, BK=64 |
+| Buffer | Formula | BM=128, BK=256 | BM=64, BK=128 | BM=64, BK=64 |
 |---|---|---|---|---|
-| packed W | `BM·BK / 2` | **16384 Б** | 4096 Б | 2048 Б |
-| scales BF16 | `BM·(BK/32)·2` | **2048 Б** | 512 Б | 256 Б |
-| x BF16 | `BN·BK·2` | N=8: 4096 Б | N=16: 4096 Б | N=32: 4096 Б |
-| Итого стейдж | | **22528 Б** | 8704 Б | 6400 Б |
+| packed W | `BM·BK / 2` | **16384 B** | 4096 B | 2048 B |
+| scales BF16 | `BM·(BK/32)·2` | **2048 B** | 512 B | 256 B |
+| x BF16 | `BN·BK·2` | N=8: 4096 B | N=16: 4096 B | N=32: 4096 B |
+| Stage total | | **22528 B** | 8704 B | 6400 B |
 
-G=128: scales в 4 раза меньше (512 Б на 128×256). Берём числа G=32 как потолок.
+G=128: scales 4× smaller (512 B on 128×256). Take the G=32 numbers as the ceiling.
 
-**Книга, 2 индекса × uint8** (2 бит/вес):
+**Codebook, 2 indices × uint8** (2 bit/weight):
 
-| Буфер | Формула | 128×256 | 64×128 |
+| Buffer | Formula | 128×256 | 64×128 |
 |---|---|---|---|
-| indices | `BM·(BK/8)·2` | **8192 Б** | 2048 Б |
-| x | `BN·BK·2` | 4096 Б | 4096 Б |
-| Итого стейдж (без книги) | | **12288 Б** | 6144 Б |
+| indices | `BM·(BK/8)·2` | **8192 B** | 2048 B |
+| x | `BN·BK·2` | 4096 B | 4096 B |
+| Stage total (without codebook) | | **12288 B** | 6144 B |
 
-1 индекс × uint8: ровно половина index-буфера.
+1 index × uint8: exactly half the index buffer.
 
-### Смета smem, лимит 101376 Б
+### smem budget, limit 101376 B
 
 Decode INT4, BM=128, BK=256, stages=3, BN=8, G=32:
 
 ```
 3 × (16384 + 2048)     = 55296   packed+scales, ring
-2 × (8 × 256 × 2)      =  4096   x, достаточно 2 стейджа (x горячее, мало)
+2 × (8 × 256 × 2)      =  4096   x, 2 stages are enough (x is hot, small)
 NF4 LUT                =    32
 padding / barrier      =   256
 ────────────────────────────────
-итого                    59680 Б   (58.3 КиБ)     запас 41 КиБ
+total                    59680 B   (58.3 KiB)     headroom 41 KiB
 ```
 
-Три стейджа x тоже влезают (`+2048`), не нужны.
+Three stages of x also fit (`+2048`), not needed.
 
 Prefill INT4, BM=64, BK=128, stages=3, BN=16:
 
@@ -140,306 +140,306 @@ Prefill INT4, BM=64, BK=128, stages=3, BN=16:
 3 × (4096 + 512)       = 13824
 2 × (16 × 128 × 2)     =  8192
 ────────────────────────────────
-                         22016 Б   (21.5 КиБ)
+                         22016 B   (21.5 KiB)
 ```
 
-Decode книга-256, две книги (additive), BM=128, BK=256, stages=3:
+Decode codebook-256, two codebooks (additive), BM=128, BK=256, stages=3:
 
 ```
-book0 + book1          =  8192   (2 × 4096), живут весь кернел
+book0 + book1          =  8192   (2 × 4096), live for the whole kernel
 3 × 8192               = 24576   indices
 2 × 4096               =  8192   x
 ────────────────────────────────
-                         40960 Б   (40.0 КиБ)
+                         40960 B   (40.0 KiB)
 ```
 
-**Потолок, который ещё влезает в 99 КБ:** INT4 `BM=128, BK=256, stages=4` → `4×18432 + 4096 ≈ 78 КиБ`. Четыре стейджа не дадут выигрыша на 3080 (GDDR latency прячется уже на 3). `BM=256, BK=256, stages=3` INT4: packed 32 КиБ ×3 = 96 КиБ **без** scales и x — не влезает. Значит **128×256×3 — максимальный полезный тайл**.
+**Ceiling that still fits in 99 KB:** INT4 `BM=128, BK=256, stages=4` → `4×18432 + 4096 ≈ 78 KiB`. A fourth stage will not win on a 3080 (GDDR latency is already hidden at 3). `BM=256, BK=256, stages=3` INT4: packed 32 KiB ×3 = 96 KiB **without** scales and x — does not fit. So **128×256×3 is the largest useful tile**.
 
-Выровнять `cp.async` 16 Б: `BM` чётный, `BK` кратен 32. Swizzle smem 128 Б (XOR col) против bank conflict на `ldmatrix`.
+Align `cp.async` 16 B: `BM` even, `BK` a multiple of 32. Swizzle smem 128 B (XOR col) against bank conflict on `ldmatrix`.
 
 ---
 
-## 3. Книга 256×8 и проблема 2¹⁶ на 3080
+## 3. The 256×8 codebook and the 2¹⁶ problem on 3080
 
-### 256 × 8 BF16 = 4096 Б — **держать в smem**
+### 256 × 8 BF16 = 4096 B — **keep in smem**
 
-Не в L1 как «кэш глобалки» и не размазывать по регистрам.
+Not in L1 as a “global cache”, and not smeared across registers.
 
-| Место | Вердикт | Почему |
+| Place | Verdict | Why |
 |---|---|---|
-| **smem блока, 4 КиБ (или 8 КиБ на две книги)** | **да** | Один `__ldg`-like загрузчик на старте: 256 нитей × 16 Б = 4 КиБ ровно за 1 раунд `cp.async` / `ld.global.L2::128B`. Дальше все тайлы матрицы бьют в одну книгу. Broadcast + 32 банка. |
-| L1 (28–100 КиБ на SM, делит с smem) | нет как основное | На sm_86 L1 не когерентен между SM; `cp.async.cg` его обходит. Если книгу оставить в GDDR, 70 SM случайно собирают 16 Б — L1 не склеивает. |
-| Регистры | нет целиком | 4096 Б / 256 нитей = 16 Б/нить = 8 BF16. Это **одна** строка книги, не вся. Хранить 256 строк в регистрах = 2048 Б/нить → 1024 регистра. Невозможно (лимит 255). |
+| **block smem, 4 KiB (or 8 KiB for two codebooks)** | **yes** | One `__ldg`-like loader at start: 256 threads × 16 B = 4 KiB exactly in 1 round of `cp.async` / `ld.global.L2::128B`. After that every matrix tile hits the same codebook. Broadcast + 32 banks. |
+| L1 (28–100 KiB per SM, shared with smem) | no as primary | On sm_86 L1 is not coherent across SMs; `cp.async.cg` bypasses it. If the codebook is left in GDDR, 70 SMs randomly gather 16 B — L1 does not glue that together. |
+| Registers | not the whole thing | 4096 B / 256 threads = 16 B/thread = 8 BF16. That is **one** codebook row, not all of them. Storing 256 rows in registers = 2048 B/thread → 1024 registers. Impossible (limit 255). |
 
-Конфликт банков при lookup: вектор 8×BF16 = 16 Б = 4 банка подряд. 32 нити, случайные индексы → в среднем ~4–8-way serialize. Это ~20–40 циклов, не GDDR. При двух книгах — два lookup + 8 add.
+Bank conflict on lookup: vector 8×BF16 = 16 B = 4 consecutive banks. 32 threads, random indices → on average ~4–8-way serialize. That is ~20–40 cycles, not GDDR. With two codebooks — two lookups + 8 adds.
 
-Старт кернела: книга грузится **один раз** в smem до K-цикла. Не в кольце стейджей.
+Kernel start: the codebook is loaded **once** into smem before the K-loop. Not in the stage ring.
 
-### 2¹⁶ × 8 BF16 = 1 048 576 Б — **выкинуть с 3080**
+### 2¹⁶ × 8 BF16 = 1 048 576 B — **drop on 3080**
 
-Сметы:
+Budgets:
 
-- smem: 1 МиБ > 99 КБ. Не живёт в блоке.
-- L1: 1 МиБ > 100 КБ. Не живёт на SM.
-- L2: 1 МиБ < 5 МиБ. Формально «влезает», если на карте одна такая книга горячая.
-- VRAM: 7 матриц/слой × 32 слоя × 1 МиБ ≈ **224 МиБ** только книги. Место есть. Проблема не в гигабайтах.
+- smem: 1 MiB > 99 KB. Does not live in the block.
+- L1: 1 MiB > 100 KB. Does not live on the SM.
+- L2: 1 MiB < 5 MiB. Formally “fits” if one such codebook is hot on the card.
+- VRAM: 7 matrices/layer × 32 layers × 1 MiB ≈ **224 MiB** of codebooks alone. Space exists. The problem is not gigabytes.
 
-Что ломается в скелете:
+What breaks in the skeleton:
 
-Каждая группа из 8 весов делает **некоалесированный** `ld.global` 16 Б из 1 МиБ. На `gate_proj`: 58.72e6 / 8 = **7.34e6** сборов × 16 Б = **117.4 МиБ** трафика L2 сверх 14.7 МиБ индексов. Это в **8 раз** больше полезной нагрузки, и это gather, не `cp.async` 128 Б.
+Each group of 8 weights does an **uncoalesced** `ld.global` of 16 B from 1 MiB. On `gate_proj`: 58.72e6 / 8 = **7.34e6** gathers × 16 B = **117.4 MiB** of L2 traffic on top of 14.7 MiB of indices. That is **8×** the useful payload, and it is a gather, not `cp.async` 128 B.
 
-70 SM бьют в одни и те же 1 МиБ: L2 hit почти 100% после разогрева, но
+70 SMs hit the same 1 MiB: L2 hit is almost 100% after warmup, but
 
-- нет TMA multicast;
-- сектор L2 32 Б, берём 16 Б → 2× overfetch сектора ≈ **234 МиБ** касаний;
-- `cp.async` сюда неприменим (адрес от индекса, не линейный тайл);
-- две книги 2¹⁶ = 2 МиБ, L2 5 МиБ, плюс x/y/прочие кернелы — выталкивание.
+- no TMA multicast;
+- L2 sector is 32 B, we take 16 B → 2× sector overfetch ≈ **234 MiB** of touches;
+- `cp.async` does not apply here (address comes from an index, not a linear tile);
+- two 2¹⁶ codebooks = 2 MiB, L2 is 5 MiB, plus x/y/other kernels — eviction.
 
-Оценка `gate_proj` с книгой 2¹⁶ (после hit L2, ~2 ТБ/с L2 на GA102 — порядок): 117 МиБ / 2000 ГиБ/с ≈ 59 мкс плюс индексы 16 мкс ≈ **75–120 мкс**. В 4–5 раз хуже книги 256. На всём 8B токене ещё влезаем в 10 ток/с, но **скелет «тайл → smem → MMA» рассыпается**: деквант становится random global load.
+Estimate for `gate_proj` with a 2¹⁶ codebook (after L2 hit, ~2 TB/s L2 on GA102 — order of magnitude): 117 MiB / 2000 GiB/s ≈ 59 µs plus indices 16 µs ≈ **75–120 µs**. 4–5× worse than codebook 256. On a full 8B token we still fit in 10 tok/s, but the **“tile → smem → MMA” skeleton falls apart**: dequant becomes a random global load.
 
-**Решение:** на 3080 только книга **256×8**, при 2 бит/вес — **две** такие книги (AQLM additive, 2×uint8). Режим 2¹⁶ оставить как офлайн-флаг «качество», не как inner kernel. Если когда-нибудь понадобится 16-битный индекс — резать книгу на 256-векторные страницы и держать в smem **текущую страницу** нельзя: индексы по тайлу прыгают по всему 1 МиБ.
+**Decision:** on the 3080, only codebook **256×8**; at 2 bit/weight — **two** such codebooks (AQLM additive, 2×uint8). Leave the 2¹⁶ mode as an offline “quality” flag, not as an inner kernel. If a 16-bit index is ever needed — slicing the codebook into 256-vector pages and keeping the **current page** in smem will not work: indices within a tile jump across the whole 1 MiB.
 
-Итого: **keep 256, drop 65536.**
+Bottom line: **keep 256, drop 65536.**
 
 ---
 
-## 4. Нити и варпы: GEMV N=1 vs GEMM N=16
+## 4. Threads and warps: GEMV N=1 vs GEMM N=16
 
-Один варп = одна инструкция `m16n8k16` за такт по форме, то есть владеет **16 строками M × 8 столбцами N × 16 по K**.
+One warp = one `m16n8k16` instruction per beat of the shape, i.e. it owns **16 rows of M × 8 columns of N × 16 along K**.
 
-### Decode, N=1, pad BN=8, блок 256 нитей = 8 варпов
-
-```
-блок: BM=128, BN=8, BK=256
-
-варп (wx, wy) = (0..7, 0):   все 8 варпов стоят вдоль M
-  warp w считает строки [16w .. 16w+15], все 8 «столбцов» N
-  живой столбец — только n=0; n=1..7 = 0 в B-фрагменте
-
-нить lane:
-  A: деквантит свои 8 BF16 текущего k-субтайла (k16), пишет {a0..a3}
-  B: lane 0–3 держат x[k .. k+15] размноженный (shuffle / ldmatrix из smem_x)
-     остальные N-столбцы нули — один `mov.b32 b, 0` на мёртвые
-```
-
-Покрытие A: 8 варпов × 16 строк = 128 = BM.  
-K-цикл: 256/16 = 16 MMA на варп на стейдж.  
-Налог TC: 8× по N, полезен 1× → 12.5% TC. На 61 ТФЛОПС dense-BF16 это всё равно ~2 мкс vs ~36 мкс шины (§6).
-
-Альтернатива «8 выходных элементов на CUDA core» **запрещена договором**: сломает префилл и два кодека.
-
-### Prefill N=16, блок 256 нитей = 8 варпов
+### Decode, N=1, pad BN=8, block 256 threads = 8 warps
 
 ```
-блок: BM=64, BN=16, BK=128
+block: BM=128, BN=8, BK=256
 
-варп (wm, wn), wm∈{0,1,2,3}, wn∈{0,1}:
-  строки [16·wm .. +15], столбцы N [8·wn .. +7]
+warp (wx, wy) = (0..7, 0):   all 8 warps stand along M
+  warp w computes rows [16w .. 16w+15], all 8 “columns” of N
+  the live column is only n=0; n=1..7 = 0 in the B fragment
 
-K-цикл: 128/16 = 8 MMA на варп на стейдж
-TC утилизация по N: 100% (два m16n8 покрывают 16)
+thread lane:
+  A: dequants its 8 BF16 of the current k-subtile (k16), writes {a0..a3}
+  B: lanes 0–3 hold x[k .. k+15] broadcast (shuffle / ldmatrix from smem_x)
+     the other N-columns are zeros — one `mov.b32 b, 0` for the dead ones
 ```
 
-N=9..15 — тот же кернел, маска epilogue. N=17..32 — сетка по N=2 (два BN=16) **или** блок BN=32, 8 варпов как 2×M × 4×N, BK=64, stages=2.
+A coverage: 8 warps × 16 rows = 128 = BM.  
+K-loop: 256/16 = 16 MMA per warp per stage.  
+TC tax: 8× along N, 1× useful → 12.5% TC. At 61 TFLOPS dense-BF16 that is still ~2 µs vs ~36 µs of bus (§6).
 
-В этом дереве план (`gpu/nf4/plan.py`) держит **тот же BM=64 / BK=128 / stages=3**, что у живого n16, и добавляет BN=32 и BN=64. Live-dispatch — n8/n16, TokenLoop режет по 16. Строка BK=64 / stages=2 выше — старый набросок; не поднимать `kLiveMaxN` без оракула и ncu. Следующий пол TTFT — N≥17 (167 vs 52 мс); ncu на текущем GEMM ~5% DRAM.
+The alternative of “8 output elements on CUDA cores” is **forbidden by the contract**: it would break prefill and the two codecs.
 
-### Кто деквантит какой `col_group`
+### Prefill N=16, block 256 threads = 8 warps
 
-Линейный адрес входа:  
+```
+block: BM=64, BN=16, BK=128
+
+warp (wm, wn), wm∈{0,1,2,3}, wn∈{0,1}:
+  rows [16·wm .. +15], N columns [8·wn .. +7]
+
+K-loop: 128/16 = 8 MMA per warp per stage
+TC utilization along N: 100% (two m16n8 cover 16)
+```
+
+N=9..15 — the same kernel, epilogue mask. N=17..32 — a grid along N=2 (two BN=16) **or** a BN=32 block, 8 warps as 2×M × 4×N, BK=64, stages=2.
+
+In this tree the plan (`gpu/nf4/plan.py`) keeps **the same BM=64 / BK=128 / stages=3** as the live n16, and adds BN=32 and BN=64. Live dispatch is n8/n16; TokenLoop slices by 16. The BK=64 / stages=2 row above is an old sketch; do not raise `kLiveMaxN` without the oracle and ncu. The next TTFT bottleneck is N≥17 (167 vs 52 ms); ncu on the current GEMM is ~5% DRAM.
+
+### Who dequants which `col_group`
+
+Linear address of the input:  
 `base = ((layer, matrix) → W_ptr) + row_tile * stride_row + col_group * stride_col`.
 
-INT4 G=32, BK=256: один `col_group` = 256 весов = 8 групп шкал на строку. Нить `(warp, lane)` считает:
+INT4 G=32, BK=256: one `col_group` = 256 weights = 8 scale groups per row. Thread `(warp, lane)` computes:
 
-- `row = row_tile*BM + warp*16 + (lane % 16)` — фактический маппинг A в m16n8k16: 2 строки на нить не подряд, как в PTX (`lane%4`, `lane/4`). Класть packed в smem **в layout фрагмента**, чтобы dequant не делал cross-lane. Практично: хранить packed как 8 нибблов, удобных для `a0..a3` данной нити (перепаковка офлайн или при `cp.async` не нужна, если компрессор пишет fragment-major).
+- `row = row_tile*BM + warp*16 + (lane % 16)` — the actual A mapping in m16n8k16: 2 rows per thread are not consecutive, as in PTX (`lane%4`, `lane/4`). Put packed into smem **in fragment layout** so dequant does not do cross-lane. Practical: store packed as 8 nibbles convenient for this thread’s `a0..a3` (an offline repack, or one at `cp.async`, is not needed if the compressor writes fragment-major).
 
-Рекомендация компрессору: внутри `(row_tile, col_group)` хранить **Ampere fragment order**, не row-major нибблы. Иначе +permute ~8 `prmt.b32` / нить / k16.
+Recommendation to the compressor: inside `(row_tile, col_group)` store **Ampere fragment order**, not row-major nibbles. Otherwise +permute ~8 `prmt.b32` / thread / k16.
 
-Книга: `col_group` кратен 8. Нить читает 1 или 2 `uint8` и 16 Б из smem-книги. Две группы по 8 → один A-фрагмент k16.
+Codebook: `col_group` is a multiple of 8. The thread reads 1 or 2 `uint8` and 16 B from the smem codebook. Two groups of 8 → one A fragment k16.
 
-### Редукция K
+### K reduction
 
-Аккумулятор 4×FP32 на нить на весь K. Split-K только если блоков мало (§8). Epliogue: `__float2bfloat16` + `st.global.v2` по 4/8 Б, не атомик если split-K=1.
+Accumulator 4×FP32 per thread for the whole K. Split-K only if there are too few blocks (§8). Epilogue: `__float2bfloat16` + `st.global.v2` of 4/8 B, not atomic if split-K=1.
 
 ---
 
-## 5. Prefetch: сколько тайлов вперёд через `cp.async`
+## 5. Prefetch: how many tiles ahead via `cp.async`
 
-На sm_86 нет TMA. Программируем кольцо руками.
+On sm_86 there is no TMA. We program the ring by hand.
 
-**3 стейджа для весов, 2 для x. Prefetch = 2 тайла вперёд по K.**
+**3 stages for weights, 2 for x. Prefetch = 2 tiles ahead along K.**
 
 ```
-пролог:
+prolog:
   cp.async packed[0], col_group 0
   cp.async packed[1], col_group 1
-  commit; wait_group 1          // packed[0] готов, [1] в полёте
+  commit; wait_group 1          // packed[0] ready, [1] in flight
   dequant packed[0] → A_regs[0]
   cp.async packed[2], col_group 2
 
-цикл s = 0 .. nK-3:
-  wait_group 1                  // готов s+1; в полёте s+2
+loop s = 0 .. nK-3:
+  wait_group 1                  // s+1 ready; s+2 in flight
   dequant packed[(s+1)%3] → A_regs[(s+1)%2]
-  mma A_regs[s%2]               // счёт тайла s
+  mma A_regs[s%2]               // compute tile s
   cp.async packed[(s+3)%3], col_group s+3
   commit
 
-эпилог: досчитать хвост, wait_group 0
+epilog: finish the tail, wait_group 0
 ```
 
-PTX (гранула 16 Б, обход L1 — L1 оставляем под книгу / x):
+PTX (16 B granule, bypass L1 — leave L1 for the codebook / x):
 
 ```
 cp.async.cg.shared.global.L2::128B [%smem], [%gmem], 16;
 cp.async.commit_group;
-cp.async.wait_group 1;    // ≤1 группа в полёте → глубина 2 = stages-1
+cp.async.wait_group 1;    // ≤1 group in flight → depth 2 = stages-1
 ```
 
-x (активации, N мал, повтор по всем блокам одной col_group):
+x (activations, N small, reused by all blocks of one col_group):
 
 ```
 cp.async.ca.shared.global.L2::128B [%smem_x], [%x], 16;
 ```
 
-`ca` — пусть L1 держит x: один и тот же `x[k:k+BK]` читают все `row_tile`-блоки (на `gate_proj` 112 блоков × один вектор). Это **единственное** место, где L1 полезен. Packed W — `cg`, не травить L1 одноразовым INT4.
+`ca` — let L1 hold x: the same `x[k:k+BK]` is read by every `row_tile` block (on `gate_proj`, 112 blocks × one vector). This is the **only** place L1 is useful. Packed W — `cg`, do not poison L1 with one-shot INT4.
 
-**Почему не 2 стейджа весов.** Latency GDDR6X ~300–400 нс ≈ 500–700 циклов @ 1.71 ГГц. Деквант тайла 128×256: 32768 весов / 256 нитей = 128 нибблов/нить ≈ 0.6–1.0 мкс ALU. Двухбуфер часто не скрывает wait+dequant на первом тайле волны. CUTLASS Ampere default = 3. Четвёртый стейдж (prefetch 3) — +16 КиБ, на 3080 не окупается.
+**Why not 2 weight stages.** GDDR6X latency ~300–400 ns ≈ 500–700 cycles @ 1.71 GHz. Dequant of a 128×256 tile: 32768 weights / 256 threads = 128 nibbles/thread ≈ 0.6–1.0 µs ALU. Double-buffer often fails to hide wait+dequant on the first tile of a wave. CUTLASS Ampere default = 3. A fourth stage (prefetch 3) is +16 KiB, does not pay off on a 3080.
 
-**Почему не 1 тайл вперёд на книге 256.** Lookup дешевле INT4-scale, 2 стейджа уже прячут 8 КиБ индексов. Оставляем **тот же 3-стейдж скелет**, чтобы кодек был `#ifdef` внутри dequant, не разные пайплайны.
+**Why not 1 tile ahead on codebook 256.** Lookup is cheaper than INT4-scale, 2 stages already hide 8 KiB of indices. Keep **the same 3-stage skeleton** so the codec is an `#ifdef` inside dequant, not different pipelines.
 
-Барьеры: `cp.async.wait_group` + `__syncthreads()` после wait, **до** того как другая варп-группа читает тот же smem-стейдж. Не `cp.async.bulk` (его нет). Не `ld.global.nc` в регистр + `st.shared`: это +1 проход и нет async overlap.
+Barriers: `cp.async.wait_group` + `__syncthreads()` after wait, **before** another warp group reads the same smem stage. Not `cp.async.bulk` (it does not exist). Not `ld.global.nc` into a register + `st.shared`: that is +1 pass and no async overlap.
 
-Глубина commit groups: не больше 4 (аппаратный лимит outstanding `cp.async` групп на SM — держаться ≤3).
+Commit-group depth: no more than 4 (hardware limit on outstanding `cp.async` groups per SM — stay ≤3).
 
 ---
 
-## 6. Оценка времени `gate_proj` 14336×4096 на 3080
+## 6. Time estimate for `gate_proj` 14336×4096 on 3080
 
-Элементов: **58 720 256**.  
-Пик шины: 912 ГиБ/с. Dense BF16 TC: ~**61 ТФЛОПС** (половина от 122 с sparsity). FP32 ALU: ~**30 ТФЛОПС**.
+Elements: **58 720 256**.  
+Peak bus: 912 GiB/s. Dense BF16 TC: ~**61 TFLOPS** (half of 122 with sparsity). FP32 ALU: ~**30 TFLOPS**.
 
-FLOP GEMV: `2·M·N·K = 1.174e8` (N=1) → 1.9 мкс на TC. Для N=16: 30.6 мкс. Везде ниже памяти, кроме искусственно плохого декванта.
+GEMV FLOP: `2·M·N·K = 1.174e8` (N=1) → 1.9 µs on TC. For N=16: 30.6 µs. Everywhere below memory, except an artificially bad dequant.
 
-### Трафик весов
+### Weight traffic
 
-| | INT4 G=32 | INT4 G=128 | 2-bit, 2×uint8 + 2×4 КиБ книги | 2-bit, индекс u16 + книга 2¹⁶ |
+| | INT4 G=32 | INT4 G=128 | 2-bit, 2×uint8 + 2×4 KiB codebooks | 2-bit, u16 index + 2¹⁶ codebook |
 |---|---|---|---|---|
-| packed / indices | 29.360 МиБ | 29.360 МиБ | **14.680 МиБ** | 14.680 МиБ |
-| scales / книга | 3.670 МиБ | 0.917 МиБ | 8 КиБ (один раз) | книга 1 МиБ + **117.4 МиБ gather** |
-| x + y (N=1) | 0.008 + 0.027 МиБ | то же | то же | то же |
-| **сумма с шины / L2** | **33.07 МиБ** | 30.31 МиБ | **14.72 МиБ** | ~132 МиБ эфф. |
-| roofline 912 ГиБ/с | **36.2 мкс** | 33.2 мкс | **16.1 мкс** | индексы 16 мкс + L2 ~60–90 мкс |
+| packed / indices | 29.360 MiB | 29.360 MiB | **14.680 MiB** | 14.680 MiB |
+| scales / codebook | 3.670 MiB | 0.917 MiB | 8 KiB (once) | codebook 1 MiB + **117.4 MiB gather** |
+| x + y (N=1) | 0.008 + 0.027 MiB | same | same | same |
+| **sum from bus / L2** | **33.07 MiB** | 30.31 MiB | **14.72 MiB** | ~132 MiB eff. |
+| roofline 912 GiB/s | **36.2 µs** | 33.2 µs | **16.1 µs** | indices 16 µs + L2 ~60–90 µs |
 
-### ALU декванта (весь `gate_proj`, N=1)
+### Dequant ALU (whole `gate_proj`, N=1)
 
-INT4: ~6 целочисленных оп/вес + 1 BF16 mul на scale.
+INT4: ~6 integer ops/weight + 1 BF16 mul by scale.
 
-`58.72e6 × 7 / 30e12 ≈ 14 мкс` если бы это был пик FP32. Реально сдвиги/AND ~ половина пика → **25–40 мкс** если считать последовательно. В 3-стейдж пайплайне это **прячется** за 16 K-итерациями `cp.async` (каждая везёт 112 блоков × 18 КиБ ≈ 2.0 МиБ / 912 ГиБ/с = 2.2 мкс, деквант стейджа ~2 мкс). Итог: **+15–25% сверх roofline**, не 2×.
+`58.72e6 × 7 / 30e12 ≈ 14 µs` if this were FP32 peak. In reality shifts/AND are ~half of peak → **25–40 µs** if counted sequentially. In a 3-stage pipeline this is **hidden** behind 16 K-iterations of `cp.async` (each carries 112 blocks × 18 KiB ≈ 2.0 MiB / 912 GiB/s = 2.2 µs, stage dequant ~2 µs). Result: **+15–25% above roofline**, not 2×.
 
-Книга 256: 7.34e6 lookup × ~40 циклов conflict / (70×4×1.71e9) ≈ **6 мкс**. Прячется полностью.
+Codebook 256: 7.34e6 lookups × ~40 conflict cycles / (70×4×1.71e9) ≈ **6 µs**. Hidden completely.
 
-### Итог на один `gate_proj`, batch=1
+### Total for one `gate_proj`, batch=1
 
-| Кодек | Roofline | Реалистично (60–75% GDDR + скрытый dequant) | Доля 100 мс @ 10 ток/с |
+| Codec | Roofline | Realistic (60–75% GDDR + hidden dequant) | Share of 100 ms @ 10 tok/s |
 |---|---|---|---|
-| INT4 G=32 | 36 мкс | **45–55 мкс** | 0.05% |
-| INT4 G=128 | 33 мкс | **42–50 мкс** | 0.05% |
-| 2-bit книга 256×2 | 16 мкс | **22–30 мкс** | 0.03% |
-| 2-bit книга 2¹⁶ | ~75 мкс | **90–140 мкс** (gather) | всё ещё мало, но ядро плохое |
+| INT4 G=32 | 36 µs | **45–55 µs** | 0.05% |
+| INT4 G=128 | 33 µs | **42–50 µs** | 0.05% |
+| 2-bit codebook 256×2 | 16 µs | **22–30 µs** | 0.03% |
+| 2-bit codebook 2¹⁶ | ~75 µs | **90–140 µs** (gather) | still small, but the kernel is bad |
 
-N=16 префилл: те же байты W, x = 16×4096×2 = 128 КиБ (шум). TC 31 мкс. INT4: **50–65 мкс** (всё ещё память).
+N=16 prefill: the same W bytes, x = 16×4096×2 = 128 KiB (noise). TC 31 µs. INT4: **50–65 µs** (still memory).
 
-### Весь токен Llama-3 8B (проверка ≥10 ток/с)
+### Whole Llama-3 8B token (check ≥10 tok/s)
 
-Веса ~7B. INT4+scales ≈ **4.5 ГиБ** / 912 ≈ **4.9 мс** пик → **~200 ток/с**. На decode 55–70% шины → **110–140 ток/с**. Это калибр llama.cpp Q4 (80–110). Наше ядро не должно быть хуже **0.6×** этого; 10 ток/с — запас **~10×**, он нужен 32B@2-bit, не 8B.
+Weights ~7B. INT4+scales ≈ **4.5 GiB** / 912 ≈ **4.9 ms** peak → **~200 tok/s**. On decode at 55–70% of the bus → **110–140 tok/s**. That is the llama.cpp Q4 caliber (80–110). Our kernel must not be worse than **0.6×** of this; 10 tok/s is **~10×** headroom, needed for 32B@2-bit, not 8B.
 
-`gate_proj` ≈ 27% весов слоя, слой ≈ 1/32 токена: 55 мкс × (1/0.27) × 32 ≈ **6.5 мс** на токен, если бы все матрицы как gate. Сходятся с 4.9 мс × 1.3 оверхед.
+`gate_proj` ≈ 27% of layer weights, layer ≈ 1/32 of a token: 55 µs × (1/0.27) × 32 ≈ **6.5 ms** per token if every matrix were like gate. Agrees with 4.9 ms × 1.3 overhead.
 
-2-bit 8B: ~2.0–2.2 ГиБ / 912 ≈ 2.3 мс пик → **>200 ток/с** при живом ядре.
+2-bit 8B: ~2.0–2.2 GiB / 912 ≈ 2.3 ms peak → **>200 tok/s** with a live kernel.
 
 ---
 
-## 7. Ловушки именно sm_86
+## 7. Traps that are specifically sm_86
 
-1. **Нет TMA.** Нет `cp.async.bulk.tensor`, нет multicast x на все блоки, нет автоматического swizzle. Дескрипторы тайла — обычные `ptr + row_tile*s + col_group*t`. Ошибки выравнивания не поймает hardware descriptor.
+1. **No TMA.** No `cp.async.bulk.tensor`, no multicast of x to every block, no automatic swizzle. Tile descriptors are ordinary `ptr + row_tile*s + col_group*t`. Alignment errors will not be caught by a hardware descriptor.
 
-2. **Нет TMEM / WGMMA.** Нельзя «положить деквант в TMEM и забыть». Каждый `mma.sync` требует, чтобы **этот варп** держал A,B,C в регистрах. Occupancy убивается аккумуляторами: 8 варпов × 4 float × (несколько плиток N) — считать регистры до 96, не 255.
+2. **No TMEM / WGMMA.** You cannot “put dequant in TMEM and forget”. Every `mma.sync` requires **this warp** to hold A,B,C in registers. Occupancy is killed by accumulators: 8 warps × 4 float × (several N tiles) — budget registers to 96, not 255.
 
 3. **`cp.async` ≠ `ld.global`.**  
-   - Размеры **4 / 8 / 16 Б** на нить, не 32.  
-   - Dest только smem, не регистр (это Hopper `ldgsts` vs Ampere).  
-   - Невыровненный 16 Б адрес = silent fault / обрезание. Packed INT4 и indices паддить до 16.  
-   - `wait_group N` ждёт, пока in-flight **групп** ≤ N, не байт. Одна группа = всё после предыдущего `commit`.  
-   - `cp.async` не ставит `__syncthreads`. Забыли sync — читаете чужой стейдж.
+   - Sizes **4 / 8 / 16 B** per thread, not 32.  
+   - Dest is smem only, not a register (that is Hopper `ldgsts` vs Ampere).  
+   - An unaligned 16 B address = silent fault / truncation. Pad packed INT4 and indices to 16.  
+   - `wait_group N` waits until in-flight **groups** ≤ N, not bytes. One group = everything after the previous `commit`.  
+   - `cp.async` does not issue `__syncthreads`. Forget the sync — you read someone else’s stage.
 
-4. **L1 на GA10x маленький и делит с smem.** Выставили 99 КБ smem → L1 ≈ 28 КБ. Книга 4 КиБ в smem правильнее, чем надеяться на L1. `cp.async.cg` для W обязателен, иначе 16 КиБ packed выбивают книгу из L1 (если бы она была там).
+4. **L1 on GA10x is small and shared with smem.** Set 99 KB smem → L1 ≈ 28 KB. A 4 KiB codebook in smem is more correct than hoping for L1. `cp.async.cg` for W is mandatory, otherwise 16 KiB of packed evicts the codebook from L1 (if it were there).
 
-5. **1536 нитей/SM, не 2048 как A100.** Блок 256 × 96 рег = 24576 рег → **2 блока/SM** по регистрам (65536). По smem 59 КиБ → тоже 1–2. Occupancy 512/1536 = 33%. Нормально для memory-bound. Не поднимать блок до 1024: регистры A/B/acc не влезут, spilled acc убьёт 45 мкс.
+5. **1536 threads/SM, not 2048 like A100.** Block 256 × 96 regs = 24576 regs → **2 blocks/SM** by registers (65536). By smem 59 KiB → also 1–2. Occupancy 512/1536 = 33%. Fine for memory-bound. Do not raise the block to 1024: A/B/acc registers will not fit, spilled acc will kill the 45 µs.
 
-6. **Нет async barrier / mbarrier.** Только `bar.sync` + `cp.async.wait_group`. Не копировать Hopper pipeline 1:1 из CUTLASS 3.x.
+6. **No async barrier / mbarrier.** Only `bar.sync` + `cp.async.wait_group`. Do not copy a Hopper pipeline 1:1 from CUTLASS 3.x.
 
-7. **`m8n8k4` — ловушка туториалов Volta.** На sm_86 это CUDA cores. Профилировать SASS: должно быть `HMMA.16816`, не `FFMA`.
+7. **`m8n8k4` is a Volta-tutorial trap.** On sm_86 this is CUDA cores. Profile SASS: it must be `HMMA.16816`, not `FFMA`.
 
-8. **Bank conflict `ldmatrix`.** Без XOR-swizzle 8 варпов читают одну колонку x — 32-way. x маленький, но деквант A из линейного packed без fragment layout — те же 32-way на нибблах.
+8. **`ldmatrix` bank conflict.** Without XOR-swizzle, 8 warps read one column of x — 32-way. x is small, but dequant of A from linear packed without fragment layout is the same 32-way on nibbles.
 
-9. **Split-K atomics на GDDR6X.** `atomicAdd` BF16/FP32 в y бьёт по одним 14336 строкам с 70 SM. На мелких M (k_proj=1024) без split-K будет 16 блоков на 70 SM. С split-K — atomics. Лучше FP32 partial в workspace `[split][M]` + отдельный reduce 0.01 мс, чем `atomicAdd` в BF16.
+9. **Split-K atomics on GDDR6X.** `atomicAdd` BF16/FP32 into y hits the same 14336 rows from 70 SMs. On small M (k_proj=1024) without split-K there will be 16 blocks on 70 SMs. With split-K — atomics. Better FP32 partials in a workspace `[split][M]` + a separate 0.01 ms reduce than `atomicAdd` in BF16.
 
-10. **Нет DE.** Huffman/ANS в этом кернеле не прячется «бесплатно». Поэтому в v1 их нет (schema).
+10. **No DE.** Huffman/ANS is not hidden “for free” in this kernel. That is why they are not in v1 (schema).
 
-11. **sm_86 vs sm_80:** те же MMA и `cp.async`, но **100 КБ** smem, не 164. Тайл 256×256×3 с A100 сюда не переносится.
+11. **sm_86 vs sm_80:** the same MMA and `cp.async`, but **100 KB** smem, not 164. A 256×256×3 tile from A100 does not transfer here.
 
 ---
 
 ## 8. Launch config
 
-### Decode, `gate_proj` INT4 / книга-256
+### Decode, `gate_proj` INT4 / codebook-256
 
 ```
-__launch_bounds__(256, 2)          // 2 блока/SM цель
-grid  = dim3(M / 128, 1, 1)        // 14336/128 = 112 блоков
-block = dim3(256, 1, 1)            // 8 варпов
-smem  = 59680                      // INT4, §2; книга: 40960
-dyn_smem: да, один кернел на оба кодека
-split_k = 1                        // 112 ≥ 70, 1.6 волны — ок
+__launch_bounds__(256, 2)          // 2 blocks/SM target
+grid  = dim3(M / 128, 1, 1)        // 14336/128 = 112 blocks
+block = dim3(256, 1, 1)            // 8 warps
+smem  = 59680                      // INT4, §2; codebook: 40960
+dyn_smem: yes, one kernel for both codecs
+split_k = 1                        // 112 ≥ 70, 1.6 waves — ok
 ```
 
-112 блоков × 70 SM: волна 70 + хвост 42. Хвост не идеален, но BK=256 длинный — не резать split-K (атомик дороже хвоста).
+112 blocks × 70 SM: a wave of 70 + a tail of 42. The tail is not ideal, but BK=256 is long — do not cut split-K (atomics cost more than the tail).
 
 ### Prefill N=16
 
 ```
-grid  = dim3(M / 64, 1, 1)         // 224 блока
+grid  = dim3(M / 64, 1, 1)         // 224 blocks
 block = dim3(256, 1, 1)
 smem  = 22016
 ```
 
-N=32: `grid.y = 2` (по BN=16) **или** `BN=32`, `grid.x = M/64`, тот же 256.
+N=32: `grid.y = 2` (along BN=16) **or** `BN=32`, `grid.x = M/64`, same 256.
 
-### Мелкие матрицы (k/v_proj M=1024)
+### Small matrices (k/v_proj M=1024)
 
 ```
 BM=64, BK=128, block=128
 tiles_m = 1024/64 = 16 < 2*70
-split_k = 8                        // 16*8 = 128 блоков
-workspace = FP32[8][1024]          // 32 КиБ, не atomic в y
+split_k = 8                        // 16*8 = 128 blocks
+workspace = FP32[8][1024]          // 32 KiB, not atomic into y
 ```
 
-Правило: `if (ceil(M/BM) < 140) split_k = next_pow2(ceil(140 / tiles_m))`, иначе 1.
+Rule: `if (ceil(M/BM) < 140) split_k = next_pow2(ceil(140 / tiles_m))`, else 1.
 
-### Регистры и occupancy
+### Registers and occupancy
 
-| | цель | потолок |
+| | target | ceiling |
 |---|---|---|
-| регистры/нить | 80–96 | 128 (иначе 1 блок/SM) |
-| smem/блок | 40–60 КиБ | 99 КиБ |
-| блоков/SM | 2 | 1 ещё живёт (memory-bound) |
-| варпов/SM | 16 | 48 max |
+| registers/thread | 80–96 | 128 (otherwise 1 block/SM) |
+| smem/block | 40–60 KiB | 99 KiB |
+| blocks/SM | 2 | 1 still lives (memory-bound) |
+| warps/SM | 16 | 48 max |
 
-`cudaFuncSetAttribute(..., MaxDynamicSharedMemorySize, 65536)` — на sm_86 потолок 99 КиБ, просим 64 КиБ.
+`cudaFuncSetAttribute(..., MaxDynamicSharedMemorySize, 65536)` — on sm_86 the ceiling is 99 KiB, we ask for 64 KiB.
 
-Кластер / `cg::grid_group`: нет. Persistent kernel: не нужен на 112 блоках.
+Cluster / `cg::grid_group`: no. Persistent kernel: not needed at 112 blocks.
 
-### Скетч < 40 строк (скелет, не код продукта)
+### Sketch < 40 lines (skeleton, not product code)
 
 ```cuda
 // sm_86, BM=128, BK=256, BN=8, stages=3, block=256
@@ -447,7 +447,7 @@ __global__ void dq_mma(const uint8_t* W, const half* scale,
                        const uint8_t* idx, const bf16* book,
                        const bf16* x, float* acc_out, int K) {
   extern __shared__ char sm[];          // packed ring + book
-  bf16* book_s = (bf16*)sm;             // 256*8, грузим 1 раз
+  bf16* book_s = (bf16*)sm;             // 256*8, load once
   uint8_t* pk[3];                       // 16 KiB or 8 KiB indices
   // cp.async.cg packed[0], packed[1]; wait_group 1;
   float d0,d1,d2,d3;                    // C fragment
@@ -470,9 +470,9 @@ __global__ void dq_mma(const uint8_t* W, const half* scale,
 
 ---
 
-## Стык с остальными модулями
+## Handoff to other modules
 
-- Компрессор пишет тайл `(layer, matrix, row_tile, col_group)` в **fragment-major** для `m16n8k16`, не чистый row-major.
-- Книга 2¹⁶ в файл формата можно положить, кернел v1 её не читает.
-- Планировщик 12 ГБ не выделяет BF16-слой: пик smem 60 КиБ + workspace split-K килобайты.
-- Калибр: `gate_proj` INT4 **≤55 мкс** на 3080. Если >80 мкс — пайплайн/конфликты, не «формат виноват».
+- The compressor writes tile `(layer, matrix, row_tile, col_group)` in **fragment-major** for `m16n8k16`, not pure row-major.
+- A 2¹⁶ codebook may be placed in the format file; the v1 kernel does not read it.
+- The 12 GB planner does not allocate a BF16 layer: peak smem 60 KiB + split-K workspace in kilobytes.
+- Caliber: `gate_proj` INT4 **≤55 µs** on 3080. If >80 µs — pipeline/conflicts, not “the format is at fault”.

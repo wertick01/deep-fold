@@ -22,8 +22,9 @@ The comparison plate is `python -m gpu.lab.run` (3B paths by default). Public
 contract of the package: `from gpu.lab import run_both, run_bf16, run_nf4,
 comparison_figure`.
 
-Design notes under [`docs/`](.) are mostly Russian; this page and the origin
-[README](../README.md) are English.
+Canonical pages under [`docs/`](.) are English. Russian twins exist only as
+`*.ru.md` ([install](install.ru.md), [quickstart](quickstart.ru.md), and the
+origin [README.ru.md](../README.ru.md)).
 
 ## What we claim
 

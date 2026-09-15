@@ -1,37 +1,37 @@
-# GPU ABI: `.chr` → device-тензоры (волна 2)
+# GPU ABI: `.chr` → device tensors (wave 2)
 
-Что лоадер `gpu/chr0/` отдаёт ядру и на каких условиях. Спорные места решает [stitch-gpu.md](stitch-gpu.md); контейнер — [chr0.md](chr0.md); кодек — [nf4.md](nf4.md). Здесь нет LUT, нет деквантования, нет `.cu`.
+What the `gpu/chr0/` loader hands the kernel, and under which conditions. Contested points are decided by [stitch-gpu.md](stitch-gpu.md); container — [chr0.md](chr0.md); codec — [nf4.md](nf4.md). No LUT here, no dequant, no `.cu`.
 
 ---
 
-## 1. `ChrMatrix` — заморожено
+## 1. `ChrMatrix` — frozen
 
 ```python
 @dataclass(frozen=True)
 class ChrMatrix:
-    name: str              # CHR0-имя, без ".weight"
-    M: int                 # логический n_out = shape[0]
-    K: int                 # логический n_in  = shape[1]
+    name: str              # CHR0 name, without ".weight"
+    M: int                 # logical n_out = shape[0]
+    K: int                 # logical n_in  = shape[1]
     K_pad: int             # 64 * ceil(K / 64)
     packed: Tensor         # uint8,   [M, K_pad // 2],  row-major, contiguous
     scale: Tensor          # float16, [M, K_pad // 64], row-major, contiguous
 ```
 
-Имена полей и порядок не менять: агент 2 читает их через `chr_nf4_dev_t`, агент 3 — напрямую.
+Do not change field names or order: agent 2 reads them via `chr_nf4_dev_t`, agent 3 — directly.
 
-`packed` и `scale` лежат на одном `device`. Оба — вьюхи в **одну** device-аллокацию на матрицу (§4), поэтому `packed.data_ptr()` и `scale.data_ptr()` валидны, пока жив сам `ChrMatrix`.
+`packed` and `scale` live on the same `device`. Both are views into **one** per-matrix device allocation (§4), so `packed.data_ptr()` and `scale.data_ptr()` stay valid for the lifetime of the `ChrMatrix` itself.
 
-Соответствие C-заголовку `gpu/include/chr_gpu.h` (расклад заморожен, лоадер его не меняет):
+Mapping to the C header `gpu/include/chr_gpu.h` (layout is frozen; the loader does not change it):
 
-| C-поле | Python |
+| C field | Python |
 |---|---|
 | `int32_t M` | `m.M` |
 | `int32_t K` | `m.K` |
 | `int32_t K_pad` | `m.K_pad` |
 | `const uint8_t *packed` | `m.packed.data_ptr()` |
-| `const uint16_t *scale` | `m.scale.data_ptr()` — **биты** binary16, не «fp16-объект» |
+| `const uint16_t *scale` | `m.scale.data_ptr()` — binary16 **bits**, not an “fp16 object” |
 
-`scale` — `torch.float16`, т.е. те же 16 бит, что в файле. Ядро читает как `uint16` / `__half` и расширяет в float32 **до** умножения на `LUT[nib]` ([nf4.md](nf4.md) §3).
+`scale` is `torch.float16`, i.e. the same 16 bits as in the file. The kernel reads them as `uint16` / `__half` and expands to float32 **before** multiplying by `LUT[nib]` ([nf4.md](nf4.md) §3).
 
 ---
 
@@ -43,20 +43,20 @@ iter_linears(header)                                -> Iterator[str]   # codec =
 materialize_nf4(path, name, device="cuda", *, header=None) -> ChrMatrix
 ```
 
-- `load_header` открывает файл **read-only** (`open(path, "rb")`), парсит и **полностью валидирует** заголовок (§5), закрывает файл. Блобы не читает.
-- `iter_linears` не трогает диск: имена с `codec == "nf4"` в порядке ключей заголовка (лексикографический UTF-8 от писалки). Сюда попадают `embed_tokens` и `lm_head`, если они nf4 в файле — фильтр по `kind` делает хост, не лоадер.
-- `materialize_nf4` — одна матрица. `header=` позволяет переиспользовать уже разобранный заголовок при загрузке многих матриц (парсинг 65 КБ JSON × 300 — единственная причина этого параметра).
-- Оригинальный `safetensors` лоадер **не** открывает никогда.
+- `load_header` opens the file **read-only** (`open(path, "rb")`), parses and **fully validates** the header (§5), then closes the file. It does not read blobs.
+- `iter_linears` does not touch disk: names with `codec == "nf4"` in header key order (lexicographic UTF-8 from the writer). `embed_tokens` and `lm_head` appear here if they are nf4 in the file — filtering by `kind` is the host’s job, not the loader’s.
+- `materialize_nf4` — one matrix. `header=` lets an already-parsed header be reused when loading many matrices (parsing 65 KB of JSON × 300 is the only reason for this parameter).
+- The original `safetensors` is **never** opened by the loader.
 
-`Header` несёт `magic/version/arch/hidden_size/intermediate_size/num_layers/vocab_size/tile`, `file_size`, и `tensors: Mapping[str, TensorInfo]`. `TensorInfo` — `kind`, `codec`, `shape`, `layer`, `group_size`, блобы `{key: (start, end)}` и производные `M / K / K_pad / n_groups` для rank-2 nf4.
+`Header` carries `magic/version/arch/hidden_size/intermediate_size/num_layers/vocab_size/tile`, `file_size`, and `tensors: Mapping[str, TensorInfo]`. `TensorInfo` is `kind`, `codec`, `shape`, `layer`, `group_size`, blobs `{key: (start, end)}`, and derived `M / K / K_pad / n_groups` for rank-2 nf4.
 
 ---
 
-## 3. Формулы байт (лоадер отвергает mismatch)
+## 3. Byte formulas (loader rejects a mismatch)
 
-`K_pad = 64 * ceil(K / 64)`, `n_groups = K_pad / 64`. Из [stitch-gpu.md](stitch-gpu.md):
+`K_pad = 64 * ceil(K / 64)`, `n_groups = K_pad / 64`. From [stitch-gpu.md](stitch-gpu.md):
 
-| Блоб | dtype | форма | `end − start` |
+| Blob | dtype | shape | `end − start` |
 |---|---|---|---|
 | nf4 `data` | uint8 | `[M, K_pad/2]` | `M * K_pad / 2` |
 | nf4 `scale` | FP16 LE | `[M, n_groups]` | `M * n_groups * 2` |
@@ -64,89 +64,89 @@ materialize_nf4(path, name, device="cuda", *, header=None) -> ChrMatrix
 | vq `codebook` | FP16 LE | `[2, 256, 8]` | `8192` |
 | vq `index` | uint8 | `[M, K_pad_vq/8, 2]` | `M * (K_pad_vq/8) * 2`, `K_pad_vq = 8*ceil(K/8)` |
 
-Офсеты `[start, end)` — **от начала файла**, `start % 64 == 0`.
+Offsets `[start, end)` are **from the start of the file**, `start % 64 == 0`.
 
-Проверка размера идёт на `load_header` для **всех** тензоров файла, включая vq/int4-слоты: их размеры валидируются, а `materialize_nf4` на них падает (§5, `CodecError`). Волна 2.0 материализует только `nf4`.
+Size checks run in `load_header` for **every** tensor in the file, including vq/int4 slots: their sizes are validated, and `materialize_nf4` on them raises (§5, `CodecError`). Wave 2.0 materializes `nf4` only.
 
-Нибблы (младший = `W[r, 2c]`), LUT, книги — **не забота лоадера**. Он не читает и не переставляет ни одного бита: `packed[r, c]` — это ровно байт файла по офсету `data.start + r*(K_pad/2) + c`.
+Nibbles (low = `W[r, 2c]`), LUT, codebooks — **not the loader’s concern**. It neither reads nor rearranges a single bit: `packed[r, c]` is exactly the file byte at offset `data.start + r*(K_pad/2) + c`.
 
 ---
 
-## 4. Как байты попадают в VRAM
+## 4. How bytes get into VRAM
 
-**Выбранная стратегия — одна: per-matrix arena, один HtoD на матрицу.**
+**Chosen strategy — one: per-matrix arena, one HtoD per matrix.**
 
 ```
 seek(data.start)
-readinto(bytearray(data.nbytes + scale.nbytes))   # один pread: data ‖ scale
-arena = torch.empty(total, uint8, device)          # одна device-аллокация
-arena.copy_(torch.frombuffer(host))                # один cudaMemcpy HtoD
+readinto(bytearray(data.nbytes + scale.nbytes))   # one pread: data ‖ scale
+arena = torch.empty(total, uint8, device)          # one device allocation
+arena.copy_(torch.frombuffer(host))                # one cudaMemcpy HtoD
 packed = arena[:len_data].view(M, K_pad//2)
 scale  = arena[len_data:].view(torch.float16).view(M, n_groups)
-host-буфер отпускается
+host buffer is released
 ```
 
-Писалка CHR0 всегда кладёт `data`, затем `scale` подряд (порядок полей §2.3 chr0.md), поэтому слитный путь — обычный: `scale.start == data.end` для любой матрицы, у которой `M * K_pad / 2` кратно 64, т.е. для всех реальных. Если между блобами есть pad или чужой блоб, лоадер тихо берёт запасной путь: два `pread` + два HtoD **в тот же** один device-буфер. Форма результата одинакова.
+The CHR0 writer always lays `data` then `scale` back-to-back (field order §2.3 chr0.md), so the fused path is the common case: `scale.start == data.end` for any matrix where `M * K_pad / 2` is a multiple of 64, i.e. for all real ones. If there is pad or a foreign blob between the blobs, the loader silently takes the fallback: two `pread` + two HtoD **into the same** single device buffer. The result shape is identical.
 
-Диск читается **до** первого обращения к device: короткий файл падает, не выделив VRAM.
+The disk is read **before** the first device touch: a short file fails without allocating VRAM.
 
-Следствия, которые это фиксирует:
+Consequences this locks:
 
-- **Пик host-RAM = блобы одной матрицы** (для 3B `gate_proj` — 11.42 МиБ), а не файл и не модель. Нет `mmap` всего `.chr`, нет `read()` файла целиком, нет `dict[str, bytes]`.
-- **Одна device-аллокация на матрицу**, не по одной на блоб: 434 тензора 3B → ≤ 434 аллокаций из кэширующего аллокатора torch, не «200 мелких `cudaMalloc`» на каждый блоб.
-- При загрузке всей модели host- и device-копии **не** сосуществуют: host-буфер матрицы `i` мёртв до чтения матрицы `i+1`.
-- `torch.empty(M, K, dtype=bfloat16)` не вызывается никогда — ни «для проверки», ни как промежуток. Черновика `W` в HBM нет ([stitch-gpu.md](stitch-gpu.md)).
+- **Host-RAM peak = blobs of one matrix** (for 3B `gate_proj` — 11.42 MiB), not the file and not the model. No mmap of the whole `.chr`, no `read()` of the entire file, no `dict[str, bytes]`.
+- **One device allocation per matrix**, not one per blob: 434 tensors of 3B → ≤ 434 allocations from the torch caching allocator, not “200 tiny `cudaMalloc`s” per blob.
+- While loading the full model, host and device copies do **not** coexist: the host buffer for matrix `i` is dead before matrix `i+1` is read.
+- `torch.empty(M, K, dtype=bfloat16)` is never called — not “for a check”, not as an intermediate. There is no scratch `W` in HBM ([stitch-gpu.md](stitch-gpu.md)).
 
-Замер на 3080 (`model.layers.0.mlp.gate_proj`, `M=11008, K=2048`): блобы `11 272 192 + 704 512` Б = **11.42 МиБ**, `torch.cuda.memory_allocated` +**12.00 МиБ** (кэширующий аллокатор округляет крупный блок до 2 МиБ), `nvidia-smi memory.used` +**12 МиБ** сверх уже созданного CUDA-контекста. BF16-матрица была бы 43 МиБ, F32 — 86 МиБ. Дельта выше ~14 МиБ — баг.
+Measured on a 3080 (`model.layers.0.mlp.gate_proj`, `M=11008, K=2048`): blobs `11 272 192 + 704 512` B = **11.42 MiB**, `torch.cuda.memory_allocated` +**12.00 MiB** (the caching allocator rounds a large block to 2 MiB), `nvidia-smi memory.used` +**12 MiB** above the already-created CUDA context. A BF16 matrix would be 43 MiB, F32 — 86 MiB. A delta above ~14 MiB is a bug.
 
-Запись в `.chr` невозможна по построению: единственный вызов — `open(path, "rb")`.
+Writes to `.chr` are impossible by construction: the only call is `open(path, "rb")`.
 
 ---
 
-## 5. Ошибки
+## 5. Errors
 
-Все — подклассы `Chr0Error`. Все проверки заголовка выполняются на `load_header`, т.е. **до** любого `to(device)` и любого `cudaMemcpy`.
+All are subclasses of `Chr0Error`. All header checks run in `load_header`, i.e. **before** any `to(device)` and any `cudaMemcpy`.
 
-| Класс | Когда |
+| Class | When |
 |---|---|
-| `TruncatedError` | файл < 8 байт; `8+N > size`; `end > size` у любого блоба; `readinto` вернул меньше байт |
-| `HeaderError` | `N ∈ {0,1}`; `N > 100_000_000`; первый байт JSON ≠ `{`; невалидный UTF-8/JSON; не объект; хвост не-whitespace; JSON-число с дробной частью; лишний/отсутствующий ключ; `magic ≠ "CHR0"`; `version ≠ 1`; `tile ≠ {row:64,col_group:8}`; пустой `tensors`; дубликат имени; имя с control-байтом; `layer` не сходится с `layers.<n>`; смесь кодеков в Q-множестве |
+| `TruncatedError` | file < 8 bytes; `8+N > size`; `end > size` on any blob; `readinto` returned fewer bytes |
+| `HeaderError` | `N ∈ {0,1}`; `N > 100_000_000`; first JSON byte ≠ `{`; invalid UTF-8/JSON; not an object; tail is not whitespace; JSON number with a fractional part; extra/missing key; `magic ≠ "CHR0"`; `version ≠ 1`; `tile ≠ {row:64,col_group:8}`; empty `tensors`; duplicate name; name with a control byte; `layer` does not match `layers.<n>`; mixed codecs in the Q-set |
 | `AlignmentError` | `start % 64 ≠ 0` |
-| `SizeMismatchError` | `end ≤ start`; `end − start` ≠ формуле §3 |
-| `OverlapError` | пересечение любых двух `[start,end)` в файле |
-| `CodecError` | `codec` вне `{bf16,nf4,int4,vq}`; `materialize_nf4` на не-`nf4` тензоре; набор ключей не по кодеку |
-| `GroupSizeError` | `group_size ≠ 64` у nf4 (и `≠ 8` у vq) |
-| `TensorNotFoundError` | имени нет в `tensors` |
+| `SizeMismatchError` | `end ≤ start`; `end − start` ≠ the §3 formula |
+| `OverlapError` | any two `[start,end)` ranges in the file intersect |
+| `CodecError` | `codec` outside `{bf16,nf4,int4,vq}`; `materialize_nf4` on a non-`nf4` tensor; key set not matching the codec |
+| `GroupSizeError` | `group_size ≠ 64` for nf4 (and `≠ 8` for vq) |
+| `TensorNotFoundError` | name not in `tensors` |
 
-Ридер **не** чинит заголовок: не ищет `{` дальше по файлу, не подрезает `N`, не игнорирует неизвестные ключи. Лишний хвост файла за `Align64(max_end)` — не ошибка ([chr0.md](chr0.md) §1.5).
-
----
-
-## 6. Кто что транспонирует
-
-**Транспонирует хост, не лоадер и не ядро.**
-
-- В файле `W` — row-major `[M, K]`, ось 1 = вход Linear. Лоадер отдаёт эти байты как есть.
-- Ядро ждёт `x` в BF16 row-major **`[K, N]`** и пишет `y` BF16 `[M, N]` ([stitch-gpu.md](stitch-gpu.md)).
-- HuggingFace даёт активации `[..., N, K]`. Привести их к `[K, N]` — работа `CompressedLinear` (агент 3): `x.reshape(-1, K).t().contiguous()` перед вызовом и обратный reshape `y` после. Лоадер в этом не участвует и `x` не видит.
-- Никакого fragment-major и никакой перестановки `packed` на диске или при загрузке: permute — в регистрах ядра.
+The reader does **not** repair the header: it does not search for `{` further in the file, does not trim `N`, does not ignore unknown keys. Extra file tail past `Align64(max_end)` is not an error ([chr0.md](chr0.md) §1.5).
 
 ---
 
-## 7. Проверка
+## 6. Who transposes what
+
+**The host transposes, not the loader and not the kernel.**
+
+- In the file, `W` is row-major `[M, K]`, axis 1 = Linear input. The loader hands these bytes through as-is.
+- The kernel expects `x` in BF16 row-major **`[K, N]`** and writes `y` BF16 `[M, N]` ([stitch-gpu.md](stitch-gpu.md)).
+- HuggingFace gives activations `[..., N, K]`. Bringing them to `[K, N]` is `CompressedLinear`’s job (agent 3): `x.reshape(-1, K).t().contiguous()` before the call and the inverse reshape of `y` after. The loader does not take part and never sees `x`.
+- No fragment-major and no permute of `packed` on disk or at load: permute is in the kernel’s registers.
+
+---
+
+## 7. Check
 
 ```
 python gpu/chr0/test_chr0.py
 ```
 
-Фикстура happy-path строится на месте: `write_safetensors` (64×128 и 2×65 F32 + норма) → `chr.exe compress --codec nf4` → `materialize_nf4(device="cpu")` → сравнение `packed`/`scale` с `file[start:end]` байт в байт. Malformed-случаи (`end > filesize`, размер ≠ формуле, overlap, `start % 64 ≠ 0`, `group_size=32`, `codec=vq`, битый JSON) собираются вручную: писалка их не производит.
+The happy-path fixture is built in place: `write_safetensors` (64×128 and 2×65 F32 + a norm) → `chr.exe compress --codec nf4` → `materialize_nf4(device="cpu")` → compare `packed`/`scale` with `file[start:end]` byte for byte. Malformed cases (`end > filesize`, size ≠ formula, overlap, `start % 64 ≠ 0`, `group_size=32`, `codec=vq`, broken JSON) are assembled by hand: the writer does not produce them.
 
-Проверка «до `cuda`»: в тестах truncated-файлов `torch.empty` подменяется на бросающую заглушку; `materialize_nf4(..., "cuda")` обязан упасть `TruncatedError`, а не на заглушке.
+The “before `cuda`” check: in truncated-file tests `torch.empty` is replaced with a throwing stub; `materialize_nf4(..., "cuda")` must fail with `TruncatedError`, not on the stub.
 
-Дисциплина памяти (отдельный прогон, 60 матриц 3B подряд, 346.9 МиБ блобов): `device_delta = 360.5 МиБ`, `host RSS delta = 0.0 МиБ`, максимальный host-буфер за раз — 11.42 МиБ.
+Memory discipline (separate run, 60 matrices of 3B in a row, 346.9 MiB of blobs): `device_delta = 360.5 MiB`, `host RSS delta = 0.0 MiB`, largest host buffer at once — 11.42 MiB.
 
 ---
 
-## 8. Что лоадер не делает
+## 8. What the loader does not do
 
-Не деквантует, не считает `W_hat`, не открывает safetensors, не пишет в `.chr`, не делает `mmap` на запись, не кэширует блобы между вызовами, не умеет `int4`/`vq` материализовать (парсит слот и отклоняет), не выбирает `stream` и не аллоцирует ничего на токене.
+It does not dequant, does not compute `W_hat`, does not open safetensors, does not write `.chr`, does not mmap for write, does not cache blobs across calls, cannot materialize `int4`/`vq` (parses the slot and rejects), does not pick a `stream`, and does not allocate anything on a token.

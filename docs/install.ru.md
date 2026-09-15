@@ -17,7 +17,11 @@ Ada (RTX 40xx, `sm_89`) и A100 (`sm_80`) могут генерировать, �
 
 Справка CLI (`-h`) на английском; ниже она вставлена как есть. После
 `pip install -e .` команды `deepfold` и `python -m gpu.cli` — одно и то же.
-Если `deepfold` ещё не на PATH, подставьте `python -m gpu.cli`.
+Если `deepfold` ещё не на PATH, подставьте `python -m gpu.cli`. Авторский
+conda env `torch-gpu` **не** ставит команду `deepfold` (сломанное колесо там
+убивает ядро); в этой среде всегда `python -m gpu.cli`. На соседнем ПК —
+`scripts/setup.ps1`, затем `.\.venv\Scripts\Activate.ps1`. Без активации:
+`.\.venv\Scripts\deepfold.exe`.
 
 ---
 
@@ -288,8 +292,9 @@ deepfold pull meta-llama/Llama-3.1-8B-Instruct
 ### `chat` — разговор в терминале
 
 Нужен настоящий TTY (окно PowerShell / терминал Linux, не редирект).
-Веса грузятся один раз. Каждый ваш ход заново прогоняет **всю** историю
-(KV между ходами не копится — так задумано в v1).
+Веса грузятся один раз. Каждый ход заново префиллит **всю** историю из JSON
+в `$DEEPFOLD_HOME/chats` (KV между ходами не копится). У `chat` по умолчанию
+256 новых токенов и `--max-seq 2048` (`run` остаётся 64 / 512).
 
 ```text
 deepfold chat -h
@@ -301,9 +306,7 @@ usage: deepfold chat [-h] [--model MODEL] [--chr CHR] [--codec {auto,nf4,vq}]
                      [--max-seq MAX_SEQ] [--max-resident-mib MAX_RESIDENT_MIB]
                      [--raw] [--no-warmup] [--no-compress] [--quiet] [--debug]
 
-Same load path as run, then a prompt_toolkit session. Enter sends, Ctrl+J new
-line. Each turn prefills the whole chat. Needs a TTY; scripts use run
---prompt.
+Same load path as run, then a prompt_toolkit session. Enter sends, Ctrl+J newline, Ctrl+C stops a reply. Each turn prefills the whole chat. Needs a TTY; scripts use run --prompt.
 
 options:
   -h, --help            show this help message and exit
@@ -314,8 +317,8 @@ options:
                         --codec vq is oracle-only
   --chr-bin CHR_BIN     path to the Go chr binary
   --max-new-tokens MAX_NEW_TOKENS
-                        tokens to generate per turn (default: 64)
-  --max-seq MAX_SEQ     preallocated KV length
+                        tokens to generate per turn (default: 256)
+  --max-seq MAX_SEQ     preallocated KV length (default: 2048)
   --max-resident-mib MAX_RESIDENT_MIB
                         HBM cap for NF4 weights in MiB; overflow streams the
                         rest (H2). Default: fully resident if NF4 fits, else
@@ -330,13 +333,19 @@ options:
   --debug               traceback after the report
 ```
 
-`--max-seq` по умолчанию 512.
+`--max-seq` у `chat` по умолчанию 2048.
 
 ```text
 deepfold chat --model D:\weights\Qwen2.5-3B-Instruct
 deepfold chat --model D:\weights\Qwen2.5-3B-Instruct --chr D:\weights\qwen25-3b.nf4.chr --max-new-tokens 128
 deepfold chat --model D:\weights\Qwen2.5-3B-Instruct --max-seq 1024 --no-warmup
+deepfold chat --model D:\weights\Qwen2.5-14B-Instruct --agent --workspace C:\dev\deep-fold
 ```
+
+`--agent` (или `/agent on`) даёт модели список/чтение/запись файлов в
+`--workspace` (по умолчанию текущий каталог) и pytest по пути внутри него.
+Запись и тесты спрашивают `allow this tool? [y/N]`. Произвольного shell нет.
+Для JSON инструментов лучше 14B, чем 3B. `--agent` не сочетается с `--raw`.
 
 Внутри сессии:
 
@@ -344,14 +353,22 @@ deepfold chat --model D:\weights\Qwen2.5-3B-Instruct --max-seq 1024 --no-warmup
 |---|---|
 | Enter | отправить реплику |
 | Ctrl+J | новая строка в том же сообщении |
+| Ctrl+C | остановить ответ; на пустом промпте дважды — выход |
 | `/help` | шпаргалка |
+| `/stats` | prefill ms, tok/s и причина стопа |
 | `/clear` | сбросить историю |
-| `/stats` | prefill ms и tok/s последнего хода |
+| `/new` | новый сохранённый чат |
+| `/chats` | выбрать сохранённый чат |
+| `/copy` | скопировать последний ответ (`/copy all` — весь чат) |
+| `/save [path]` | записать последний ответ в файл |
+| `/agent on` `/agent off` | инструменты в workspace |
 | `/quit` или `/exit` | выйти |
 | любая другая `/foo` | отказ, в модель не идёт |
 
 Нужен extra `prompt_toolkit` (`deepfold[chat]`, скрипт setup ставит).
 Если запустить не из TTY — код 1 и совет `run --prompt`.
+Ответы рисуют markdown (жирный, списки, ограды) и переводят LaTeX `$...$` /
+`$$` в Unicode. `/copy` по-прежнему берёт сырой текст модели.
 
 ### `run` — один промпт или простой REPL
 
@@ -507,7 +524,7 @@ deepfold from-ollama qwen2.5:3b --hf Qwen/Qwen2.5-3B-Instruct --yes --dir D:\wei
 | `DEEPFOLD_MODEL` | папка HuggingFace по умолчанию для `run` / `chat` |
 | `DEEPFOLD_CHR` | файл `.chr`, если он есть и заголовок совпадает с моделью |
 | `DEEPFOLD_MODELS` | корень деревьев для `pull` и лаборатории |
-| `DEEPFOLD_HOME` | кэш (`%LOCALAPPDATA%\deepfold` / `~/.cache/deepfold`) |
+| `DEEPFOLD_HOME` | кэш (`%LOCALAPPDATA%\deepfold` / `~/.cache/deepfold`); чаты в `chats/` |
 | `DEEPFOLD_CHR_BIN` | `chr` / `chr.exe` |
 | `DEEPFOLD_RUNS` | дампы лабораторных прогонов |
 | `DEEPFOLD_COPY_JOIN` | `1`/`0` — CPU join H2D (Windows по умолчанию да, Linux нет) |
@@ -538,6 +555,7 @@ deepfold chat --model "$DEEPFOLD_MODEL"
 | `doctor` код 3 на Ada | баг старого контракта; после K4 так быть не должно |
 | `chat` «needs a TTY» | запуск из пайпа / IDE без TTY; возьмите окно терминала или `run --prompt` |
 | `chat` просит prompt_toolkit | `pip install "deepfold[chat]"` |
+| `deepfold` не является командой | Activate `.venv`, или `.\.venv\Scripts\deepfold.exe`, или `python -m gpu.cli`. conda `torch-gpu` команду не ставит. Пикер чатов: `--new`. |
 | `pull` unknown id | только четыре строки таблицы выше |
 | CUDA OOM | закройте другие GPU-программы; 32B — overflow, не 3B |
 | первый запуск минута+ | JIT fatbinary на соседней карте, один раз |

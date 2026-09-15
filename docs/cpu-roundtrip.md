@@ -1,59 +1,59 @@
-# CPU-проверка сжатия (без GPU)
+# CPU check of compression (no GPU)
 
-Утилита `chr`: safetensors → `.chr` → разжать / сравнить с оригиналом. Видеопамять не нужна. Модель в репозиторий не кладётся.
+The `chr` utility: safetensors → `.chr` → decompress / compare to original. Video memory is not needed. The model is not placed in the repository.
 
-## Собрать и тесты
+## Build and tests
 
 ```bash
 go test ./...
 go build -o chr ./cmd/chr
 ```
 
-Тесты сами пишут крошечные safetensors. Веса LLM не качаются.
+The tests themselves write tiny safetensors. LLM weights are not downloaded.
 
-## После скачивания модели
+## After downloading a model
 
-`$MODEL` — каталог с `model.safetensors` или `model.safetensors.index.json`.
+`$MODEL` is a directory with `model.safetensors` or `model.safetensors.index.json`.
 
-На **Windows** облачный агент диск не видит. 3B (~6,2 ГБ) качается у тебя:
+On **Windows** a cloud agent does not see the disk. 3B (~6.2 GB) is downloaded on your machine:
 
 ```powershell
-# PowerShell, не Downloads
+# PowerShell, not Downloads
 python -m pip install -U huggingface_hub
 hf download Qwen/Qwen2.5-3B-Instruct --local-dir C:\dev\models\Qwen2.5-3B-Instruct
 ```
 
-Или скрипт из репо: `scripts\download-qwen25-3b.ps1`.
+Or the script from the repo: `scripts\download-qwen25-3b.ps1`.
 
-Пороги ниже **не** дефолт бинаря: они для живых весов. Unit-тесты гоняют более жёсткие числа.
+The thresholds below are **not** the binary defaults: they are for live weights. Unit tests run stricter numbers.
 
 ```bash
-# NF4, группа 64, без калибровки
+# NF4, group 64, no calibration
 ./chr compress --in "$MODEL" --out llama8b.nf4.chr --codec nf4 --quiet
 ./chr verify  --orig "$MODEL" --chr llama8b.nf4.chr \
     --fail-rmse 0.12 --fail-maxabs 2.0 --json > llama8b.nf4.verify.json
 
-# Книжка 2×8 (residual k-means, seed 0). На 8B это уже минуты–десятки минут на CPU.
+# Codebook 2×8 (residual k-means, seed 0). On 8B this is already minutes–tens of minutes on CPU.
 ./chr compress --in "$MODEL" --out llama8b.vq2.chr --codec vq --seed 0 --iters 20 --chunk 262144
 ./chr verify  --orig "$MODEL" --chr llama8b.vq2.chr \
     --fail-rmse 0.50 --fail-maxabs 8.0 --json > llama8b.vq2.verify.json
 ```
 
-`PASS` / код 0 значит: контейнер целый, нормы bit-exact, lossy не взорвался. Это **не** WikiText и не чат.
+`PASS` / exit 0 means: the container is intact, norms are bit-exact, lossy did not explode. This is **not** WikiText and not chat.
 
-Полный F32 dump (`chr decode`) для 8B ≈ 32 ГБ — для приёмки не нужен.
+A full F32 dump (`chr decode`) for 8B ≈ 32 GB — not needed for acceptance.
 
-Пик RAM: один тензор в float32. `lm_head` / `embed` 8B ≈ 2 ГБ F32 плюс packed выход. На 32B `lm_head` ещё больше; если не влезет — скажи, допишем полосы (в спеке они уже описаны, в этом срезе unit их не гоняет).
+Peak RAM: one tensor in float32. `lm_head` / `embed` 8B ≈ 2 GB F32 plus packed output. On 32B `lm_head` is even larger; if it does not fit — say so, we will add stripes (they are already described in the spec; this slice’s units do not run them).
 
-## Что внутри
+## What is inside
 
-| Команда | Смысл |
+| Command | Meaning |
 |---|---|
-| `compress --codec nf4` | QLoRA NF4, группа 64 |
-| `compress --codec vq` | две книги 256×8, 2 бит/вес |
-| `decode` | один safetensors, **F32** |
-| `verify` | orig vs `.chr`, тензор за тензором |
+| `compress --codec nf4` | QLoRA NF4, group 64 |
+| `compress --codec vq` | two 256×8 codebooks, 2 bit/weight |
+| `decode` | one safetensors, **F32** |
+| `verify` | orig vs `.chr`, tensor by tensor |
 
-`inv_freq` / rotary не пишутся в `.chr` (это не веса GEMM). Нормы и bias — сырой BF16.
+`inv_freq` / rotary are not written into `.chr` (they are not GEMM weights). Norms and bias — raw BF16.
 
-Спеки: [docs/spec/](spec/). Стыки: [spec/stitch.md](spec/stitch.md).
+Specs: [docs/spec/](spec/). Seams: [spec/stitch.md](spec/stitch.md).

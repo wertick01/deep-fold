@@ -11,11 +11,11 @@ Measured tok/s from the author’s RTX 3080 **do not transfer**. Ada (RTX 40xx,
 `sm_89`) and A100 (`sm_80`) may generate; `doctor` will say `experimental`.
 Turing, Hopper, Blackwell, AMD, and macOS generate are refused.
 
-Deepfold does **not** install the NVIDIA driver, Python, or a CUDA
-compiler. If `chr` is missing, setup downloads a portable Go 1.22
-toolchain from go.dev into `$DEEPFOLD_HOME/toolchains` (not a system-wide
-install) and builds `chr`. A red `doctor` is a normal install refusal, not a
-kernel bug.
+Deepfold does **not** install the NVIDIA driver or Python.
+If `chr` is missing, setup downloads a portable Go 1.22 toolchain from go.dev.
+If the NF4 kernel is missing on Windows, setup uses winget to install Visual
+Studio 2022 Build Tools (C++) and CUDA Toolkit 12.4 when needed, then compiles
+`gpu/nf4`. A red `doctor` is a normal install refusal, not a kernel bug.
 
 After `pip install -e .`, `deepfold` and `python -m gpu.cli` are the same.
 If `deepfold` is not on PATH yet, use `python -m gpu.cli`. The author’s
@@ -62,8 +62,9 @@ card may JIT the CUDA kernel (~1 min). Do not promise 3080 tok/s.
 | NVIDIA driver (Ampere or Ada) | GPU | `nvidia-smi` prints the card name |
 | Python 3.11 or 3.12 | runtime | Windows: `py -3.11 --version`; Linux: `python3 --version` |
 | Go 1.22+ (optional) | `chr` compressor; setup fetches this from go.dev if missing | `go version`, or skip — `scripts/setup.*` / `deepfold setup` |
-| Windows: MSVC Build Tools | JIT if there is no prebuilt `.pyd` | `cl` after `vcvars64.bat` |
-| Linux: `g++` and `nvcc` | JIT fatbinary (~1 min first run) | `nvcc --version` |
+| Windows: MSVC Build Tools | compile NF4 kernel; setup winget-installs if missing | `cl` after `vcvars64.bat` |
+| CUDA Toolkit 12.4 (`nvcc`) | compile `.cu`; setup winget-installs if missing | `nvcc --version`, or skip if a matching `.pyd` is already in `gpu/nf4` |
+| Linux: `g++` | compile NF4 kernel (setup does not sudo apt) | `g++ --version` |
 | Disk | 3B ≈ 6 GB BF16, then a `.chr` | 3B is enough for smoke |
 
 Do not use conda env `torch-gpu` on a neighbor box: that is the author’s lab
@@ -75,7 +76,10 @@ interpreter. Neighbors get a repo-local `.venv`.
 
 The script creates `.venv`, installs **CUDA** torch from the `cu124` index
 (default PyPI is usually a CPU wheel), `deepfold[hub,chat]`, builds `chr`
-(PATH Go 1.22+ or a portable Go 1.22 zip from go.dev), then runs `doctor`.
+(PATH Go 1.22+ or a portable Go 1.22 zip from go.dev), installs VS Build Tools
+and CUDA 12.4 via winget if `cl`/`nvcc` are missing, compiles `gpu/nf4`, then
+runs `doctor`. Winget may prompt UAC; an Administrator PowerShell is the
+reliable path for those two installers.
 
 **Windows (PowerShell):**
 
@@ -555,7 +559,7 @@ deepfold chat --model "$DEEPFOLD_MODEL"
 |---|---|
 | `doctor` exit 2, torch cpu | PyPI wheel; need the cu124 index as in `scripts/setup.*` |
 | `doctor` exit 2, no chr | Re-run `deepfold setup` or `python -m gpu.cli.go_toolchain` (needs network to go.dev). Or `go build -o chr.exe ./cmd/chr` |
-| `doctor` exit 2, no kernel | no `.pyd`/`.so` and no `cl`/`g++`+`nvcc` for JIT |
+| `doctor` exit 2, no kernel | Re-run `deepfold setup --kernel-only` (winget VS Build Tools + CUDA 12.4). Or copy a matching `gpu/nf4/chr_nf4_ext*.pyd` |
 | `doctor` exit 3 on Ada | old contract bug; after K4 this must not happen |
 | `chat` “needs a TTY” | pipe / IDE without a TTY; use a terminal window or `run --prompt` |
 | `chat` asks for prompt_toolkit | `pip install "deepfold[chat]"` |

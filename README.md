@@ -200,10 +200,10 @@ Prerequisites:
 
 - Python 3.11 or 3.12 and Git. Go 1.22+ is optional: if `chr` is missing, setup downloads a portable Go 1.22 toolchain from go.dev into `$DEEPFOLD_HOME/toolchains`.
 - An NVIDIA driver and a GPU accepted by `doctor`.
-- For CUDA compilation: a compatible CUDA Toolkit with `nvcc`, MSVC Build Tools on Windows or `g++` on Linux, and Ninja.
+- For CUDA compilation: a compatible CUDA Toolkit with `nvcc`, MSVC Build Tools on Windows or `g++` on Linux, and Ninja. On Windows `scripts/setup.ps1` winget-installs Build Tools and CUDA 12.4 if they are missing.
 - Disk space for the source safetensors plus the packed `.chr`; host memory sufficient for compression and any overflow tail.
 
-The scripts do not install the NVIDIA driver, CUDA Toolkit, or host compiler. When no prebuilt NF4 extension is present, `doctor` fails unless both the host compiler and `nvcc` are available (`PATH`, or `CUDA_HOME` / `CUDA_PATH`). Setup success is not a completed generation test.
+The scripts do not install the NVIDIA driver. When no prebuilt NF4 extension is present, setup compiles `gpu/nf4` after `cl.exe` and `nvcc` are available. Setup success is not a completed generation test.
 
 ### Windows / PowerShell
 

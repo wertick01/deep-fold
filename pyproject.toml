@@ -10,8 +10,9 @@
 #
 #   pip install torch --index-url https://download.pytorch.org/whl/cu124
 #
-# We do not install the NVIDIA driver, CUDA, Visual Studio Build Tools or Go.
-# `chr` is the Go compressor: `go build -o chr.exe ./cmd/chr`.
+# We do not install the NVIDIA driver. Missing `chr` is built with a portable
+# Go from go.dev. Missing NF4 kernel: Windows setup uses winget for VS 2022
+# Build Tools (C++) and CUDA 12.4, then compiles `gpu/nf4`.
 
 [build-system]
 requires = ["setuptools>=68"]

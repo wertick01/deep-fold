@@ -2,6 +2,7 @@
 # Neighbor install (Linux). Creates repo-local .venv with CUDA torch.
 # Does not install the NVIDIA driver. No published Linux tok/s.
 # If chr is missing, Python fetches portable Go 1.22 from go.dev.
+# Compiles gpu/nf4 when g++ and nvcc are already on PATH (no sudo apt).
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -20,8 +21,10 @@ echo "Using $VENV_PY"
 "$VENV_PY" -m pip install --upgrade pip
 "$VENV_PY" -m pip install torch --index-url "$TORCH_INDEX"
 "$VENV_PY" -m pip install -e ".[hub,chat]"
+"$VENV_PY" -m pip install ninja
 
 "$VENV_PY" -m gpu.cli setup --chr-only
+"$VENV_PY" -m gpu.cli setup --kernel-only
 
 "$VENV_PY" -m gpu.cli doctor
 echo

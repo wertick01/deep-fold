@@ -127,10 +127,11 @@ Ada / A100 must be **0** (or **2** if the install is broken), with
 `generate: experimental`. Hopper, Turing, macOS generate remain **3**.
 JIT of the fatbinary on a neighbor box takes about a minute the first time.
 
-`pip install -e .` compiles no CUDA: the kernel is a prebuilt sidecar or a JIT
-that doctor announces first. We do **not** install the NVIDIA driver, CUDA,
-or Visual Studio Build Tools. Missing `chr` is filled by a portable Go 1.22
-from go.dev (`$DEEPFOLD_HOME/toolchains`). The default PyPI `torch` is usually the
+`pip install -e .` compiles no CUDA: the kernel is a prebuilt sidecar or a
+compile during `setup --kernel-only`. We do **not** install the NVIDIA driver.
+Missing `chr` is filled by a portable Go 1.22 from go.dev. Missing `cl.exe` /
+`nvcc` on Windows: setup winget-installs VS 2022 Build Tools (C++) and CUDA
+12.4, then compiles `gpu/nf4`. The default PyPI `torch` is usually the
 CPU wheel — doctor catches that and prints the CUDA 12.4 index URL. A red
 doctor is the installer working, not a product bug.
 
@@ -147,9 +148,10 @@ machine to run. Linux doctor can see a `.so`; there is **no published Linux
 generate tok/s**.
 
 A single `pip install` that also drops CUDA, Visual Studio, and Go is not
-promised. “Two clicks, all OS” is a lie: click 1 is this package plus
-`doctor`; the driver, CUDA torch, compiler, Go, and the HF tree are
-user-provided. Ada generate is a fatbinary, not a second plate.
+promised. “Two clicks, all OS” is a lie: click 1 is `scripts/setup.ps1`
+(`doctor`, portable Go, and on Windows winget for Build Tools + CUDA 12.4 if
+the kernel is missing). The NVIDIA driver and the HF tree stay user-provided.
+Ada generate is a fatbinary, not a second plate.
 
 ## Not in this repo
 

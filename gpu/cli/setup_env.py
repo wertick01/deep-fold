@@ -12,6 +12,7 @@ from argparse import Namespace
 
 from . import messages
 from .go_toolchain import GoToolchainError, ensure_chr
+from .kernel_build import KernelBuildError, ensure_kernel
 from .paths import REPO, find_chr_bin
 
 __all__ = ["TORCH_INDEX", "plan_lines", "prefix_is_protected", "setup"]
@@ -34,7 +35,9 @@ def plan_lines(*, python: str | None = None) -> list[str]:
     return [
         f"{py} -m pip install torch --index-url {TORCH_INDEX}",
         f'{py} -m pip install -e ".[hub,chat]"',
+        f"{py} -m pip install ninja",
         f"{py} -m gpu.cli setup --chr-only",
+        f"{py} -m gpu.cli setup --kernel-only",
         f"{py} -m gpu.cli doctor",
     ]
 
@@ -54,6 +57,21 @@ def setup(args: Namespace) -> int:
             print(ensure_chr())
             return 0
         except GoToolchainError as exc:
+            _err(f"setup: {exc}")
+            return 1
+
+    if bool(getattr(args, "kernel_only", False)):
+        if dry:
+            print(f"{sys.executable} -m gpu.cli setup --kernel-only")
+            return 0
+        try:
+            print(
+                ensure_kernel(
+                    install=not bool(getattr(args, "no_install_tools", False))
+                )
+            )
+            return 0
+        except KernelBuildError as exc:
             _err(f"setup: {exc}")
             return 1
 
@@ -85,12 +103,23 @@ def setup(args: Namespace) -> int:
         _err("setup: pip install -e \".[hub,chat]\" failed")
         return code
 
+    code = _run([py, "-m", "pip", "install", "ninja"])
+    if code != 0:
+        _err("setup: pip install ninja failed")
+        return code
+
     if find_chr_bin(getattr(args, "chr_bin", None)) is None:
         try:
             ensure_chr()
         except GoToolchainError as exc:
             _err(f"setup: {exc}")
             return 1
+
+    try:
+        ensure_kernel(install=not bool(getattr(args, "no_install_tools", False)))
+    except KernelBuildError as exc:
+        _err(f"setup: {exc}")
+        return 1
 
     from . import doctor as doctor_mod
 

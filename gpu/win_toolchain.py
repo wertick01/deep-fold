@@ -40,6 +40,12 @@ _KEEP = {
 _injected = False
 
 
+def reset_msvc_injection() -> None:
+    """After a Build Tools install, dump vcvars again."""
+    global _injected
+    _injected = False
+
+
 def which_cl() -> str | None:
     return shutil.which("cl")
 

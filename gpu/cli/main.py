@@ -252,7 +252,9 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Catch-up inside an existing venv. Refuses conda env torch-gpu. "
             "A neighbor PC should run scripts/setup.ps1 or scripts/setup.sh first. "
-            "If chr is missing, fetches portable Go 1.22 from go.dev and builds it."
+            "If chr is missing, fetches portable Go 1.22 from go.dev and builds it. "
+            "If the NF4 kernel is missing, installs VS Build Tools + CUDA 12.4 "
+            "via winget when needed and compiles gpu/nf4."
         ),
     )
     boot.add_argument("--chr-bin", help="path to the Go chr binary")
@@ -260,6 +262,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--chr-only",
         action="store_true",
         help="build chr (fetch portable Go if needed); do not pip install",
+    )
+    boot.add_argument(
+        "--kernel-only",
+        action="store_true",
+        help="build gpu/nf4 (install VS Build Tools + CUDA 12.4 on Windows if needed)",
+    )
+    boot.add_argument(
+        "--no-install-tools",
+        action="store_true",
+        help="do not winget-install VS Build Tools or CUDA Toolkit",
     )
     boot.add_argument(
         "--dry-run",

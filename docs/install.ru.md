@@ -12,9 +12,10 @@ Ada (RTX 40xx, `sm_89`) и A100 (`sm_80`) могут генерировать, �
 напишет `experimental`. Turing, Hopper, Blackwell, AMD и macOS для generate
 не подходят.
 
-Программа **не ставит** драйвер NVIDIA, Python и компилятор CUDA.
-Если нет `chr`, setup скачивает переносной Go 1.22 с go.dev в
-`$DEEPFOLD_HOME/toolchains` (не системная установка) и собирает компрессор.
+Программа **не ставит** драйвер NVIDIA и Python.
+Если нет `chr`, setup скачивает переносной Go 1.22 с go.dev.
+Если нет ядра NF4, на Windows setup через winget ставит Visual Studio 2022
+Build Tools (C++) и CUDA Toolkit 12.4 и компилирует `gpu/nf4`.
 Красный `doctor` — нормальный отказ установки, не баг ядра.
 
 Справка CLI (`-h`) на английском; ниже она вставлена как есть. После
@@ -61,8 +62,9 @@ source .venv/bin/activate
 | Драйвер NVIDIA (Ampere или Ada) | GPU | `nvidia-smi` печатает имя карты |
 | Python 3.11 или 3.12 | рантайм | Windows: `py -3.11 --version`; Linux: `python3 --version` |
 | Go 1.22+ (необязательно) | компрессор `chr`; setup сам скачает с go.dev, если его нет | `go version`, либо пропустить — `scripts/setup.*` / `deepfold setup` |
-| Windows: MSVC Build Tools | JIT ядра, если нет готового `.pyd` | `cl` после `vcvars64.bat` |
-| Linux: `g++` и `nvcc` | JIT fatbinary (~1 мин при первом запуске) | `nvcc --version` |
+| Windows: MSVC Build Tools | сборка ядра NF4; setup поставит через winget, если нет | `cl` после `vcvars64.bat` |
+| CUDA Toolkit 12.4 (`nvcc`) | компиляция `.cu`; setup поставит через winget, если нет | `nvcc --version`, либо готовый `.pyd` в `gpu/nf4` |
+| Linux: `g++` | сборка ядра (setup не делает sudo apt) | `g++ --version` |
 | Место на диске | 3B ≈ 6 ГБ BF16 + потом `.chr` | для дыма хватит 3B |
 
 Не используйте conda-окружение `torch-gpu` на чужой машине: оно лабораторное.
@@ -74,7 +76,10 @@ source .venv/bin/activate
 
 Скрипт создаёт `.venv`, ставит **CUDA**-torch с индекса `cu124` (не обычный
 PyPI: там чаще CPU-колесо), пакет `deepfold[hub,chat]`, собирает `chr`
-(Go 1.22+ с PATH или переносной Go 1.22 с go.dev) и вызывает `doctor`.
+(Go 1.22+ с PATH или переносной Go 1.22 с go.dev), при отсутствии `cl`/`nvcc`
+ставит VS Build Tools и CUDA 12.4 через winget, собирает `gpu/nf4` и вызывает
+`doctor`. Winget может показать UAC; для этих двух установщиков надёжнее
+PowerShell от администратора.
 
 **Windows (PowerShell):**
 
@@ -553,7 +558,7 @@ deepfold chat --model "$DEEPFOLD_MODEL"
 |---|---|
 | `doctor` код 2, torch cpu | колесо с PyPI; нужен индекс cu124, как в `scripts/setup.*` |
 | `doctor` код 2, нет chr | Снова `deepfold setup` или `python -m gpu.cli.go_toolchain` (нужен доступ к go.dev). Либо `go build -o chr.exe ./cmd/chr` |
-| `doctor` код 2, нет ядра | нет `.pyd`/`.so` и нет `cl`/`g++`+`nvcc` для JIT |
+| `doctor` код 2, нет ядра | Снова `deepfold setup --kernel-only` (winget VS Build Tools + CUDA 12.4). Либо скопировать подходящий `gpu/nf4/chr_nf4_ext*.pyd` |
 | `doctor` код 3 на Ada | баг старого контракта; после K4 так быть не должно |
 | `chat` «needs a TTY» | запуск из пайпа / IDE без TTY; возьмите окно терминала или `run --prompt` |
 | `chat` просит prompt_toolkit | `pip install "deepfold[chat]"` |

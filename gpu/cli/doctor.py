@@ -123,24 +123,15 @@ def _find_cli_script() -> str | None:
 
 
 def _find_nvcc() -> str | None:
-    """``nvcc`` on PATH, or ``CUDA_HOME`` / ``CUDA_PATH`` ``bin/nvcc`` (.exe on NT).
+    """``nvcc`` on PATH, ``CUDA_HOME`` / ``CUDA_PATH``, or the default toolkit tree.
 
     A host C++ compiler alone cannot JIT the NF4 kernel. ``setup.py`` still
     shells ``nvcc`` for the ``.cu`` translation unit on every OS, including
     Windows (``cl.exe`` only compiles the host side).
     """
-    found = shutil.which("nvcc")
-    if found:
-        return found
-    name = "nvcc.exe" if os.name == "nt" else "nvcc"
-    for env in ("CUDA_HOME", "CUDA_PATH"):
-        root = os.environ.get(env)
-        if not root:
-            continue
-        candidate = Path(root) / "bin" / name
-        if candidate.is_file():
-            return str(candidate)
-    return None
+    from gpu.cuda_env import find_nvcc
+
+    return find_nvcc()
 
 
 def _host_compiler(*, inject: bool) -> str | None:

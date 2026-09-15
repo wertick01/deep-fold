@@ -141,12 +141,17 @@ Need a HuggingFace directory (config.json + tokenizer) plus a .chr.
 The .chr is weights only; it is not a full model file."""
 
 NO_COMPILER = """\
-NF4 kernel is not built. Install Visual Studio Build Tools (C++), or
+NF4 kernel is not built. Run deepfold setup --kernel-only (winget-installs
+Visual Studio 2022 Build Tools (C++) and CUDA Toolkit 12.4 if missing), or
 build gpu/nf4 with vcvars64.bat. Jupyter is not required."""
 
 NO_COMPILER_POSIX = """\
 NF4 kernel is not built. Install the CUDA toolkit (nvcc) and a C++ compiler
-(g++), or build it in place:
+(g++), then:
+
+  python -m gpu.cli setup --kernel-only
+
+or:
 
   python gpu/nf4/setup.py build_ext --inplace"""
 

@@ -46,6 +46,7 @@ if str(_REPO) not in sys.path:
 from gpu.cli import chat as chat_mod  # noqa: E402
 from gpu.cli import from_ollama as from_ollama_mod  # noqa: E402
 from gpu.cli import go_toolchain as go_tc  # noqa: E402
+from gpu.cli import kernel_build as kb  # noqa: E402
 from gpu.cli import hub as hub_mod  # noqa: E402
 from gpu.cli import messages, paths, run as run_mod  # noqa: E402
 from gpu.cli import selftest as selftest_mod  # noqa: E402
@@ -1183,6 +1184,8 @@ def test_parser_k5_commands() -> None:
     assert setup.dry_run is True
     chr_only = build_parser().parse_args(["setup", "--chr-only"])
     assert chr_only.chr_only is True
+    kernel_only = build_parser().parse_args(["setup", "--kernel-only"])
+    assert kernel_only.kernel_only is True
     live = build_parser().parse_args(["test", "--live"])
     assert live.live is True
 
@@ -1527,6 +1530,8 @@ def test_setup_dry_run_does_not_pip() -> None:
     assert "torch" in text and "download.pytorch.org/whl/cu124" in text
     assert '".[hub,chat]"' in text or ".[hub,chat]" in text
     assert "setup --chr-only" in text
+    assert "setup --kernel-only" in text
+    assert "ninja" in text
 
 
 def test_setup_refuses_torch_gpu_without_pip() -> None:
@@ -1701,6 +1706,7 @@ def test_setup_calls_ensure_chr_when_missing() -> None:
     orig_run = setup_mod._run
     orig_find = setup_mod.find_chr_bin
     orig_ensure = setup_mod.ensure_chr
+    orig_kernel = setup_mod.ensure_kernel
     orig_doc = doctor_mod.doctor
     orig_prot = setup_mod.prefix_is_protected
     try:
@@ -1708,6 +1714,7 @@ def test_setup_calls_ensure_chr_when_missing() -> None:
         setup_mod._run = lambda *a, **k: pip_cmds.append((a, k)) or 0  # type: ignore[assignment]
         setup_mod.find_chr_bin = lambda explicit=None: None  # type: ignore[assignment]
         setup_mod.ensure_chr = lambda: ensured.append(1) or Path("chr")  # type: ignore[assignment]
+        setup_mod.ensure_kernel = lambda install=True: Path("ext")  # type: ignore[assignment]
         doctor_mod.doctor = lambda args: 0  # type: ignore[assignment]
         code = main(["setup"])
         assert code == 0
@@ -1717,6 +1724,7 @@ def test_setup_calls_ensure_chr_when_missing() -> None:
         setup_mod._run = orig_run  # type: ignore[assignment]
         setup_mod.find_chr_bin = orig_find  # type: ignore[assignment]
         setup_mod.ensure_chr = orig_ensure  # type: ignore[assignment]
+        setup_mod.ensure_kernel = orig_kernel  # type: ignore[assignment]
         doctor_mod.doctor = orig_doc  # type: ignore[assignment]
         setup_mod.prefix_is_protected = orig_prot  # type: ignore[assignment]
 
@@ -1754,6 +1762,140 @@ def test_setup_chr_only_skips_pip() -> None:
     finally:
         setup_mod._run = orig_run  # type: ignore[assignment]
         setup_mod.ensure_chr = orig_ensure  # type: ignore[assignment]
+
+
+def test_kernel_skips_when_usable_ext_exists() -> None:
+    installed: list[str] = []
+    compiled: list[int] = []
+    orig_ext = kb._existing_ext
+    orig_vs = kb._install_vs
+    orig_cuda = kb._install_cuda
+    orig_compile = kb._compile
+    try:
+        kb._existing_ext = lambda: (Path("gpu/nf4/chr_nf4_ext.pyd"), False, True)  # type: ignore[assignment]
+        kb._install_vs = lambda: installed.append("vs") or 0  # type: ignore[assignment]
+        kb._install_cuda = lambda: installed.append("cuda") or 0  # type: ignore[assignment]
+        kb._compile = lambda: compiled.append(1) or 0  # type: ignore[assignment]
+        path = kb.ensure_kernel(install=True)
+        assert path.name.endswith(".pyd") or path.name.endswith(".so") or "chr_nf4_ext" in path.name
+        assert installed == [] and compiled == []
+    finally:
+        kb._existing_ext = orig_ext  # type: ignore[assignment]
+        kb._install_vs = orig_vs  # type: ignore[assignment]
+        kb._install_cuda = orig_cuda  # type: ignore[assignment]
+        kb._compile = orig_compile  # type: ignore[assignment]
+
+
+def test_kernel_compiles_when_tools_present() -> None:
+    installed: list[str] = []
+    orig_ext = kb._existing_ext
+    orig_cc = kb._find_host_cc
+    orig_nvcc = kb._find_nvcc
+    orig_vs = kb._install_vs
+    orig_cuda = kb._install_cuda
+    orig_compile = kb._compile
+    calls = {"n": 0}
+
+    def existing() -> tuple[Path | None, bool, bool]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None, False, True
+        return Path("gpu/nf4/chr_nf4_ext.built"), False, True
+
+    try:
+        kb._existing_ext = existing  # type: ignore[assignment]
+        kb._find_host_cc = lambda: "cl.exe"  # type: ignore[assignment]
+        kb._find_nvcc = lambda: "nvcc.exe"  # type: ignore[assignment]
+        kb._install_vs = lambda: installed.append("vs") or 0  # type: ignore[assignment]
+        kb._install_cuda = lambda: installed.append("cuda") or 0  # type: ignore[assignment]
+        kb._compile = lambda: 0  # type: ignore[assignment]
+        path = kb.ensure_kernel(install=True)
+        assert path.name.endswith(".built")
+        assert installed == []
+    finally:
+        kb._existing_ext = orig_ext  # type: ignore[assignment]
+        kb._find_host_cc = orig_cc  # type: ignore[assignment]
+        kb._find_nvcc = orig_nvcc  # type: ignore[assignment]
+        kb._install_vs = orig_vs  # type: ignore[assignment]
+        kb._install_cuda = orig_cuda  # type: ignore[assignment]
+        kb._compile = orig_compile  # type: ignore[assignment]
+
+
+def test_kernel_installs_tools_when_missing() -> None:
+    if os.name != "nt":
+        return
+    installed: list[str] = []
+    orig_ext = kb._existing_ext
+    orig_cc = kb._find_host_cc
+    orig_nvcc = kb._find_nvcc
+    orig_vs = kb._install_vs
+    orig_cuda = kb._install_cuda
+    orig_compile = kb._compile
+    host_hits = {"n": 0}
+    nvcc_hits = {"n": 0}
+    ext_hits = {"n": 0}
+
+    def existing() -> tuple[Path | None, bool, bool]:
+        ext_hits["n"] += 1
+        if ext_hits["n"] == 1:
+            return None, False, True
+        return Path("gpu/nf4/chr_nf4_ext.ok"), False, True
+
+    def host() -> str | None:
+        host_hits["n"] += 1
+        return None if host_hits["n"] == 1 else "cl.exe"
+
+    def nvcc() -> str | None:
+        nvcc_hits["n"] += 1
+        return None if nvcc_hits["n"] == 1 else "nvcc.exe"
+
+    try:
+        kb._existing_ext = existing  # type: ignore[assignment]
+        kb._find_host_cc = host  # type: ignore[assignment]
+        kb._find_nvcc = nvcc  # type: ignore[assignment]
+        kb._install_vs = lambda: installed.append("vs") or 0  # type: ignore[assignment]
+        kb._install_cuda = lambda: installed.append("cuda") or 0  # type: ignore[assignment]
+        kb._compile = lambda: 0  # type: ignore[assignment]
+        path = kb.ensure_kernel(install=True)
+        assert "vs" in installed and "cuda" in installed
+        assert path.name.endswith(".ok")
+    finally:
+        kb._existing_ext = orig_ext  # type: ignore[assignment]
+        kb._find_host_cc = orig_cc  # type: ignore[assignment]
+        kb._find_nvcc = orig_nvcc  # type: ignore[assignment]
+        kb._install_vs = orig_vs  # type: ignore[assignment]
+        kb._install_cuda = orig_cuda  # type: ignore[assignment]
+        kb._compile = orig_compile  # type: ignore[assignment]
+
+
+def test_setup_kernel_only_skips_pip() -> None:
+    pip_cmds: list[object] = []
+    built: list[int] = []
+    orig_run = setup_mod._run
+    orig_kernel = setup_mod.ensure_kernel
+    try:
+        setup_mod._run = lambda *a, **k: pip_cmds.append((a, k)) or 0  # type: ignore[assignment]
+        setup_mod.ensure_kernel = lambda install=True: built.append(int(install)) or Path("ext")  # type: ignore[assignment]
+        err, out = io.StringIO(), io.StringIO()
+        with redirect_stderr(err), redirect_stdout(out):
+            code = main(["setup", "--kernel-only"])
+        assert code == 0, err.getvalue()
+        assert pip_cmds == []
+        assert built == [1]
+        assert "ext" in out.getvalue()
+    finally:
+        setup_mod._run = orig_run  # type: ignore[assignment]
+        setup_mod.ensure_kernel = orig_kernel  # type: ignore[assignment]
+
+
+def test_nvcc_rank_prefers_cuda_124() -> None:
+    from gpu.cuda_env import _nvcc_rank
+
+    a = Path("/cuda/v12.4/bin/nvcc")
+    b = Path("/cuda/v12.6/bin/nvcc")
+    c = Path("/cuda/v11.8/bin/nvcc")
+    assert _nvcc_rank(a) < _nvcc_rank(b)
+    assert _nvcc_rank(a) < _nvcc_rank(c)
 
 
 def test_pull_unknown_id_does_not_open_files() -> None:

@@ -1,6 +1,8 @@
 # Neighbor install (Windows). Creates repo-local .venv with CUDA torch.
 # Does not touch conda env torch-gpu. Does not install the NVIDIA driver.
 # If chr is missing, Python fetches portable Go 1.22 from go.dev (not MSI).
+# If the NF4 kernel is missing, winget-installs VS 2022 Build Tools (C++) and
+# CUDA Toolkit 12.4 when needed, then compiles gpu/nf4.
 #
 #   Set-ExecutionPolicy -Scope Process Bypass
 #   powershell -File scripts/setup.ps1
@@ -36,10 +38,16 @@ if ($LASTEXITCODE -ne 0) { throw "pip upgrade failed (exit $LASTEXITCODE)" }
 if ($LASTEXITCODE -ne 0) { throw "torch install failed (exit $LASTEXITCODE)" }
 & $VenvPy -m pip install -e ".[hub,chat]"
 if ($LASTEXITCODE -ne 0) { throw "deepfold extras install failed (exit $LASTEXITCODE)" }
+& $VenvPy -m pip install ninja
+if ($LASTEXITCODE -ne 0) { throw "ninja install failed (exit $LASTEXITCODE)" }
 
 Write-Host "Building chr (PATH Go 1.22+ or portable Go 1.22 from go.dev)"
 & $VenvPy -m gpu.cli setup --chr-only
 if ($LASTEXITCODE -ne 0) { throw "chr build failed (exit $LASTEXITCODE)" }
+
+Write-Host "NF4 kernel: VS Build Tools (C++) + CUDA 12.4 nvcc if missing, then compile"
+& $VenvPy -m gpu.cli setup --kernel-only
+if ($LASTEXITCODE -ne 0) { throw "nf4 kernel build failed (exit $LASTEXITCODE)" }
 
 & $VenvPy -m gpu.cli doctor
 if ($LASTEXITCODE -ne 0) {

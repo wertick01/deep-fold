@@ -73,29 +73,28 @@ def _find_nvcc() -> str | None:
 
 
 def _winget_install(args: list[str]) -> int:
+    """Install from the community ``winget`` source only.
+
+    Without ``--source winget``, App Installer also queries ``msstore``. A
+    broken Store certificate (``0x8a15005e``) aborts the whole search even
+    when the package is already listed under ``winget``.
+    """
     winget = _winget()
     if winget is None:
         raise KernelBuildError(
             "winget not found. Install VS 2022 Build Tools (C++ workload) and "
             "CUDA Toolkit 12.4 by hand, or install App Installer from Microsoft Store."
         )
-    cmd = [
-        winget,
-        "install",
-        *args,
+    common = [
+        "--source",
+        "winget",
         "--accept-package-agreements",
         "--accept-source-agreements",
-        "--disable-interactivity",
     ]
+    cmd = [winget, "install", *args, *common, "--disable-interactivity"]
     code = _run(cmd)
     if code != 0:
-        cmd = [
-            winget,
-            "install",
-            *args,
-            "--accept-package-agreements",
-            "--accept-source-agreements",
-        ]
+        cmd = [winget, "install", *args, *common]
         code = _run(cmd)
     return code
 

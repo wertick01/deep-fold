@@ -559,7 +559,7 @@ deepfold chat --model "$DEEPFOLD_MODEL"
 |---|---|
 | `doctor` exit 2, torch cpu | PyPI wheel; need the cu124 index as in `scripts/setup.*` |
 | `doctor` exit 2, no chr | Re-run `deepfold setup` or `python -m gpu.cli.go_toolchain` (needs network to go.dev). Or `go build -o chr.exe ./cmd/chr` |
-| `doctor` exit 2, no kernel | Re-run `deepfold setup --kernel-only` (winget VS Build Tools + CUDA 12.4). Or copy a matching `gpu/nf4/chr_nf4_ext*.pyd` |
+| `doctor` exit 2, no kernel | Re-run `deepfold setup --kernel-only` (winget VS Build Tools + CUDA 12.4, `--source winget` so a broken Microsoft Store cert cannot abort the search). Or copy a matching `gpu/nf4/chr_nf4_ext*.pyd` |
 | `doctor` exit 3 on Ada | old contract bug; after K4 this must not happen |
 | `chat` “needs a TTY” | pipe / IDE without a TTY; use a terminal window or `run --prompt` |
 | `chat` asks for prompt_toolkit | `pip install "deepfold[chat]"` |

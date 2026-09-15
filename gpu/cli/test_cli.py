@@ -1868,6 +1868,52 @@ def test_kernel_installs_tools_when_missing() -> None:
         kb._compile = orig_compile  # type: ignore[assignment]
 
 
+def test_winget_install_pins_community_source() -> None:
+    captured: list[list[str]] = []
+    orig_winget = kb._winget
+    orig_run = kb._run
+    try:
+        kb._winget = lambda: "winget.exe"  # type: ignore[assignment]
+        kb._run = lambda cmd, cwd=None: captured.append(list(cmd)) or 0  # type: ignore[assignment]
+        code = kb._winget_install(
+            ["--id", "Microsoft.VisualStudio.2022.BuildTools", "--exact"]
+        )
+        assert code == 0
+        assert captured
+        cmd = captured[0]
+        assert cmd[:2] == ["winget.exe", "install"]
+        src = cmd.index("--source")
+        assert cmd[src + 1] == "winget"
+        assert "msstore" not in cmd
+        assert "--disable-interactivity" in cmd
+    finally:
+        kb._winget = orig_winget  # type: ignore[assignment]
+        kb._run = orig_run  # type: ignore[assignment]
+
+
+def test_winget_install_retry_keeps_source() -> None:
+    captured: list[list[str]] = []
+    orig_winget = kb._winget
+    orig_run = kb._run
+
+    def run(cmd: list[str], cwd: str | None = None) -> int:
+        del cwd
+        captured.append(list(cmd))
+        return 1 if len(captured) == 1 else 0
+
+    try:
+        kb._winget = lambda: "winget.exe"  # type: ignore[assignment]
+        kb._run = run  # type: ignore[assignment]
+        assert kb._winget_install(["--id", "Nvidia.CUDA", "--exact"]) == 0
+        assert len(captured) == 2
+        assert captured[1].index("--source") + 1 < len(captured[1])
+        assert captured[1][captured[1].index("--source") + 1] == "winget"
+        assert "--disable-interactivity" not in captured[1]
+    finally:
+        kb._winget = orig_winget  # type: ignore[assignment]
+        kb._run = orig_run  # type: ignore[assignment]
+
+
 def test_setup_kernel_only_skips_pip() -> None:
     pip_cmds: list[object] = []
     built: list[int] = []

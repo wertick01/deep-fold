@@ -558,7 +558,7 @@ deepfold chat --model "$DEEPFOLD_MODEL"
 |---|---|
 | `doctor` код 2, torch cpu | колесо с PyPI; нужен индекс cu124, как в `scripts/setup.*` |
 | `doctor` код 2, нет chr | Снова `deepfold setup` или `python -m gpu.cli.go_toolchain` (нужен доступ к go.dev). Либо `go build -o chr.exe ./cmd/chr` |
-| `doctor` код 2, нет ядра | Снова `deepfold setup --kernel-only` (winget VS Build Tools + CUDA 12.4). Либо скопировать подходящий `gpu/nf4/chr_nf4_ext*.pyd` |
+| `doctor` код 2, нет ядра | Снова `deepfold setup --kernel-only` (winget VS Build Tools + CUDA 12.4, `--source winget`, чтобы сломанный сертификат Microsoft Store не рвал поиск). Либо скопировать подходящий `gpu/nf4/chr_nf4_ext*.pyd` |
 | `doctor` код 3 на Ada | баг старого контракта; после K4 так быть не должно |
 | `chat` «needs a TTY» | запуск из пайпа / IDE без TTY; возьмите окно терминала или `run --prompt` |
 | `chat` просит prompt_toolkit | `pip install "deepfold[chat]"` |

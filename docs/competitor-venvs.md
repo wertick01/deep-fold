@@ -1,4 +1,4 @@
-# Isolated competitor venvs (later, not now)
+# Isolated competitor venvs
 
 One stack, one interpreter, under `C:\dev\models\venvs\<stack>`. The live lab
 uses `C:\Users\Professional\anaconda3\envs\torch-gpu`. **Do not** `pip install`
@@ -14,10 +14,12 @@ Run the commands below only when:
 2. Disk can take a few more PyTorch trees.
 3. You want a real row, not another `SKIP:`.
 
-Until then, `python -m gpu.lab.competitor --detect` is the honest result:
-every e2e tok/s cell empty, every microbench `us` / `gb_s` / `tflop_s` /
-occupancy / tensor / DRAM / regs / smem cell empty.
+Until then, `python -m gpu.lab.competitor --detect` is the honest result
+for the **3B** CSV: every e2e tok/s cell empty, every microbench `us` /
+`gb_s` / `tflop_s` / occupancy / tensor / DRAM / regs / smem cell empty.
 
+32B llama.cpp Q4_K_M on this 3080 **is** measured:
+[`docs/eval-32b.md`](eval-32b.md), runner `python -m gpu.lab.llamacpp_h2`.
 CPU llama.cpp tok/s is **not** a GPU competitor. Do not fill `llamacpp-q4`
 from a CPU binary.
 
@@ -96,21 +98,23 @@ Artifact: an AWQ dump of the same model. `DEEPFOLD_AWQ` = that directory.
 
 ### `llamacpp-q4` (CUDA only)
 
-The default PyPI `llama-cpp-python` wheel is often **CPU**. That build is a
-skip. Force a CUDA-linked build:
+Do **not** fill this slot from `llama-cpp-python` on this Windows box: the
+wheel hits Long Paths and never becomes a GPU row. The live 32B measurement
+used the official ggml-org **Windows CUDA 12.4 zip** (b10964) plus bartowski
+`Qwen2.5-32B-Instruct-Q4_K_M.gguf`:
 
-```powershell
-$py = 'C:\dev\models\venvs\llamacpp-q4\Scripts\python.exe'
-& $py -m pip install --upgrade pip
-$env:CMAKE_ARGS = '-DGGML_CUDA=on'
-& $py -m pip install llama-cpp-python --no-binary llama-cpp-python
+```
+python -m gpu.lab.llamacpp_h2 --bench
 ```
 
-Then check `llama_supports_gpu_offload()` is True **inside that venv**. If it
-is False, the row stays `SKIP`. Do not paste CPU tok/s into `summary.csv`.
+Recorded 2026-09-15: decode **~1.5 tok/s**, `llama-bench` tg64 **1.47**,
+pp512 **69.8**. Cite [`docs/eval-32b.md`](eval-32b.md) and
+[`docs/runs/llamacpp-h2/`](runs/llamacpp-h2/). That is Instruct 32B overflow,
+not the 3B grid below, and not an Ollama blog number.
 
-Artifact: GGUF Q4_K_M and/or Q4_0 of the same model. `DEEPFOLD_GGUF` = the file.
-Record which quant in `notes` when you actually measure.
+The 3B `summary.csv` cell stays empty until someone runs the same harness
+on Qwen2.5-3B GGUF. A CPU-only llama.cpp binary is still a skip. Artifact
+path: `C:\dev\models\gguf\`. Never convert that GGUF into `.chr`.
 
 ### `exllamav2-exl2`
 

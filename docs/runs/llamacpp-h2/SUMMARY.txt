@@ -1,0 +1,12 @@
+schema deepfold.llamacpp_h2.v1
+quant Q4_K_M  model Qwen2.5-32B-Instruct
+ctx 2048 n_predict 64 ngl 99 parallel 1
+gguf C:\dev\models\gguf\Qwen2.5-32B-Instruct-Q4_K_M.gguf size=19851336576 bartowski Q4_K_M
+mean_decode_tok_s 1.5536354958047693
+long_decode_tok_s 1.5240900577557557 n=64
+mean_ttft_ms 1010.0813333333332
+smoke_ok True
+smi_after_load_mib 11520.0
+bench_pp512_tok_s 69.77799
+bench_tg_tok_s 1.47332
+live C:\dev\models\runs\llamacpp-h2-20260915-224614

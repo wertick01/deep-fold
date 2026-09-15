@@ -11,6 +11,7 @@ Product smoke Qwen2.5-32B-Instruct on RTX 3080 12 GB:
 | | |
 |---|---|
 | Decode | **2.31 tok/s** mean (2.30–2.32; ~432 ms/tok) |
+| llama.cpp Q4_K_M, same smoke | **1.5 tok/s** decode (`docs/eval-32b.md`, 2026-09-15) |
 | TTFT | **1006 ms** mean (2 chunks, `LIVE_MAX_N=32`) |
 | Smoke | Paris / Berlin / 323 **3/3**, `gate.txt` PASS |
 | Packed NF4 | **16599 MiB** — does not fit on the card |
@@ -86,7 +87,8 @@ ran pageable (~0.76–0.82 tok/s, ~7.3 GiB/s). Fix: `cpu_is_pinned()` in
 | Subtract 978 MiB “just in case” | **No.** |
 | Third slot / half-M / embedding by rows / `cudaHostRegister` of the whole `.chr` | **Not v1.** |
 | 2.7 tok/s target as a 32B gate without a file | **No.** Chat gate is 3B canary + live 32B smoke. |
-| 10 tok/s / Marlin / llama.cpp | **No.** |
+| 10 tok/s / Marlin / 8B llama.cpp Q4 caliber | **No.** |
+| Beat llama.cpp Q4_K_M 32B overflow on this 3080 (~1.5 tok/s) | **Measured**, not a 10 tok/s claim. |
 
 ## Waves
 

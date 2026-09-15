@@ -38,6 +38,40 @@ H2 sanity from this run:
 
 Do not quote pageable ~0.8 tok/s: that is a `Tensor.is_pinned` as bool bug.
 
+## llama.cpp Q4_K_M — same smoke, 2026-09-15
+
+Same card, same `Qwen2.5-32B-Instruct`, same greedy Paris / Berlin / 323,
+`ctx=2048`, `n_predict=64`. Different codec: bartowski **Q4_K_M GGUF**
+(~18.5 GiB) through official **llama.cpp b10964** Windows CUDA 12.4
+(`llama-server`, `-ngl 99`, `--parallel 1`). Not `llama-cpp-python`
+(that wheel dies on Windows Long Paths here). GGUF is never converted to `.chr`.
+
+Command: `python -m gpu.lab.llamacpp_h2 --bench`  
+Live dump: `C:\dev\models\runs\llamacpp-h2-20260915-224614`  
+Copy in git: [`docs/runs/llamacpp-h2/`](runs/llamacpp-h2/)
+
+| | tok/s |
+|---|---:|
+| Smoke mean (three short replies) | **1.55** |
+| Long decode, 64 tokens, `ignore_eos` | **1.52** |
+| `llama-bench` tg64 × 3 | **1.47** |
+| `llama-bench` pp512 | **69.8** |
+| Mean TTFT (smoke) | **1010 ms** |
+| nvidia-smi after load | **11520 MiB** |
+| Smoke needles | **3/3** |
+
+H2 NF4 overflow on the same prompts is **2.31 tok/s** (`docs/plan-h2-ring.md`).
+llama.cpp is slower on decode here because 18.5 GiB of Q4_K_M does not fit
+12 GiB even with `-ngl 99`; part of the net stays in RAM. Prefill is the
+other way around (pp512 ~70 tok/s vs H2 TTFT ~1.0 s on ~40-token prompts).
+
+Do **not** cite a Korean Ollama blog (~2.9–3.1 tok/s): that run was
+`qwen2.5-coder:32b`, `num_ctx=32768`, temperature 0.2, Ollama — not this
+plate. Ollama itself is not installed on this box yet.
+
+The 3B competitor grid in `docs/competitor-venvs.md` is still empty.
+This row is 32B overflow only.
+
 ## B — hard 12 — not run
 
 Same as 14B NF4 (10/12). Compare with 14B NF4, not with BF16 32B (will not fit).

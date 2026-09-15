@@ -12,7 +12,9 @@ the original weights. The `models/` directory is not in git.
 
 32B lives in `C:\dev\models\Qwen2.5-32B-Instruct`, CHR `C:\dev\models\qwen25-32b.nf4.chr`.
 Paris/Berlin/323 smoke was recorded 2026-09-14 (`docs/eval-32b.md`, plate
-`docs/img/h2-qwen25-32b.png`). Do not run hard-12 on 32B without an explicit “run it”.
+`docs/img/h2-qwen25-32b.png`). Same-card llama.cpp Q4_K_M Instruct: **1.5 tok/s**
+decode (`docs/eval-32b.md`, `docs/runs/llamacpp-h2/`). Do not run hard-12 on
+32B without an explicit “run it”.
 20B remains the resident-NF4 caliber (all weights on the card).
 
 Optional later: `Qwen/Qwen2.5-7B-Instruct` (~15 GB) — already no in BF16, freely in NF4. Not required for the bins above.

@@ -1,0 +1,9 @@
+3B fake-overflow canary for H2-accel, copied from
+C:\dev\models\runs\h2-accel-3b-canary-20260915-190205
+on the author's RTX 3080 12 GB (WDDM).
+
+Command:
+  python -m gpu.lab.h2_accel --model C:\dev\models\Qwen2.5-3B-Instruct --chr C:\dev\models\qwen25-3b.nf4.chr --force-overflow --variant baseline,verify-k,prefill-hold --k 4 --max-seq 512 --max-new-tokens 16
+
+Tied 3B refuses host-embed (not in this canary). 32B numbers live in
+docs/runs/h2-accel-32b/.

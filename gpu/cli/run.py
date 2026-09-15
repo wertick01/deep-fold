@@ -414,6 +414,7 @@ def _open_loop(
         str(chr_file),
         trust_remote_code=trust_remote_code,
         max_resident_bytes=cap,
+        residency_policy=getattr(args, "residency", "D"),
     )
     weight_mib = report.device_mib
     smi = _smi_used_mib()

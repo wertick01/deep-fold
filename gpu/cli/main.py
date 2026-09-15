@@ -87,6 +87,11 @@ def _add_runtime_flags(
     )
     p.add_argument("--quiet", action="store_true", help="no chr progress output")
     p.add_argument("--debug", action="store_true", help="traceback after the report")
+    p.add_argument(
+        "--residency",
+        default="D",
+        help="overflow residency policy (default D)",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:

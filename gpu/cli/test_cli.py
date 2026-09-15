@@ -838,6 +838,7 @@ def test_parser_run_flags() -> None:
     assert args.warmup is True and args.raw is False
     assert args.codec == "auto"
     assert args.max_resident_mib is None
+    assert args.residency == "D"
     vq = build_parser().parse_args(["run", "--model", "D:/m", "--codec", "vq"])
     assert vq.codec == "vq"
     cap = build_parser().parse_args(

@@ -25,7 +25,7 @@ from .blobs import iter_bf16, load_bf16
 from .embedding import Nf4Embedding, dequant_table
 from .host_image import HostImage
 from .linear import CompressedLinear
-from .residency import descs_from_header, plan_residency
+from .residency import DEFAULT_POLICY, descs_from_header, plan_residency
 from .slots import OVERFLOW_SLOT_COUNT, SlotPair
 from .vq_blobs import materialize_vq, reconstruct_vq
 from .vq_linear import CompressedVqLinear, VqEmbedding
@@ -75,7 +75,8 @@ class LoadReport:
 
     @property
     def device_mib(self) -> float:
-        return (self.linear_bytes + self.bf16_bytes + self.embed_bytes) / MIB
+        embed = 0 if str(self.embed_mode).endswith("-cpu") else self.embed_bytes
+        return (self.linear_bytes + self.bf16_bytes + embed) / MIB
 
     def __str__(self) -> str:
         overflow = ""
@@ -316,6 +317,9 @@ def load_chr_nf4(
     layers: Sequence[int] | None = None,
     verbose: bool = False,
     max_resident_bytes: int | None = None,
+    residency_policy: str = DEFAULT_POLICY,
+    pin_embed: bool = True,
+    refill_embed: bool = True,
 ) -> LoadReport:
     """Fill a replaced skeleton from ``path``. The ``.chr`` is the only file read.
 
@@ -331,9 +335,11 @@ def load_chr_nf4(
     layer-0-only session); ``None`` loads everything.
 
     ``max_resident_bytes``: ``None`` keeps every NF4 matrix on ``device`` (the
-    3B/14B/20B path). An ``int`` runs policy D: allocate :class:`SlotPair`
-    first, materialize resident NF4 on ``device``, streamed linears as
-    :class:`~gpu.host.host_image.HostImage` on CPU. Embed stays DEVICE.
+    3B/14B/20B path). An ``int`` runs ``residency_policy`` (default ``D``):
+    allocate :class:`SlotPair` first, materialize resident NF4 on ``device``,
+    streamed linears as :class:`~gpu.host.host_image.HostImage` on CPU. Embed
+    stays DEVICE unless ``pin_embed=False`` or ``residency_policy="D_host_embed"``
+    (CPU packed rows, not CopyRing tape). Tied embeddings refuse host-embed.
 
     The header is parsed once and passed down, so 300+ matrices do not reparse
     65 KiB of JSON each (gpu-abi.md §2).
@@ -345,10 +351,24 @@ def load_chr_nf4(
     report = LoadReport(codec="nf4")
     layer_set = None if layers is None else sorted({int(v) for v in layers})
     host_names: set[str] = set()
+    cpu_embed: set[str] = set()
+    tied = bool(getattr(getattr(model, "config", None), "tie_word_embeddings", False))
+    host_embed = (residency_policy == "D_host_embed") or (not pin_embed)
+    if host_embed and tied:
+        raise RuntimeError(
+            "host-embed: tied embeddings share one packed table; refusing to "
+            "put embed on CPU while lm_head stays DEVICE (3B)."
+        )
 
     if max_resident_bytes is not None:
         descs = descs_from_header(hdr)
-        plan = plan_residency(descs, max_resident_bytes)
+        plan = plan_residency(
+            descs,
+            max_resident_bytes,
+            policy=residency_policy,
+            pin_embed=not host_embed,
+            refill_embed=refill_embed,
+        )
         # Slots first: addresses must not move when resident matrices scatter.
         report.slots = SlotPair(plan.slot_nbytes, dev, count=OVERFLOW_SLOT_COUNT)
         report.slot_nbytes = plan.slot_nbytes
@@ -359,10 +379,11 @@ def load_chr_nf4(
         report.overflow = bool(plan.streamed)
         model.deepfold_residency = plan
         host_names = set(plan.streamed)
-        embed_host = [d.name for d in descs if d.kind == "embed" and d.name in host_names]
-        if embed_host:
+        cpu_embed = set(plan.cpu)
+        embed_tape = [d.name for d in descs if d.kind == "embed" and d.name in host_names]
+        if embed_tape:
             raise RuntimeError(
-                f"policy D: embed must stay DEVICE, plan streamed {embed_host}"
+                f"embed must not be on CopyRing tape, plan streamed {embed_tape}"
             )
 
     modules = dict(model.named_modules())
@@ -377,11 +398,14 @@ def load_chr_nf4(
         for n in linear_modules(model)
         if n.rsplit(".", 1)[-1] in ("lm_head", "output")
     ]
+    if host_embed and embed_name:
+        cpu_embed.add(embed_name)
     need_embed_bytes = embed_info is not None and embed_info.codec == "nf4" and (
         embed != "skip" or (tied and any(n not in hdr.tensors for n in lm_head_names))
     )
     if need_embed_bytes:
-        embed_matrix = materialize_nf4(path, embed_name, dev, header=hdr)
+        embed_dev = torch.device("cpu") if embed_name in cpu_embed else dev
+        embed_matrix = materialize_nf4(path, embed_name, embed_dev, header=hdr)
 
     # --- NF4 linears -------------------------------------------------------
     for name, mod in linear_modules(model).items():
@@ -520,6 +544,8 @@ def _load_embedding(
         module.attach(embed_matrix)
         setattr(parent, child, module)
         report.embed_bytes += embed_matrix.nbytes
+        if embed_matrix.packed.device.type == "cpu":
+            return "nf4-rows-cpu"
         return "nf4-rows"
 
     if embed == "bf16":
@@ -640,6 +666,9 @@ def load_model(
     trust_remote_code: bool = False,
     strict: bool = True,
     max_resident_bytes: int | None = None,
+    residency_policy: str = DEFAULT_POLICY,
+    pin_embed: bool = True,
+    refill_embed: bool = True,
 ):
     """``build_skeleton`` + ``attach`` + packed seats + load from the ``.chr``.
 
@@ -652,8 +681,10 @@ def load_model(
     stayed on ``meta`` means wrong answers, not slow ones. The lab passes
     ``strict=False`` so it can *print* an incomplete report instead.
 
-    ``max_resident_bytes`` is NF4 overflow (policy D). ``None`` keeps every
-    matrix on ``device``. Ignored for VQ.
+    ``max_resident_bytes`` is NF4 overflow (default policy D). ``None`` keeps
+    every matrix on ``device``. Ignored for VQ. ``residency_policy`` selects
+    WHO (default ``D``); ``pin_embed=False`` / ``D_host_embed`` puts packed
+    embed on CPU, not the CopyRing tape.
     """
     from .attach import attach_module, plan_violations
 
@@ -674,6 +705,9 @@ def load_model(
     )
     if codec == "nf4":
         fill_kw["max_resident_bytes"] = max_resident_bytes
+        fill_kw["residency_policy"] = residency_policy
+        fill_kw["pin_embed"] = pin_embed
+        fill_kw["refill_embed"] = refill_embed
     report = filler(model, chr_path, **fill_kw)
     model.deepfold_plan = plan
     if strict and layers is None:

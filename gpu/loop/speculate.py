@@ -270,6 +270,7 @@ def spec_lookup_generate(
     stop_set: frozenset,
     on_token,
     speculate: int,
+    should_stop=None,
 ) -> None:
     """Fill ``out`` with n-gram draft + greedy verify. Mutates ``loop.kv.seq_len``.
 
@@ -279,6 +280,9 @@ def spec_lookup_generate(
     """
 
     def emit(token: int) -> bool:
+        if should_stop is not None and should_stop():
+            out.interrupted = True
+            return False
         token = int(token)
         out.tokens.append(token)
         if len(out.tokens) > 1:

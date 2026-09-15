@@ -17,6 +17,7 @@ if str(_REPO) not in sys.path:
 
 from gpu.host.residency import (  # noqa: E402
     DEFAULT_POLICY,
+    MIB,
     descs_from_qwen,
     overflow_resident_cap,
 )
@@ -24,6 +25,7 @@ from gpu.lab.h2_accel import (  # noqa: E402
     SCHEMA,
     VARIANT_FIELDS,
     VARIANT_IDS,
+    _apply_plan_fields,
     _parser,
     main,
     parse_k,
@@ -256,6 +258,35 @@ def test_write_summary_mentions_blocked() -> None:
         check("summary blocked", "blocked" in text and "verify-k" in text, text[:200])
 
 
+def test_apply_plan_keeps_live_h2d() -> None:
+    plan = {
+        "n_host": 96,
+        "resident_mib": 9714.0,
+        "streamed_bytes": 7219445760,
+        "h2d_bytes": 7219445760,
+        "h2d_forwards": 1,
+        "copy_floor_ms": 277.0,
+        "k": [2, 4, 8],
+        "status": "ok",
+    }
+    live = {
+        "h2d_bytes": 20000000,
+        "h2d_forwards": 12,
+        "h2d_copies": 120,
+        "status": "ok",
+        "notes": "",
+    }
+    _apply_plan_fields(live, plan, live=True)
+    check("live bytes kept", live["h2d_bytes"] == 20000000, str(live["h2d_bytes"]))
+    check("live forwards kept", live["h2d_forwards"] == 12, str(live["h2d_forwards"]))
+    check("live copies kept", live["h2d_copies"] == 120, str(live["h2d_copies"]))
+    check("plan n_host overlay", live["n_host"] == 96, str(live.get("n_host")))
+    check("per-fwd from live totals", abs(live["h2d_mib_per_fwd"] - (20000000 / 12 / MIB)) < 1e-6, str(live["h2d_mib_per_fwd"]))
+    plan_only = {"status": "ok"}
+    _apply_plan_fields(plan_only, plan, live=False)
+    check("plan-only takes tape bytes", plan_only["h2d_bytes"] == 7219445760, str(plan_only.get("h2d_bytes")))
+
+
 def test_load_model_residency_default() -> None:
     import inspect
 
@@ -287,6 +318,7 @@ TESTS = [
     test_plan_variant_schema_32b_shapes,
     test_plan_only_main_without_chr,
     test_write_summary_mentions_blocked,
+    test_apply_plan_keeps_live_h2d,
     test_load_model_residency_default,
 ]
 

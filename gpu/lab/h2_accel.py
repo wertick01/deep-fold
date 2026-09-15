@@ -76,6 +76,7 @@ VARIANT_FIELDS = (
     "decode_ms_per_tok",
     "h2d_bytes",
     "h2d_copies",
+    "h2d_mib_per_fwd",
     "h2d_forwards",
     "copy_floor_ms",
     "copy_ms",
@@ -173,6 +174,7 @@ def _empty_row(vid: str, cfg: dict[str, Any] | None = None) -> dict[str, Any]:
         "decode_ms_per_tok": None,
         "h2d_bytes": None,
         "h2d_copies": None,
+        "h2d_mib_per_fwd": None,
         "h2d_forwards": None,
         "copy_floor_ms": None,
         "copy_ms": None,
@@ -342,6 +344,7 @@ def plan_variant(
         row["notes"] = "copy_ms=null until a timed generate; plan has floor only"
     if vid == "verify-k":
         row["k"] = list(k_values or [2, 4, 8])
+    row["h2d_mib_per_fwd"] = _h2d_mib_per_fwd(row)
     if row["status"] == "ok":
         row["status"] = "ok"
     return row
@@ -355,13 +358,14 @@ def write_summary(path: Path, plate: dict[str, Any]) -> None:
         f"descs={plate.get('descs_source')} chr={plate.get('chr')}",
         "",
         f"{'variant':<14} {'status':<9} {'pol':<12} {'n_host':>6} "
-        f"{'res_MiB':>8} {'h2d/fwd':>10} {'floor_ms':>8} {'tok/s':>7} "
+        f"{'res_MiB':>8} {'h2d/fwd':>10} {'copies':>7} {'floor_ms':>8} {'tok/s':>7} "
         f"{'prefill':>8} {'smoke':<6} notes",
     ]
     for row in plate.get("variants") or []:
         n_host = row.get("n_host")
         res = row.get("resident_mib")
-        h2d = row.get("h2d_bytes")
+        h2d = _h2d_mib_per_fwd(row)
+        copies = row.get("h2d_copies")
         floor = row.get("copy_floor_ms")
         tok = row.get("decode_tok_s")
         pre = row.get("prefill_ms")
@@ -371,7 +375,8 @@ def write_summary(path: Path, plate: dict[str, Any]) -> None:
             f"{str(row.get('residency_policy', '')):<12} "
             f"{'-' if n_host is None else n_host:>6} "
             f"{'-' if res is None else f'{res:.0f}':>8} "
-            f"{'-' if h2d is None else f'{h2d / MIB:.1f}':>10} "
+            f"{'-' if h2d is None else f'{h2d:.1f}':>10} "
+            f"{'-' if copies is None else copies:>7} "
             f"{'-' if floor is None else f'{floor:.0f}':>8} "
             f"{'-' if tok is None else f'{tok:.2f}':>7} "
             f"{'-' if pre is None else f'{pre:.0f}':>8} "
@@ -421,13 +426,25 @@ def _out_dir(explicit: str) -> Path:
     return dest
 
 
-def _apply_plan_fields(row: dict[str, Any], plan_row: dict[str, Any]) -> None:
+def _h2d_mib_per_fwd(row: dict[str, Any]) -> float | None:
+    """MiB copied per TokenLoop forward. Live uses ring totals; plan uses tape size."""
+    nbytes = row.get("h2d_bytes")
+    if nbytes is None:
+        return None
+    nfwd = row.get("h2d_forwards")
+    if nfwd:
+        return float(nbytes) / float(nfwd) / MIB
+    return float(nbytes) / MIB
+
+
+def _apply_plan_fields(
+    row: dict[str, Any], plan_row: dict[str, Any], *, live: bool = False
+) -> None:
+    """Overlay WHO / floor from the plan. Live copy counters stay measured."""
     for key in (
         "n_host",
         "resident_mib",
         "streamed_bytes",
-        "h2d_bytes",
-        "h2d_forwards",
         "copy_floor_ms",
         "host_layers",
         "cpu",
@@ -435,9 +452,14 @@ def _apply_plan_fields(row: dict[str, Any], plan_row: dict[str, Any]) -> None:
     ):
         if plan_row.get(key) is not None:
             row[key] = plan_row[key]
+    if not live:
+        for key in ("h2d_bytes", "h2d_forwards"):
+            if plan_row.get(key) is not None:
+                row[key] = plan_row[key]
     if plan_row.get("status") in ("blocked", "error"):
         row["status"] = plan_row["status"]
         row["notes"] = plan_row.get("notes") or row.get("notes") or ""
+    row["h2d_mib_per_fwd"] = _h2d_mib_per_fwd(row)
 
 
 def _run_live_variant(
@@ -556,6 +578,23 @@ def _run_live_variant(
                     loop.prefill(last_ids)
                     verifies.append(measure_verify(loop, last_tokens, k))
                 row["verify"] = verifies
+                bits = []
+                for item in verifies:
+                    walls = item.get("walls") or []
+                    k = item.get("k")
+                    if not walls:
+                        continue
+                    avg_ms = 1000.0 * sum(walls) / len(walls)
+                    per_tok = avg_ms / max(int(k or 1), 1)
+                    bits.append(
+                        f"k={k} {avg_ms:.0f}ms/block ({per_tok:.0f}ms/tok) "
+                        f"match={item.get('greedy_match')}"
+                    )
+                if bits:
+                    extra = "; ".join(bits)
+                    row["notes"] = (
+                        f"{row['notes']}; {extra}".strip("; ") if row["notes"] else extra
+                    )
             except Exception as exc:  # noqa: BLE001
                 extra = f"measure_verify: {type(exc).__name__}: {exc}"
                 row["notes"] = (
@@ -655,7 +694,7 @@ def run_h2_accel(args: argparse.Namespace) -> int:
             continue
         print(f"{vid}: load + generate...", flush=True)
         live = _run_live_variant(vid, args, cap, baseline_tokens)
-        _apply_plan_fields(live, plan_row)
+        _apply_plan_fields(live, plan_row, live=True)
         rows.append(live)
         print(
             f"{vid}: status={live.get('status')} tok/s={live.get('decode_tok_s')} "

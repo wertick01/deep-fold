@@ -1,7 +1,8 @@
 # H2-accel: сверка ставок на 32B overflow
 
-**Ветка:** `exp/h2-32b-accel` от `c129ffb`. `main` не трогать, пока сверка не
-записана. Hard-12 32B не стартовать без явного «гоняй».
+**Ветка:** `exp/h2-32b-accel` от `c129ffb`. Сверка записана:
+[`docs/runs/h2-accel-32b/`](runs/h2-accel-32b/). Hard-12 32B не стартовать без
+явного «гоняй». Product default по-прежнему D / `chunk` / `draft="none"`.
 
 **Цель волны:** включить *переключаемые* варианты на том же TokenLoop / CopyRing
 и прогнать их одним лаб-раннером. Не обещать 10 ток/с. Не трогать
@@ -289,3 +290,26 @@ python -m gpu.lab.h2_accel --variant baseline,profile,verify-k,prefill-hold,pair
 
 Потолок честный: даже идеальный overlap не выше ~3.6 ток/с при той же ленте.
 `verify-k` может обойти этот пол **на принятый токен**, не на forward.
+
+## Сверка 2026-09-15 (3080)
+
+Живые plate: `C:\dev\models\runs\h2-accel-32b-20260915-190303` и тёплый D
+`h2-accel-32b-warm-baseline-20260915-201046`. Git-копия:
+[`docs/runs/h2-accel-32b/`](runs/h2-accel-32b/).
+
+`--max-seq 512` → 90 HOST, 6455 MiB/fwd, пол 260 мс (не 96 / 6885 / 277:
+KV меньше, cap выше). Тёплый D: **2.35 ток/с**, prefill 990 мс. Первый
+`baseline` в матрице — холодный старт, не T_1.
+
+| id | Итог |
+|---|---|
+| `profile` | `copy_ms` 366 мс/fwd vs пол 260. Лаб. |
+| `verify-k` | greedy match. T_8=3098 мс/блок; T_8/T_step≈7.3 → spec default off |
+| `spec-lookup` | токены = D, **0.008 ток/с**. Флаг оставить, default `"none"` |
+| `prefill-hold` | копии −270; TTFT короткого смоука хуже. Opt-in на длинный prompt |
+| `pairs-stride` | байты = D, ток/с не вырос |
+| `host-embed` | −359 MiB/fwd, smi≈D из-за refill, ток/с не вырос |
+
+Код на слиянии с `main` не меняет generate, пока caller не передаст новые
+kwargs / policy. Примитивы hold и verify нужны следующей волне; n-gram
+lookup в продукт не включать.

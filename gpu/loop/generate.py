@@ -253,6 +253,7 @@ class Generation:
     decode_ms: float = 0.0
     decode_steps: int = 0
     stop_token: int | None = None
+    interrupted: bool = False
     prefill_chunk: int = 1
     graph: str = "off"
     h2d_bytes: int = 0
@@ -1025,6 +1026,7 @@ class TokenLoop:
         *,
         stop: Sequence[int] = (),
         on_token: Callable[[int], None] | None = None,
+        should_stop: Callable[[], bool] | None = None,
         speculate: int = 1,
         draft: str = "none",
     ) -> Generation:
@@ -1033,6 +1035,10 @@ class TokenLoop:
         ``speculate <= 1`` or ``draft == "none"`` is the ``step()`` loop.
         ``draft == "lookup"`` and ``speculate >= 2`` is n-gram draft + greedy
         verify (:mod:`gpu.loop.speculate`); no second model.
+
+        ``should_stop`` is polled between decode tokens, not inside a CUDA
+        kernel. When it returns true, :attr:`Generation.interrupted` is set and
+        already emitted tokens are kept.
         """
         if draft not in ("none", "lookup"):
             raise ValueError(f"draft={draft!r}; expected 'none' or 'lookup'")
@@ -1061,6 +1067,9 @@ class TokenLoop:
 
         if int(speculate) <= 1 or draft == "none":
             for i in range(max_new_tokens):
+                if should_stop is not None and should_stop():
+                    out.interrupted = True
+                    break
                 out.tokens.append(token)
                 if on_token is not None:
                     on_token(token)
@@ -1084,6 +1093,7 @@ class TokenLoop:
                 stop_set,
                 on_token,
                 int(speculate),
+                should_stop,
             )
         torch.cuda.synchronize()
         out.decode_ms = (time.perf_counter() - t1) * 1000.0

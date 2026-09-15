@@ -284,6 +284,49 @@ def test_generate_defaults() -> None:
     sig = inspect.signature(TokenLoop.generate)
     assert sig.parameters["speculate"].default == 1
     assert sig.parameters["draft"].default == "none"
+    assert sig.parameters["should_stop"].default is None
+
+
+def test_generate_should_stop_keeps_prefix() -> None:
+    orig = _silence_cuda_sync()
+    try:
+        loop = FakeLoop([21, 22, 23, 24], prompt_len=3)
+        prompt = torch.tensor([1, 2, 3], dtype=torch.long)
+        hits = [0]
+
+        def should_stop() -> bool:
+            hits[0] += 1
+            return hits[0] > 2
+
+        out = loop.generate(prompt, max_new_tokens=4, should_stop=should_stop)
+        assert out.interrupted
+        assert out.tokens == [21, 22], out.tokens
+    finally:
+        torch.cuda.synchronize = orig
+
+
+def test_generate_lookup_should_stop() -> None:
+    orig = _silence_cuda_sync()
+    try:
+        loop = FakeLoop([21, 22, 23, 24], prompt_len=3)
+        prompt = torch.tensor([1, 2, 3], dtype=torch.long)
+        hits = [0]
+
+        def should_stop() -> bool:
+            hits[0] += 1
+            return hits[0] > 1
+
+        out = loop.generate(
+            prompt,
+            max_new_tokens=4,
+            speculate=4,
+            draft="lookup",
+            should_stop=should_stop,
+        )
+        assert out.interrupted
+        assert out.tokens == [21], out.tokens
+    finally:
+        torch.cuda.synchronize = orig
 
 
 def test_generate_none_is_step_loop() -> None:

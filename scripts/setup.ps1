@@ -30,16 +30,23 @@ if (-not (Test-Path $VenvPy)) {
 
 Write-Host "Using $VenvPy"
 & $VenvPy -m pip install --upgrade pip
+if ($LASTEXITCODE -ne 0) { throw "pip upgrade failed (exit $LASTEXITCODE)" }
 & $VenvPy -m pip install torch --index-url $TorchIndex
+if ($LASTEXITCODE -ne 0) { throw "torch install failed (exit $LASTEXITCODE)" }
 & $VenvPy -m pip install -e ".[hub,chat]"
+if ($LASTEXITCODE -ne 0) { throw "deepfold extras install failed (exit $LASTEXITCODE)" }
 
 if (Get-Command go -ErrorAction SilentlyContinue) {
     & go build -o chr.exe ./cmd/chr
+    if ($LASTEXITCODE -ne 0) { throw "go build chr.exe failed (exit $LASTEXITCODE)" }
 } else {
     Write-Host "Go not on PATH: skip chr build. Install Go 1.22+ and re-run, or set DEEPFOLD_CHR_BIN."
 }
 
 & $VenvPy -m gpu.cli doctor
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "doctor exited $LASTEXITCODE (0 generate possible, 2 install, 3 generate refused by class, 1 neither)."
+}
 Write-Host ""
 Write-Host "Next:"
 Write-Host "  .\.venv\Scripts\Activate.ps1"

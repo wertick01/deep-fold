@@ -40,7 +40,7 @@ def pull(args: Namespace) -> int:
         return 1
 
     dest = hub.pull_destination(row, getattr(args, "dir", None))
-    already = dest.is_dir() and (dest / "config.json").is_file()
+    already = hub.source_complete(dest)
     disk = row.disk_gb
     extra = f"{disk:g}" if disk != int(disk) else f"{int(disk)}"
     _err(
@@ -50,10 +50,10 @@ def pull(args: Namespace) -> int:
     if already:
         _err(f"Already on disk: {dest}  (no Hub round-trip)")
     else:
+        if not hub.confirmed(yes=bool(getattr(args, "yes", False))):
+            return 1
         if hub.hub_missing():
             _err(messages.NEED_HUB)
-            return 1
-        if not hub.confirmed(yes=bool(getattr(args, "yes", False))):
             return 1
         dest.mkdir(parents=True, exist_ok=True)
         try:

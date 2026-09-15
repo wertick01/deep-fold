@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -16,7 +17,16 @@ __all__ = [
     "leaf_name",
     "pull_destination",
     "snapshot_download",
+    "source_complete",
 ]
+
+_TOKENIZER_MARKERS = (
+    "tokenizer.json",
+    "tokenizer.model",
+    "tokenizer_config.json",
+    "vocab.json",
+    "merges.txt",
+)
 
 
 def hub_missing() -> bool:
@@ -28,6 +38,33 @@ def snapshot_download(*, repo_id: str, local_dir: str) -> str:
     from huggingface_hub import snapshot_download as _sd
 
     return _sd(repo_id=repo_id, local_dir=local_dir)
+
+
+def source_complete(path: Path | str) -> bool:
+    """True only when a Hub tree can actually be compressed, not when config.json exists.
+
+    A directory that only has ``config.json`` (or an index whose shards are
+    still missing) is an interrupted download. ``pull`` must resume, not skip.
+    """
+    root = Path(path)
+    if not (root / "config.json").is_file():
+        return False
+    if not any((root / name).is_file() for name in _TOKENIZER_MARKERS):
+        return False
+    indexes = sorted(root.glob("*.safetensors.index.json"))
+    if indexes:
+        needed: set[str] = set()
+        for index in indexes:
+            try:
+                data = json.loads(index.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return False
+            weight_map = data.get("weight_map")
+            if not isinstance(weight_map, dict) or not weight_map:
+                return False
+            needed.update(str(name) for name in weight_map.values() if name)
+        return bool(needed) and all((root / name).is_file() for name in needed)
+    return any(root.glob("*.safetensors"))
 
 
 def confirmed(*, yes: bool) -> bool:
@@ -47,7 +84,7 @@ def leaf_name(row: AllowlistRow) -> str:
 
 
 def existing_tree(row: AllowlistRow) -> Path | None:
-    """A complete local tree. ``config.json`` is the marker."""
+    """A complete local tree (config + tokenizer + weight shards), not a stub."""
     leaf = leaf_name(row)
     candidates = [Path(h) for h in row.local_hints]
     candidates.append(models_root() / leaf)
@@ -61,7 +98,7 @@ def existing_tree(row: AllowlistRow) -> Path | None:
         if resolved in seen:
             continue
         seen.add(resolved)
-        if (path / "config.json").is_file():
+        if source_complete(path):
             return path
     return None
 

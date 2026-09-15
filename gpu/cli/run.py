@@ -133,10 +133,12 @@ def compress(args) -> int:
 def _header_matcher(model_dir: Path):
     """A predicate that says whether a ``.chr`` was packed from *this* model.
 
-    CHR0 records ``arch``, ``hidden_size``, ``num_layers`` and ``vocab_size`` in
-    its header, so a few hundred bytes settle which sibling belongs to which
-    model directory. Returns None when the config or ``gpu.chr0`` cannot be
-    read, in which case the caller falls back to refusing to guess.
+    CHR0 records ``arch``, ``hidden_size``, ``intermediate_size``, ``num_layers``
+    and ``vocab_size``. Matching three sizes is not enough: llama and qwen2 can
+    share hidden/layers/vocab. ``arch`` is ``config.model_type``; intermediate
+    size is compared when the config has it. Returns None when the config or
+    ``gpu.chr0`` cannot be read, in which case the caller falls back to
+    refusing to guess.
     """
     try:
         with open(model_dir / "config.json", encoding="utf-8") as fh:
@@ -145,12 +147,12 @@ def _header_matcher(model_dir: Path):
     except (OSError, ValueError, ImportError):
         return None
 
-    want = (
-        cfg.get("hidden_size"),
-        cfg.get("num_hidden_layers"),
-        cfg.get("vocab_size"),
-    )
-    if None in want:
+    want_hidden = cfg.get("hidden_size")
+    want_layers = cfg.get("num_hidden_layers")
+    want_vocab = cfg.get("vocab_size")
+    want_arch = cfg.get("model_type")
+    want_intermediate = cfg.get("intermediate_size")
+    if None in (want_hidden, want_layers, want_vocab, want_arch):
         return None
 
     def accept(path: Path) -> bool:
@@ -158,7 +160,19 @@ def _header_matcher(model_dir: Path):
             header = load_header(str(path))
         except Exception:  # noqa: BLE001 - a truncated or foreign file is a no
             return False
-        return (header.hidden_size, header.num_layers, header.vocab_size) == want
+        if (
+            header.hidden_size,
+            header.num_layers,
+            header.vocab_size,
+            header.arch,
+        ) != (want_hidden, want_layers, want_vocab, want_arch):
+            return False
+        if (
+            want_intermediate is not None
+            and header.intermediate_size != want_intermediate
+        ):
+            return False
+        return True
 
     return accept
 

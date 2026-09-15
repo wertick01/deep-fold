@@ -111,11 +111,33 @@ def _nf4_artifact() -> tuple[Path | None, bool, bool]:
     return artifact, stale, bool(usable)
 
 
+def _find_nvcc() -> str | None:
+    """``nvcc`` on PATH, or ``CUDA_HOME`` / ``CUDA_PATH`` ``bin/nvcc`` (.exe on NT).
+
+    A host C++ compiler alone cannot JIT the NF4 kernel. ``setup.py`` still
+    shells ``nvcc`` for the ``.cu`` translation unit on every OS, including
+    Windows (``cl.exe`` only compiles the host side).
+    """
+    found = shutil.which("nvcc")
+    if found:
+        return found
+    name = "nvcc.exe" if os.name == "nt" else "nvcc"
+    for env in ("CUDA_HOME", "CUDA_PATH"):
+        root = os.environ.get(env)
+        if not root:
+            continue
+        candidate = Path(root) / "bin" / name
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
 def _host_compiler(*, inject: bool) -> str | None:
     """``cl.exe`` on Windows (after ``vcvars64.bat`` if asked), else ``g++``.
 
     The VS environment dump costs about a second, so it only runs when there is
-    no prebuilt extension and the answer therefore matters.
+    no prebuilt extension and the answer therefore matters. JIT also needs
+    :func:`_find_nvcc`; the host compiler is not enough.
     """
     if os.name == "nt":
         from gpu.win_toolchain import inject_msvc_env, which_cl
@@ -232,7 +254,7 @@ def probe(*, chr_bin: str | None = None, extras_for: str | None = None) -> Machi
         nf4_ext_stale=stale,
         nf4_ext_abi_ok=abi_ok,
         host_cc=_host_compiler(inject=nf4_ext is None or not abi_ok),
-        nvcc=shutil.which("nvcc"),
+        nvcc=_find_nvcc(),
         chr_bin=resolved_chr,
         chr_runs=_chr_runs(resolved_chr) if resolved_chr else False,
         transformers=_installed("transformers"),
@@ -402,18 +424,26 @@ def checks(m: Machine, v: Verdict) -> list[Check]:
         out.append(Check("ok", "chr", str(m.chr_bin)))
 
     compiler = "cl.exe" if os.name == "nt" else "g++"
+    jit_ready = bool(m.host_cc) and bool(m.nvcc)
+    nvcc_detail = m.nvcc or "not on PATH (also check CUDA_HOME / CUDA_PATH)"
     if m.nf4_ext is not None and not m.nf4_ext_abi_ok:
-        # The file is there but built for another interpreter; only a compiler
-        # can turn this box green.
+        # The file is there but built for another interpreter; JIT needs both
+        # the host compiler and nvcc.
         detail = (
             f"{m.nf4_ext.name} is not importable from python "
             f"{m.python[0]}.{m.python[1]} ({_interpreter_tag()})"
         )
-        if m.host_cc:
+        if jit_ready:
             out.append(Check("warn", "nf4 kernel", detail + "; first run will JIT"))
             out.append(Check("ok", "host compiler", m.host_cc))
+            out.append(Check("ok", "nvcc", m.nvcc))
+        elif m.host_cc:
+            out.append(Check("fail", "nf4 kernel", detail + "; JIT needs nvcc"))
+            out.append(Check("ok", "host compiler", m.host_cc))
+            out.append(Check("fail", "nvcc", nvcc_detail))
         else:
             out.append(Check("fail", "nf4 kernel", detail + ", and no host compiler"))
+            out.append(Check("fail", "nvcc", nvcc_detail))
     elif m.nf4_ext is not None:
         rel = m.nf4_ext.relative_to(REPO) if m.nf4_ext.is_relative_to(REPO) else m.nf4_ext
         out.append(
@@ -426,15 +456,26 @@ def checks(m: Machine, v: Verdict) -> list[Check]:
         out.append(
             Check("skip", compiler, "(not needed; prebuilt extension present)")
         )
-    elif m.host_cc:
+        out.append(
+            Check("skip", "nvcc", "(not needed; prebuilt extension present)")
+        )
+    elif jit_ready:
         out.append(Check("warn", "nf4 kernel", "not built; first run will JIT (~1 min)"))
         out.append(Check("ok", "host compiler", m.host_cc))
+        out.append(Check("ok", "nvcc", m.nvcc))
+    elif m.host_cc:
+        out.append(
+            Check(
+                "fail",
+                "nf4 kernel",
+                "not built; JIT needs nvcc (host compiler is not enough)",
+            )
+        )
+        out.append(Check("ok", "host compiler", m.host_cc))
+        out.append(Check("fail", "nvcc", nvcc_detail))
     else:
         out.append(Check("fail", "nf4 kernel", "no extension and no host compiler"))
-    if os.name != "nt":
-        out.append(
-            Check("ok" if m.nvcc else "warn", "nvcc", m.nvcc or "not on PATH")
-        )
+        out.append(Check("fail", "nvcc", nvcc_detail))
 
     out.append(Check("ok" if m.transformers else "fail", "transformers", ""))
     out.append(Check("ok" if m.safetensors else "fail", "safetensors", ""))

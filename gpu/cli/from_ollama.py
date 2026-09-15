@@ -14,7 +14,7 @@ from argparse import Namespace
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import messages, run as run_mod
+from . import hub, messages, run as run_mod
 from .ollama_map import Mapped, ResolveError, resolve
 from .paths import deepfold_home, slug
 
@@ -37,10 +37,10 @@ def _snapshot_download(*, repo_id: str, local_dir: str) -> str:
 
 
 def existing_hf_dir(mapped: Mapped) -> Path | None:
-    """A complete local tree we already have. ``config.json`` is the marker."""
+    """A complete local tree we already have, not a stub with only config.json."""
     for hint in mapped.row.local_hints:
         path = Path(hint)
-        if (path / "config.json").is_file():
+        if hub.source_complete(path):
             return path
     return None
 
@@ -113,16 +113,16 @@ def from_ollama(args: Namespace) -> int:
         return 1
 
     dest = destination(mapped, getattr(args, "dir", None))
-    already = dest.is_dir() and (dest / "config.json").is_file()
+    already = hub.source_complete(dest)
 
     _announce(mapped)
     if already:
         _err(f"Already on disk: {dest}  (no Hub round-trip)")
     else:
+        if not _confirmed(yes=bool(getattr(args, "yes", False))):
+            return 1
         if _hub_missing():
             _err(messages.NEED_HUB)
-            return 1
-        if not _confirmed(yes=bool(getattr(args, "yes", False))):
             return 1
         dest.mkdir(parents=True, exist_ok=True)
         try:

@@ -98,7 +98,31 @@ def _fake_model(
     return d
 
 
-def _write_chr(path: Path, *, hidden: int, layers: int, vocab: int) -> Path:
+def _stub_chr_bin(root: Path) -> Path:
+    """A file ``find_chr_bin`` will accept on this OS. Never ``chr.exe`` on POSIX."""
+    p = root / ("chr.exe" if os.name == "nt" else "chr")
+    p.write_bytes(b"")
+    return p
+
+
+def _complete_hf(dest: Path) -> Path:
+    """config + tokenizer + a shard: what ``hub.source_complete`` requires."""
+    dest.mkdir(parents=True, exist_ok=True)
+    (dest / "config.json").write_text("{}", encoding="utf-8")
+    (dest / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+    (dest / "model.safetensors").write_bytes(b"")
+    return dest
+
+
+def _write_chr(
+    path: Path,
+    *,
+    hidden: int,
+    layers: int,
+    vocab: int,
+    arch: str = "qwen2",
+    intermediate: int | None = None,
+) -> Path:
     """A minimal but valid CHR0 file with the root fields the matcher compares.
 
     Hand-rolled from stdlib on purpose: this suite must run with no torch and
@@ -109,9 +133,9 @@ def _write_chr(path: Path, *, hidden: int, layers: int, vocab: int) -> Path:
     root = {
         "magic": "CHR0",
         "version": 1,
-        "arch": "qwen2",
+        "arch": arch,
         "hidden_size": hidden,
-        "intermediate_size": hidden * 4,
+        "intermediate_size": hidden * 4 if intermediate is None else intermediate,
         "num_layers": layers,
         "vocab_size": vocab,
         "tile": {"row": 64, "col_group": 8},
@@ -501,6 +525,20 @@ def test_doctor_two_is_a_broken_install_on_a_card_that_could_run() -> None:
                        capability=None)) == 2, "CPU torch"
 
 
+def test_doctor_jit_without_nvcc_is_not_green() -> None:
+    """A host C++ compiler without nvcc cannot JIT the NF4 kernel."""
+    missing = _ship(nf4_ext=None, host_cc="g++", nvcc=None)
+    assert _code(missing) == 2
+    tags = {c.name: c.tag for c in checks(missing, verdict(missing, override=False))}
+    assert tags["nf4 kernel"] == "fail"
+    assert tags["nvcc"] == "fail"
+    ready = _ship(nf4_ext=None, host_cc="g++", nvcc="/usr/bin/nvcc")
+    assert _code(ready) == 0
+    ready_tags = {c.name: c.tag for c in checks(ready, verdict(ready, override=False))}
+    assert ready_tags["nf4 kernel"] == "warn"
+    assert ready_tags["nvcc"] == "ok"
+
+
 def test_doctor_three_is_refused_generate_with_working_compress() -> None:
     hopper = _ship(capability=(9, 0), device_name="H100")
     assert _code(hopper) == 3
@@ -529,6 +567,7 @@ def test_doctor_skips_the_compiler_when_a_prebuilt_extension_exists() -> None:
     compiler = "cl.exe" if os.name == "nt" else "g++"
     assert rows[compiler].tag == "skip"
     assert rows["nf4"].tag == "ok"
+    assert rows["nvcc"].tag == "skip"
 
 
 def test_stale_extension_warns_and_stays_loadable() -> None:
@@ -580,7 +619,7 @@ def test_run_compresses_once_when_no_chr_exists() -> None:
         original = run_mod.compress_to
         run_mod.compress_to = spy  # type: ignore[assignment]
         os.environ["DEEPFOLD_HOME"] = str(home)
-        os.environ["DEEPFOLD_CHR_BIN"] = str(_REPO / "chr.exe")
+        os.environ["DEEPFOLD_CHR_BIN"] = str(_stub_chr_bin(root))
         try:
             resolved, code = run_mod._resolve_weights(_RunArgs(), str(model))
         finally:
@@ -612,7 +651,7 @@ def test_run_auto_refuses_when_nf4_would_not_fit() -> None:
         original = run_mod.compress_to
         run_mod.compress_to = spy  # type: ignore[assignment]
         os.environ["DEEPFOLD_HOME"] = str(home)
-        os.environ["DEEPFOLD_CHR_BIN"] = str(_REPO / "chr.exe")
+        os.environ["DEEPFOLD_CHR_BIN"] = str(_stub_chr_bin(root))
         err = io.StringIO()
         try:
             with redirect_stderr(err):
@@ -642,7 +681,7 @@ def test_run_codec_vq_flag_packs_vq_on_a_small_model() -> None:
         original = run_mod.compress_to
         run_mod.compress_to = spy
         os.environ["DEEPFOLD_HOME"] = str(home)
-        os.environ["DEEPFOLD_CHR_BIN"] = str(_REPO / "chr.exe")
+        os.environ["DEEPFOLD_CHR_BIN"] = str(_stub_chr_bin(root))
         try:
             resolved, code = run_mod._resolve_weights(
                 _RunArgs(codec="vq"), str(model), vram_mib=12288
@@ -937,6 +976,8 @@ def test_from_ollama_qwen_yes_stub_snapshot_download() -> None:
 
     opened, real_open = _watch_open()
     original = from_ollama_mod._snapshot_download
+    original_missing = from_ollama_mod._hub_missing
+    from_ollama_mod._hub_missing = lambda: False  # type: ignore[assignment]
     from_ollama_mod._snapshot_download = stub  # type: ignore[assignment]
     err, out = io.StringIO(), io.StringIO()
     try:
@@ -946,6 +987,7 @@ def test_from_ollama_qwen_yes_stub_snapshot_download() -> None:
                 code = main(["from-ollama", "qwen2.5:3b", "--yes", "--dir", str(dest)])
     finally:
         from_ollama_mod._snapshot_download = original  # type: ignore[assignment]
+        from_ollama_mod._hub_missing = original_missing  # type: ignore[assignment]
         builtins.open = real_open  # type: ignore[assignment]
     assert code == 0, err.getvalue()
     assert called == [{"repo_id": "Qwen/Qwen2.5-3B-Instruct", "local_dir": str(dest)}]
@@ -1018,6 +1060,8 @@ def test_from_ollama_unknown_tag_hf_internlm_is_allowed() -> None:
         return local_dir
 
     original = from_ollama_mod._snapshot_download
+    original_missing = from_ollama_mod._hub_missing
+    from_ollama_mod._hub_missing = lambda: False  # type: ignore[assignment]
     from_ollama_mod._snapshot_download = stub  # type: ignore[assignment]
     err, out = io.StringIO(), io.StringIO()
     try:
@@ -1037,6 +1081,7 @@ def test_from_ollama_unknown_tag_hf_internlm_is_allowed() -> None:
                 )
     finally:
         from_ollama_mod._snapshot_download = original  # type: ignore[assignment]
+        from_ollama_mod._hub_missing = original_missing  # type: ignore[assignment]
     assert code == 0, err.getvalue()
     assert called == [{"repo_id": "internlm/internlm2_5-20b-chat", "local_dir": str(dest)}]
 
@@ -1079,9 +1124,7 @@ def test_from_ollama_existing_tree_skips_snapshot() -> None:
     err, out = io.StringIO(), io.StringIO()
     try:
         with tempfile.TemporaryDirectory() as tmp:
-            dest = Path(tmp) / "qwen"
-            dest.mkdir()
-            (dest / "config.json").write_text("{}", encoding="utf-8")
+            dest = _complete_hf(Path(tmp) / "qwen")
             with redirect_stderr(err), redirect_stdout(out):
                 code = main(["from-ollama", "qwen2.5:3b", "--dir", str(dest)])
     finally:
@@ -1230,6 +1273,8 @@ def test_pull_yes_stub_snapshot_download() -> None:
         return local_dir
 
     original = hub_mod.snapshot_download
+    original_missing = hub_mod.hub_missing
+    hub_mod.hub_missing = lambda: False  # type: ignore[assignment]
     hub_mod.snapshot_download = stub  # type: ignore[assignment]
     err, out = io.StringIO(), io.StringIO()
     try:
@@ -1241,6 +1286,7 @@ def test_pull_yes_stub_snapshot_download() -> None:
                 )
     finally:
         hub_mod.snapshot_download = original  # type: ignore[assignment]
+        hub_mod.hub_missing = original_missing  # type: ignore[assignment]
     assert code == 0, err.getvalue()
     assert called == [{"repo_id": "Qwen/Qwen2.5-3B-Instruct", "local_dir": str(dest)}]
     assert f"deepfold chat --model {dest}" in out.getvalue()
@@ -1257,6 +1303,8 @@ def test_pull_32b_is_on_the_table() -> None:
         return local_dir
 
     original = hub_mod.snapshot_download
+    original_missing = hub_mod.hub_missing
+    hub_mod.hub_missing = lambda: False  # type: ignore[assignment]
     hub_mod.snapshot_download = stub  # type: ignore[assignment]
     try:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1268,8 +1316,63 @@ def test_pull_32b_is_on_the_table() -> None:
                 )
     finally:
         hub_mod.snapshot_download = original  # type: ignore[assignment]
+        hub_mod.hub_missing = original_missing  # type: ignore[assignment]
     assert code == 0
     assert called == ["Qwen/Qwen2.5-32B-Instruct"]
+
+
+def test_pull_config_only_tree_is_not_already_on_disk() -> None:
+    called: list[str] = []
+
+    def stub(*, repo_id: str, local_dir: str) -> str:
+        called.append(repo_id)
+        _complete_hf(Path(local_dir))
+        return local_dir
+
+    original = hub_mod.snapshot_download
+    original_missing = hub_mod.hub_missing
+    hub_mod.hub_missing = lambda: False  # type: ignore[assignment]
+    hub_mod.snapshot_download = stub  # type: ignore[assignment]
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "hf"
+            dest.mkdir()
+            (dest / "config.json").write_text("{}", encoding="utf-8")
+            err = io.StringIO()
+            with redirect_stderr(err), redirect_stdout(io.StringIO()):
+                code = main(
+                    ["pull", "Qwen/Qwen2.5-3B-Instruct", "--yes", "--dir", str(dest)]
+                )
+    finally:
+        hub_mod.snapshot_download = original  # type: ignore[assignment]
+        hub_mod.hub_missing = original_missing  # type: ignore[assignment]
+    assert code == 0, err.getvalue()
+    assert called == ["Qwen/Qwen2.5-3B-Instruct"]
+    assert "Already on disk" not in err.getvalue()
+
+
+def test_source_complete_requires_tokenizer_and_shards() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        stub = root / "stub"
+        stub.mkdir()
+        (stub / "config.json").write_text("{}", encoding="utf-8")
+        assert not hub_mod.source_complete(stub)
+        (stub / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+        assert not hub_mod.source_complete(stub)
+        (stub / "model.safetensors").write_bytes(b"")
+        assert hub_mod.source_complete(stub)
+        sharded = root / "sharded"
+        sharded.mkdir()
+        (sharded / "config.json").write_text("{}", encoding="utf-8")
+        (sharded / "tokenizer.json").write_text("{}", encoding="utf-8")
+        (sharded / "model.safetensors.index.json").write_text(
+            json.dumps({"weight_map": {"w": "model-00001-of-00002.safetensors"}}),
+            encoding="utf-8",
+        )
+        assert not hub_mod.source_complete(sharded)
+        (sharded / "model-00001-of-00002.safetensors").write_bytes(b"")
+        assert hub_mod.source_complete(sharded)
 
 
 def test_selftest_live_skips_without_3b() -> None:
@@ -1298,8 +1401,22 @@ def test_selftest_live_skips_without_3b() -> None:
 
 
 def test_slug_for_a_directory_and_for_a_hub_id() -> None:
-    assert paths.slug(r"C:\dev\models\Qwen2.5-3B-Instruct") == "Qwen2.5-3B-Instruct"
     assert paths.slug("Qwen/Qwen2.5-3B-Instruct") == "Qwen_Qwen2.5-3B-Instruct"
+    with tempfile.TemporaryDirectory() as tmp:
+        a = Path(tmp) / "a" / "custom-model"
+        b = Path(tmp) / "b" / "custom-model"
+        a.mkdir(parents=True)
+        b.mkdir(parents=True)
+        sa, sb = paths.slug(a), paths.slug(b)
+        assert sa != sb
+        assert sa.startswith("custom-model-")
+        assert sb.startswith("custom-model-")
+    win = paths.slug(r"C:\dev\models\Qwen2.5-3B-Instruct")
+    if os.name == "nt":
+        assert win.startswith("Qwen2.5-3B-Instruct-")
+        assert win != "Qwen2.5-3B-Instruct"
+    else:
+        assert win == "Qwen2.5-3B-Instruct"
 
 
 def test_models_root_honours_env() -> None:
@@ -1407,9 +1524,9 @@ def test_sibling_chr_is_found() -> None:
 # which .chr belongs to this model: the CHR0 header, never the glob order
 # --------------------------------------------------------------------------- #
 
-_QWEN3B = dict(hidden=2048, layers=36, vocab=151936)
-_QWEN14B = dict(hidden=5120, layers=48, vocab=152064)
-_INTERNLM20B = dict(hidden=6144, layers=48, vocab=92544)
+_QWEN3B = dict(hidden=2048, layers=36, vocab=151936, intermediate=11008)
+_QWEN14B = dict(hidden=5120, layers=48, vocab=152064, intermediate=13824)
+_INTERNLM20B = dict(hidden=6144, layers=48, vocab=92544, intermediate=16384)
 
 
 def _flat_models(root: Path) -> tuple[Path, Path]:
@@ -1418,11 +1535,12 @@ def _flat_models(root: Path) -> tuple[Path, Path]:
         root / "Qwen2.5-3B-Instruct",
         model_type="qwen2",
         hidden_size=2048,
+        intermediate_size=11008,
         num_hidden_layers=36,
         vocab_size=151936,
     )
     (model / "tokenizer_config.json").write_text("{}", encoding="utf-8")
-    _write_chr(root / "internlm2_5-20b.nf4.chr", **_INTERNLM20B)
+    _write_chr(root / "internlm2_5-20b.nf4.chr", arch="internlm2", **_INTERNLM20B)
     _write_chr(root / "qwen25-14b.nf4.chr", **_QWEN14B)
     mine = _write_chr(root / "qwen25-3b.nf4.chr", **_QWEN3B)
     return model, mine
@@ -1440,6 +1558,26 @@ def test_header_matcher_picks_the_chr_packed_from_this_model() -> None:
         assert accept(mine)
         assert not accept(root / "qwen25-14b.nf4.chr")
         assert not accept(root / "internlm2_5-20b.nf4.chr")
+
+
+def test_header_matcher_rejects_same_sizes_different_arch() -> None:
+    """llama vs qwen2 with identical hidden/layers/vocab must not share a .chr."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        model = _config(
+            root / "Llama-3B",
+            model_type="llama",
+            hidden_size=2048,
+            intermediate_size=11008,
+            num_hidden_layers=36,
+            vocab_size=151936,
+        )
+        qwen = _write_chr(root / "qwen.nf4.chr", **_QWEN3B)
+        llama = _write_chr(root / "llama.nf4.chr", arch="llama", **_QWEN3B)
+        accept = run_mod._header_matcher(model)
+        assert accept is not None
+        assert accept(llama)
+        assert not accept(qwen)
 
 
 def test_run_resolves_the_header_matched_sibling_without_compressing() -> None:
@@ -1572,7 +1710,7 @@ def test_compress_will_not_silently_overwrite_an_existing_chr() -> None:
             model = _fake_model(root, "qwen2")
             out = root / "already.nf4.chr"
             out.write_bytes(b"CHR0")
-            os.environ["DEEPFOLD_CHR_BIN"] = str(_REPO / "chr.exe")
+            os.environ["DEEPFOLD_CHR_BIN"] = str(_stub_chr_bin(root))
             try:
                 with redirect_stderr(err):
                     code = run_mod.compress(
@@ -1603,9 +1741,10 @@ def test_compress_auto_refuses_vq_when_nf4_would_not_fit() -> None:
     err = io.StringIO()
     try:
         with tempfile.TemporaryDirectory() as tmp:
-            model = _fake_model(Path(tmp), "qwen2", name="Qwen2.5-32B", **qwen32)
-            os.environ["DEEPFOLD_CHR_BIN"] = str(_REPO / "chr.exe")
-            os.environ["DEEPFOLD_HOME"] = str(Path(tmp) / "home")
+            root = Path(tmp)
+            model = _fake_model(root, "qwen2", name="Qwen2.5-32B", **qwen32)
+            os.environ["DEEPFOLD_CHR_BIN"] = str(_stub_chr_bin(root))
+            os.environ["DEEPFOLD_HOME"] = str(root / "home")
             try:
                 with redirect_stderr(err):
                     code = run_mod.compress(

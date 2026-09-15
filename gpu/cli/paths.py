@@ -10,6 +10,7 @@ says it belongs to this model.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
@@ -104,17 +105,34 @@ def find_chr_bin(explicit: str | None = None) -> Path | None:
 
 
 def slug(model: str | os.PathLike[str]) -> str:
-    """Cache-safe name: a directory contributes its leaf, a hub id both halves.
+    """Cache-safe name: a Hub id keeps both halves; a real directory is leaf+hash.
 
-    ``C:\\dev\\models\\Qwen2.5-3B-Instruct`` -> ``Qwen2.5-3B-Instruct``;
     ``Qwen/Qwen2.5-3B-Instruct`` -> ``Qwen_Qwen2.5-3B-Instruct``.
+    Two absolute paths that share a leaf (``/a/custom-model`` vs
+    ``/b/custom-model``) must not share a cache key.
     """
-    path = Path(str(model))
-    text = str(model).replace("\\", "/").strip("/")
-    if not path.is_absolute() and not path.exists() and text.count("/") == 1:
+    raw = str(model)
+    text = raw.replace("\\", "/").strip("/")
+    path = Path(raw)
+    looks_hub = (
+        not path.is_absolute()
+        and not path.exists()
+        and text.count("/") == 1
+        and ":" not in text.split("/")[0]
+    )
+    if looks_hub:
         name = text.replace("/", "_")
     else:
-        name = path.name
+        leaf = text.rsplit("/", 1)[-1] or "model"
+        if path.is_absolute() or path.exists():
+            try:
+                key = str(path.resolve())
+            except OSError:
+                key = raw
+            digest = hashlib.sha1(key.encode("utf-8", "replace")).hexdigest()[:8]
+            name = f"{leaf}-{digest}"
+        else:
+            name = leaf
     return re.sub(r"[^A-Za-z0-9._-]+", "_", name) or "model"
 
 

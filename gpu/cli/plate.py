@@ -450,7 +450,7 @@ def main(argv: list[str] | None = None) -> int:
             save()
             return 1
         dest = hub.pull_destination(row, args.dir)
-        already = dest.is_dir() and (dest / "config.json").is_file()
+        already = hub.source_complete(dest)
         if already:
             model_dir = dest
             step("pull", "skip", detail=f"already at {dest}")

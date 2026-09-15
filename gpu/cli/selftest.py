@@ -19,6 +19,7 @@ def _err(text: str) -> None:
 def _live(args: Namespace) -> int:
     """No Hub, no generate. Skip is not a silent pass (D12)."""
     from .doctor import probe, verdict
+    from .hub import source_complete
 
     m = probe(chr_bin=getattr(args, "chr_bin", None))
     v = verdict(m)
@@ -26,7 +27,7 @@ def _live(args: Namespace) -> int:
         _err(f"SKIP: generate not allowed on this machine ({v.line})")
         return 0
     path = models_root() / "Qwen2.5-3B-Instruct"
-    if not (path / "config.json").is_file():
+    if not source_complete(path):
         _err(
             f"SKIP: no 3B tree at {path}. "
             "deepfold pull Qwen/Qwen2.5-3B-Instruct --yes"

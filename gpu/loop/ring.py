@@ -135,7 +135,7 @@ class CopyRing:
 
     @property
     def ahead(self) -> int:
-        """Issued copies not yet consumed by :meth:`bind_for_gemm`. Max ``max_ahead``."""
+        """Issued copies not yet consumed by :meth:`bind_for_gemm` / :meth:`bind_hold`."""
         return self._ahead
 
     def _copy_stream_for(self, slot: int):
@@ -300,6 +300,53 @@ class CopyRing:
         self._active_gemm = gemm
         self.prefetch()
         return packed, scale
+
+    def bind_hold(self, gemm: Gemm) -> tuple[torch.Tensor, torch.Tensor]:
+        """Wait ``e_copy``, WDDM-join, return slot views. Do **not** prefetch.
+
+        Prefill weight-stationary path (docs/plan-h2-accel.md §A): one H2D, then
+        several ``N<=32`` GEMMs on the same slot. Decode stays on
+        :meth:`bind_for_gemm` / :meth:`record_gemm`. Join happens before any
+        hold GEMM and before the next prefetch (that is :meth:`release_hold`).
+        """
+        if gemm.home != "host":
+            raise RuntimeError(f"CopyRing.bind_hold({gemm.name}): expected HOST gemm")
+        if self._active_slot is not None:
+            raise RuntimeError(
+                f"CopyRing.bind_hold({gemm.name}): hold already active"
+            )
+        if not self._queue:
+            self._issue_missing(gemm)
+        head, s = self._queue[0]
+        if not _same_gemm(head, gemm):
+            raise RuntimeError(
+                f"CopyRing.bind_hold({gemm.name}): queue head is {head.name}"
+            )
+        self._queue.popleft()
+        self._ahead = max(0, self._ahead - 1)
+        self.ops.append(("wait_copy", s))
+        if self._cuda:
+            torch.cuda.current_stream().wait_event(self._e_copy[s])
+            if self._join_copy or self.timing:
+                self._e_copy[s].synchronize()
+            if self.timing:
+                dt = float(self._e_h2d_start[s].elapsed_time(self._e_copy[s]))
+                self.forward_copy_ms += dt
+                self.total_copy_ms += dt
+        packed, scale = self.slots.view(s, gemm.M, gemm.K, gemm.K_pad)
+        self._active_slot = s
+        self._active_gemm = gemm
+        return packed, scale
+
+    def gemm_hold(self) -> None:
+        """No-op: slot stays pinned until :meth:`release_hold`. Asserts a hold."""
+        if self._active_slot is None:
+            raise RuntimeError("CopyRing.gemm_hold: no active hold")
+
+    def release_hold(self, gemm: Gemm) -> None:
+        """Record ``e_gemm``, clear active, prefetch next like after a bind/record."""
+        self.record_gemm(gemm)
+        self.prefetch()
 
     def record_gemm(self, gemm: Gemm | None = None) -> None:
         """Slot ``s`` may be overwritten after the compute stream reaches this event."""

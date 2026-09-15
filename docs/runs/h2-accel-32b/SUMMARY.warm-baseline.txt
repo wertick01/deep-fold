@@ -1,0 +1,6 @@
+schema deepfold.h2_accel.v1
+plan_only=False cap_mib=10216.5625
+descs=chr chr=C:\dev\models\qwen25-32b.nf4.chr
+
+variant        status    pol          n_host  res_MiB    h2d/fwd  copies floor_ms   tok/s  prefill smoke  notes
+baseline       ok        D                90    10144     6454.7    2070      260    2.35      990 3/3    

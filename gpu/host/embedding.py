@@ -29,7 +29,7 @@ import torch.nn as nn
 
 from ._deps import ChrMatrix
 
-__all__ = ["NF4_LEVELS", "Nf4Embedding", "dequant_nf4_rows", "dequant_table"]
+__all__ = ["NF4_LEVELS", "Nf4Embedding", "dequant_nf4_rows", "dequant_table", "stage_rows_to_device"]
 
 GROUP_SIZE = 64
 
@@ -105,6 +105,16 @@ def dequant_nf4_rows(
     s = scale.index_select(0, flat).to(torch.float32)             # exact fp16 -> f32
     w = w.view(flat.numel(), n_groups, GROUP_SIZE) * s[:, :, None]
     return w.view(flat.numel(), k_padded)[:, :K].to(dtype)
+
+
+def stage_rows_to_device(
+    rows: torch.Tensor, device: torch.device | str
+) -> torch.Tensor:
+    """Tiny ``[n, hidden]`` H2D for host-embed. Not CopyRing tape of the table."""
+    dest = torch.device(device)
+    if rows.device == dest:
+        return rows
+    return rows.to(dest, non_blocking=dest.type == "cuda")
 
 
 def dequant_table(
@@ -185,7 +195,8 @@ class Nf4Embedding(nn.Module):
         rows = dequant_nf4_rows(
             self.packed, self.scale, input_ids, self.embedding_dim, dtype=self.compute_dtype
         )
-        return rows.view(*input_ids.shape, self.embedding_dim)
+        rows = rows.view(*input_ids.shape, self.embedding_dim)
+        return stage_rows_to_device(rows, input_ids.device)
 
     def extra_repr(self) -> str:
         return (

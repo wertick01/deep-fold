@@ -24,7 +24,7 @@ from gpu.cli.paths import models_root  # noqa: E402
 from gpu.host.host_image import HostImage, maybe_pin  # noqa: E402
 from gpu.host.linear import CompressedLinear  # noqa: E402
 from gpu.host.slots import SlotPair  # noqa: E402
-from gpu.loop.generate import TokenLoop  # noqa: E402
+from gpu.loop.generate import PREFILL_HOLD_SUPERCHUNK, TokenLoop  # noqa: E402
 from gpu.loop.graph import Gemm, GemmGroup, GraphedGemmGroup, group_is_resident  # noqa: E402
 from gpu.loop.ring import CopyRing, default_join_copy  # noqa: E402
 from gpu.loop.test_attach import _bound, qwen2_model  # noqa: E402
@@ -668,6 +668,135 @@ def test_tokenloop_dummy_forward_lm_head_prefetch() -> None:
         graph_mod.nf4_gemm = orig
 
 
+def test_bind_hold_one_issue_three_gemms() -> None:
+    """Prefill hold: one H2D, three GEMMs on the slot, one record; copies==1."""
+    import inspect
+
+    src = inspect.getsource(CopyRing.bind_hold)
+    rel = inspect.getsource(CopyRing.release_hold)
+    check("bind_hold has synchronize()", "synchronize()" in src, "")
+    check("bind_hold does not prefetch()", "self.prefetch()" not in src, "")
+    check("release_hold prefetches", "self.prefetch()" in rel, "")
+    check("PREFILL_HOLD_SUPERCHUNK is 256", PREFILL_HOLD_SUPERCHUNK == 256, str(PREFILL_HOLD_SUPERCHUNK))
+
+    g, img = _host_gemm("down", 8, 64, fill=1)
+    ring = CopyRing(SlotPair(img.nbytes, "cpu"))
+    ring.arm([g])
+    ring.prefetch()
+    check("hold setup one issue", ring.total_copies == 1 and ring.ahead == 1, f"c={ring.total_copies}")
+    packed, _ = ring.bind_hold(g)
+    check("hold no extra copy on bind", ring.total_copies == 1, f"{ring.total_copies}")
+    check("hold ahead 0 (no prefetch)", ring.ahead == 0, f"{ring.ahead}")
+    check("hold packed is slot", packed.data_ptr() == ring.slots.arena[0].data_ptr(), "")
+    check("hold packed is not host", packed.data_ptr() != img.arena.data_ptr(), "")
+    check("hold keeps active slot", ring._active_slot == 0, str(ring._active_slot))
+    for _ in range(3):
+        ring.gemm_hold()
+    kinds = [op[0] for op in ring.ops]
+    check("hold three gemms no record yet", kinds.count("record_gemm") == 0, str(kinds))
+    check("hold copies still 1 during GEMMs", ring.total_copies == 1, f"{ring.total_copies}")
+    ring.release_hold(g)
+    kinds = [op[0] for op in ring.ops]
+    check("hold one record", kinds.count("record_gemm") == 1, str(kinds))
+    check("hold copies==1 after release", ring.total_copies == 1, f"{ring.total_copies}")
+    check("hold inactive after release", ring._active_slot is None, str(ring._active_slot))
+    check("hold tape done ahead 0", ring.ahead == 0, f"{ring.ahead}")
+
+
+def test_bind_during_hold_raises() -> None:
+    g0, img = _host_gemm("a", 4, 64, fill=1)
+    g1, _ = _host_gemm("b", 4, 64, fill=2)
+    ring = CopyRing(SlotPair(img.nbytes, "cpu"))
+    ring.arm([g0, g1])
+    ring.prefetch()
+    ring.bind_hold(g0)
+    raised_hold = raised_bind = False
+    try:
+        ring.bind_hold(g1)
+    except RuntimeError as exc:
+        raised_hold = "hold already active" in str(exc) or "not record" in str(exc)
+    try:
+        ring.bind_for_gemm(g1)
+    except RuntimeError as exc:
+        raised_bind = "not record_gemm" in str(exc) or "hold already" in str(exc)
+    check("second bind_hold during hold raises", raised_hold, "")
+    check("bind_for_gemm during hold raises", raised_bind, "")
+    check("hold copies still 1", ring.total_copies == 1, f"{ring.total_copies}")
+    ring.release_hold(g0)
+    check("release_hold prefetches next", ring.total_copies == 2 and ring.ahead == 1, f"c={ring.total_copies}")
+    ring.bind_hold(g1)
+    ring.gemm_hold()
+    ring.release_hold(g1)
+    check("second hold no extra issue", ring.total_copies == 2, f"{ring.total_copies}")
+
+
+def test_decode_bind_for_gemm_still_works() -> None:
+    """N=1 decode path stays bind_for_gemm + record_gemm (prefetch next)."""
+    g0, img = _host_gemm("a", 4, 64, fill=1)
+    g1, _ = _host_gemm("b", 4, 64, fill=2)
+    ring = CopyRing(SlotPair(img.nbytes, "cpu"))
+    ring.arm([g0, g1])
+    ring.prefetch()
+    ring.bind_for_gemm(g0)
+    kinds = [op[0] for op in ring.ops]
+    check("decode bind still prefetches next", kinds.count("h2d") == 2, str(kinds))
+    check("decode record not yet", "record_gemm" not in kinds, str(kinds))
+    ring.record_gemm(g0)
+    ring.bind_for_gemm(g1)
+    ring.record_gemm(g1)
+    check("decode two copies", ring.total_copies == 2, f"{ring.total_copies}")
+    check("decode ahead 0 after tape", ring.ahead == 0, f"{ring.ahead}")
+
+
+def test_tokenloop_prefill_hold_vs_chunk_copies() -> None:
+    """T=64, chunk=32, one HOST down: chunk → 2 copies; hold → 1."""
+    model, plan = _bound(qwen2_model())
+    down = model.get_submodule(plan.layers[0].gemms["down"])
+    img = _host_image(down.M, down.K)
+    down.attach_host(img)
+    slots = SlotPair(img.nbytes, "cpu")
+    model.deepfold_slots = slots
+
+    def _make(mode: str) -> TokenLoop:
+        original = generate_mod.linear_max_n
+        generate_mod.linear_max_n = lambda codec="nf4", probe=16: 32
+        try:
+            loop = TokenLoop(model, max_seq=64, overlap=False, prefill_mode=mode)
+        finally:
+            generate_mod.linear_max_n = original
+        _bf16_loop_norms(loop)
+        loop.embed.weight.data = loop.embed.weight.data.to(torch.bfloat16)
+        loop.prefill_chunk = 32
+        return loop
+
+    launched: list[int] = []
+    orig = _fake_nf4(launched)
+    orig_attend = TokenLoop._attend
+
+    def _zeros_attend(self, q, k, v, n, mask):  # noqa: ARG001
+        return torch.zeros(n, self.q_dim, dtype=q.dtype, device=q.device)
+
+    TokenLoop._attend = _zeros_attend
+    try:
+        ids = torch.arange(64, dtype=torch.long) % 40
+        loop_c = _make("chunk")
+        check("default-like chunk mode", loop_c.prefill_mode == "chunk", loop_c.prefill_mode)
+        check("chunk width 32", loop_c.prefill_chunk == 32, str(loop_c.prefill_chunk))
+        loop_c.prefill(ids)
+        copies_c = loop_c._ring.total_copies
+        loop_h = _make("hold")
+        check("hold mode flag", loop_h.prefill_mode == "hold", loop_h.prefill_mode)
+        loop_h.prefill(ids)
+        copies_h = loop_h._ring.total_copies
+        check("chunk prefill 2 copies (two N=32 forwards)", copies_c == 2, f"{copies_c}")
+        check("hold prefill 1 copy (one superchunk)", copies_h == 1, f"{copies_h}")
+        check("hold one forward", loop_h._ring.total_forwards == 1, f"{loop_h._ring.total_forwards}")
+        check("chunk two forwards", loop_c._ring.total_forwards == 2, f"{loop_c._ring.total_forwards}")
+    finally:
+        graph_mod.nf4_gemm = orig
+        TokenLoop._attend = orig_attend
+
+
 # --------------------------------------------------------------------------- #
 # GPU
 # --------------------------------------------------------------------------- #
@@ -1110,6 +1239,10 @@ TESTS = [
     test_prefetch_next_arm_does_not_double_h2d,
     test_prefetch_next_noop_until_tape_done,
     test_tokenloop_dummy_forward_lm_head_prefetch,
+    test_bind_hold_one_issue_three_gemms,
+    test_bind_during_hold_raises,
+    test_decode_bind_for_gemm_still_works,
+    test_tokenloop_prefill_hold_vs_chunk_copies,
     test_gpu_overflow_down_vs_resident,
     test_gpu_bind_join_prefetches_and_skips_elapsed,
     test_gpu_two_copy_streams_three_slots,

@@ -1,0 +1,20 @@
+H2-accel comparison (Paris / Berlin / 323) copied from
+C:\dev\models\runs\h2-accel-32b-20260915-190303
+on the author's RTX 3080 12 GB (WDDM). Not a synthetic fixture.
+
+Command:
+  python -m gpu.lab.h2_accel --variant baseline,profile,verify-k,spec-lookup,prefill-hold,pairs-stride,host-embed --max-seq 512 --max-new-tokens 64
+
+CHR: C:\dev\models\qwen25-32b.nf4.chr
+codec=nf4 overflow=True  cap=10216.5625 MiB  n_host=90 (max_seq=512, not the 2048 / 96-HOST tape)
+
+The first matrix row ``baseline`` is a cold start (0.08 tok/s, prefill 26 s).
+Do not use it as T_1. Warm D after the matrix:
+
+  C:\dev\models\runs\h2-accel-32b-warm-baseline-20260915-201046
+  python -m gpu.lab.h2_accel --variant baseline --max-seq 512 --max-new-tokens 64
+  → 2.35 tok/s, prefill 990 ms, copies 2070, smi 12013
+
+3B overflow canary (supporting, not the 32B tape):
+  docs/runs/h2-accel-3b-canary/
+  C:\dev\models\runs\h2-accel-3b-canary-20260915-190205

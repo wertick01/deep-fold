@@ -1,0 +1,8 @@
+schema deepfold.h2_accel.v1
+plan_only=False cap_mib=421.1484375
+descs=chr chr=C:\dev\models\qwen25-3b.nf4.chr
+
+variant        status    pol          n_host  res_MiB    h2d/fwd  copies floor_ms   tok/s  prefill smoke  notes
+baseline       ok        D               100      421     1142.2    2300       46   10.28      235 3/3    
+verify-k       ok        D               100      421     1142.2    2300       46   10.29      242 3/3    k=4 121ms/block (30ms/tok) match=True
+prefill-hold   ok        D               100      421     1142.2    2000       46   10.09      181 3/3    

@@ -31,6 +31,7 @@ _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
+from gpu.lab.compare import upsert
 from gpu.lab.script import MESSAGES, NEEDLES, RUNS_DIR, quality_ok
 
 __all__ = ["EXPECTED_GGUF_BYTES", "main"]
@@ -435,6 +436,28 @@ def main(argv: list[str] | None = None) -> int:
         )
         if args.bench:
             plate["bench"] = run_bench(args, dest)
+        gguf_name = Path(args.gguf).name
+        size = "3B" if "3B" in gguf_name else "32B" if "32B" in gguf_name else "unknown"
+        model = "Qwen2.5-3B-Instruct" if size == "3B" else "Qwen2.5-32B-Instruct"
+        bench = plate.get("bench") or {}
+        upsert(
+            {
+                "id": f"llamacpp-q4-{size}-Q4_K_M",
+                "stack": "llamacpp-q4",
+                "engine": "llama.cpp b10964 llama-server CUDA 12.4",
+                "model": model,
+                "size": size,
+                "quant": "Q4_K_M",
+                "mean_decode_tok_s": plate.get("mean_decode_tok_s"),
+                "long_decode_tok_s": long.get("decode_tok_s"),
+                "mean_ttft_ms": plate.get("mean_ttft_ms"),
+                "smi_after_load_mib": plate.get("smi_after_load_mib"),
+                "smoke_ok": plate.get("smoke_ok"),
+                "bench_pp512_tok_s": bench.get("pp512_tok_s"),
+                "bench_tg_tok_s": bench.get("tg_tok_s"),
+                "source": str(dest),
+            }
+        )
     (dest / "plate.json").write_text(
         json.dumps(plate, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
@@ -443,7 +466,7 @@ def main(argv: list[str] | None = None) -> int:
     bench = plate.get("bench") or {}
     lines = [
         f"schema {SCHEMA}",
-        f"quant Q4_K_M  model Qwen2.5-32B-Instruct",
+        f"quant Q4_K_M  model {Path(args.gguf).name}",
         f"ctx {plate.get('ctx')} n_predict {plate.get('n_predict')} "
         f"ngl {plate.get('ngl')} parallel {plate.get('parallel')}",
         f"gguf {plate.get('gguf_note') or plate.get('gguf')}",

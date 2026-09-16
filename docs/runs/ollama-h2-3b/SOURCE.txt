@@ -1,0 +1,11 @@
+Ollama 0.34.0 vs the same greedy Instruct smoke (Paris / Berlin / 323).
+Live dump stays outside git:
+
+  C:\dev\models\runs\ollama-h2-20260916-000600
+
+Command:
+
+  python -m gpu.lab.ollama_h2 --model qwen2.5:3b --size 3B
+
+Library tag qwen2.5:3b (~1.9 GB). ctx 2048, n_predict 64, temperature 0.
+Not a GGUF import into .chr.

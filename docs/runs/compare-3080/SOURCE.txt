@@ -1,0 +1,8 @@
+Matched 3080 compare JSON (greedy smoke ctx 2048 n64; 32B decode = long plateau).
+
+  python -m gpu.lab.compare --seed-known
+  python -m gpu.lab.compare_plate --redraw
+
+Live dumps stay under C:\dev\models\runs\. Quote 32B long, not Ollama smoke 3.18.
+Write-up: docs/compare-3080.md
+Plate: docs/img/compare-3080.png

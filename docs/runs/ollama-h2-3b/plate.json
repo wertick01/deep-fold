@@ -1,0 +1,85 @@
+{
+  "schema": "deepfold.ollama_h2.v1",
+  "plan_only": false,
+  "model": "qwen2.5:3b",
+  "ctx": 2048,
+  "n_predict": 64,
+  "tags": [
+    "qwen2.5:32b",
+    "qwen2.5:3b"
+  ],
+  "smi_before_mib": 1683.0,
+  "messages": [
+    {
+      "id": 1,
+      "prompt": "Reply with one short sentence. What is the capital of France?",
+      "reply": "The capital of France is Paris.",
+      "needles": [
+        "paris",
+        "париж"
+      ],
+      "quality_ok": true,
+      "prompt_n": 42,
+      "prompt_ms": 15.136,
+      "predicted_n": 8,
+      "predicted_ms": 47.316,
+      "decode_tok_s": 169.07599966184802,
+      "wall_ms": 66.90179998986423
+    },
+    {
+      "id": 2,
+      "prompt": "And the capital of Germany?",
+      "reply": "The capital of Germany is Berlin.",
+      "needles": [
+        "berlin",
+        "берлин"
+      ],
+      "quality_ok": true,
+      "prompt_n": 35,
+      "prompt_ms": 14.211,
+      "predicted_n": 8,
+      "predicted_ms": 45.496,
+      "decode_tok_s": 175.83963425356075,
+      "wall_ms": 85.35199999460019
+    },
+    {
+      "id": 3,
+      "prompt": "What is 17 times 19? Reply with the number only.",
+      "reply": "323",
+      "needles": [
+        "323"
+      ],
+      "quality_ok": true,
+      "prompt_n": 45,
+      "prompt_ms": 13.142,
+      "predicted_n": 4,
+      "predicted_ms": 17.871,
+      "decode_tok_s": 223.8263107828325,
+      "wall_ms": 59.83740001101978
+    }
+  ],
+  "warmup": {
+    "reply": "Hello! How can I assist you today",
+    "prompt_n": 31,
+    "prompt_ms": 16716.541,
+    "predicted_n": 8,
+    "predicted_ms": 4354.622,
+    "decode_tok_s": 1.8371284579924503,
+    "wall_ms": 45359.53280000831
+  },
+  "smi_after_load_mib": 3837.0,
+  "long": {
+    "prompt": "Write a long travelogue about rivers, forests, and cities. Keep going with more sentences.",
+    "reply": "As I step off the plane in the heart of the city, the first thing that strikes me is the cacophony of sounds that envelops me. The hum of traffic, the blaring of horns, and the constant chatter of people all blend together into a symphony of urban life. The city, with its",
+    "prompt_n": 48,
+    "prompt_ms": 13.088,
+    "predicted_n": 64,
+    "predicted_ms": 341.748,
+    "decode_tok_s": 187.2724931821108,
+    "wall_ms": 359.2415000020992
+  },
+  "mean_decode_tok_s": 189.58064823274708,
+  "mean_ttft_ms": 14.163000000000002,
+  "smoke_ok": true,
+  "smi_after_generate_mib": 3837.0
+}

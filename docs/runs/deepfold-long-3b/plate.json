@@ -1,0 +1,29 @@
+{
+  "schema": "deepfold.long.v1",
+  "size": "3B",
+  "model": "C:\\dev\\models\\Qwen2.5-3B-Instruct",
+  "chr": "C:\\dev\\models\\qwen25-3b.nf4.chr",
+  "overflow": false,
+  "device_mib": 1563.796875,
+  "cap": {
+    "vram_mib": 12288,
+    "max_seq": 2048,
+    "overflow": false,
+    "cap_bytes": null,
+    "cap_mib": null,
+    "codec": "nf4",
+    "reason": "NF4 fits this card; keeping 4.25-bit (better quality, measured path)"
+  },
+  "smi_after_load_mib": 3736.0,
+  "warmup_ms": 408.09330000774935,
+  "graph": "linears",
+  "prompt": "Write a long travelogue about rivers, forests, and cities. Keep going with more sentences.",
+  "reply": "As I embark on this journey, I find myself in the heart of a vast, verdant forest, where the air is cool and the scent of earth and pine needles fills the air. The forest is a tapestry of life, with every tree, leaf, and branch telling a story of the past, present,",
+  "n_tokens": 64,
+  "decode_steps": 63,
+  "decode_ms": 1788.5315000021365,
+  "prefill_ms": 87.82809998956509,
+  "decode_tok_s": 35.2244285325278,
+  "stop_token": null,
+  "report": "252 nf4 linears (1405.7 MiB), 181 bf16 tensors (0.46 MiB), embed=nf4-rows (157.6 MiB), tied_lm_head=True, total=1563.8 MiB, 1.3s"
+}

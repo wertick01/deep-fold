@@ -1,0 +1,5 @@
+deep-fold NF4 overflow TokenLoop ignore-EOS 64-token plateau, same travelogue
+as llama.cpp / Ollama. Smoke 2.31 tok/s stays the H2-6 product plate.
+
+Live: C:\dev\models\runs\deepfold-long-32B-20260916-002552
+Command: python -m gpu.lab.deepfold_long --size 32B

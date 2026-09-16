@@ -1,0 +1,85 @@
+{
+  "schema": "deepfold.ollama_h2.v1",
+  "plan_only": false,
+  "model": "qwen2.5:32b",
+  "ctx": 2048,
+  "n_predict": 64,
+  "tags": [
+    "qwen2.5:32b",
+    "qwen2.5:3b"
+  ],
+  "smi_before_mib": 1608.0,
+  "messages": [
+    {
+      "id": 1,
+      "prompt": "Reply with one short sentence. What is the capital of France?",
+      "reply": "The capital of France is Paris.",
+      "needles": [
+        "paris",
+        "париж"
+      ],
+      "quality_ok": true,
+      "prompt_n": 42,
+      "prompt_ms": 986.005,
+      "predicted_n": 8,
+      "predicted_ms": 2824.142,
+      "decode_tok_s": 2.8327187513942285,
+      "wall_ms": 3838.7332999845967
+    },
+    {
+      "id": 2,
+      "prompt": "And the capital of Germany?",
+      "reply": "The capital of Germany is Berlin.",
+      "needles": [
+        "berlin",
+        "берлин"
+      ],
+      "quality_ok": true,
+      "prompt_n": 35,
+      "prompt_ms": 598.291,
+      "predicted_n": 8,
+      "predicted_ms": 2766.141,
+      "decode_tok_s": 2.8921157670559814,
+      "wall_ms": 3376.078700006474
+    },
+    {
+      "id": 3,
+      "prompt": "What is 17 times 19? Reply with the number only.",
+      "reply": "323",
+      "needles": [
+        "323"
+      ],
+      "quality_ok": true,
+      "prompt_n": 45,
+      "prompt_ms": 1118.154,
+      "predicted_n": 4,
+      "predicted_ms": 1049.703,
+      "decode_tok_s": 3.810601665423458,
+      "wall_ms": 2195.057800010545
+    }
+  ],
+  "warmup": {
+    "reply": "Hello! How can I assist you today",
+    "prompt_n": 31,
+    "prompt_ms": 1423.539,
+    "predicted_n": 8,
+    "predicted_ms": 2763.071,
+    "decode_tok_s": 2.89532914644611,
+    "wall_ms": 13218.651699979091
+  },
+  "smi_after_load_mib": 11559.0,
+  "long": {
+    "prompt": "Write a long travelogue about rivers, forests, and cities. Keep going with more sentences.",
+    "reply": "Embarking on a journey through the heart of nature and the bustling life of cities, one finds themselves immersed in a tapestry of landscapes that range from the serene to the vibrant. This travelogue takes you through the winding paths of rivers, the dense embrace of forests, and the pulsating energy of cities, each offering",
+    "prompt_n": 48,
+    "prompt_ms": 1117.467,
+    "predicted_n": 64,
+    "predicted_ms": 25166.941,
+    "decode_tok_s": 2.543018637028632,
+    "wall_ms": 26302.884200005792
+  },
+  "mean_decode_tok_s": 3.178478727957889,
+  "mean_ttft_ms": 900.8166666666666,
+  "smoke_ok": true,
+  "smi_after_generate_mib": 11576.0
+}

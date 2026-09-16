@@ -1,0 +1,18 @@
+{
+  "model": "qwen2.5:32b",
+  "created_at": "2026-09-15T17:07:55.802799Z",
+  "message": {
+    "role": "assistant",
+    "content": "Embarking on a journey through the heart of nature and the bustling life of cities, one finds themselves immersed in a tapestry of landscapes that range from the serene to the vibrant. This travelogue takes you through the winding paths of rivers, the dense embrace of forests, and the pulsating energy of cities, each offering"
+  },
+  "done": true,
+  "done_reason": "length",
+  "total_duration": 26288514100,
+  "load_duration": 1631600,
+  "prompt_eval_count": 48,
+  "prompt_eval_cached_count": 24,
+  "prompt_eval_duration": 1117467000,
+  "eval_count": 64,
+  "eval_duration": 25166941000,
+  "_wall_ms": 26302.884200005792
+}

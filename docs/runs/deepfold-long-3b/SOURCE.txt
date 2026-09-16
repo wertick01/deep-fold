@@ -1,0 +1,5 @@
+deep-fold NF4 TokenLoop ignore-EOS 64-token plateau, same travelogue as
+llama.cpp / Ollama. Smoke numbers stay in compare.json from the 3B lab worker.
+
+Live: C:\dev\models\runs\deepfold-long-3B-20260916-002528
+Command: python -m gpu.lab.deepfold_long --size 3B

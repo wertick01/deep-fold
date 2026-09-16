@@ -20,6 +20,7 @@ from gpu.cli.paths import models_root, runs_root
 __all__ = [
     "CHR_PATH",
     "END_OF_TURN_TOKENS",
+    "LONG_PROMPT",
     "MAX_NEW_TOKENS",
     "MAX_SEQ",
     "MESSAGES",
@@ -40,6 +41,12 @@ MESSAGES = [
     "And the capital of Germany?",
     "What is 17 times 19? Reply with the number only.",
 ]
+
+# Same travelogue as llama.cpp / Ollama ignore-EOS 64-token decode plateau.
+LONG_PROMPT = (
+    "Write a long travelogue about rivers, forests, and cities. "
+    "Keep going with more sentences."
+)
 
 # Case-insensitive substrings, per 1-based message_id. Either language counts:
 # the prompts are English but a 3B instruct model is allowed to be multilingual.

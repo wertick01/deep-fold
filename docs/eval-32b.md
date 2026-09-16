@@ -26,6 +26,9 @@ Plate: [`docs/img/h2-qwen25-32b.png`](img/h2-qwen25-32b.png)
 | 3 | What is 17 times 19? | 323 | 2.30 | 1021 ms |
 
 Mean decode **2.31 tok/s**, mean TTFT **1006 ms**. `gate.txt` = PASS.
+Long ignore-EOS plateau (same travelogue as llama.cpp / Ollama, 64 tokens,
+63 decode steps): **2.49 tok/s**, TTFT **925 ms**. Live
+`C:\dev\models\runs\deepfold-long-32B-20260916-002552`.
 
 H2 sanity from this run:
 
@@ -66,11 +69,42 @@ llama.cpp is slower on decode here because 18.5 GiB of Q4_K_M does not fit
 other way around (pp512 ~70 tok/s vs H2 TTFT ~1.0 s on ~40-token prompts).
 
 Do **not** cite a Korean Ollama blog (~2.9–3.1 tok/s): that run was
-`qwen2.5-coder:32b`, `num_ctx=32768`, temperature 0.2, Ollama — not this
-plate. Ollama itself is not installed on this box yet.
+`qwen2.5-coder:32b`, `num_ctx=32768`, temperature 0.2 — not this plate.
 
-The 3B competitor grid in `docs/competitor-venvs.md` is still empty.
-This row is 32B overflow only.
+## Ollama 0.34.0 — same smoke, 2026-09-16
+
+Library tags `qwen2.5:3b` / `qwen2.5:32b`, greedy, `num_ctx=2048`,
+`num_predict=64`. Command: `python -m gpu.lab.ollama_h2 --model qwen2.5:32b`.
+Live dump: `C:\dev\models\runs\ollama-h2-20260916-000706`  
+Copy in git: [`docs/runs/ollama-h2-32b/`](runs/ollama-h2-32b/)
+
+| | 3B | 32B |
+|---|---:|---:|
+| Smoke mean (short EOS) | **189.6** | **3.18** |
+| Long decode, 64 tokens | **187.3** | **2.54** |
+| Mean TTFT (smoke) | **14 ms** | **901 ms** |
+| nvidia-smi after load | **3837 MiB** | **11559 MiB** |
+| Smoke needles | **3/3** | **3/3** |
+
+32B smoke mean is 8+8+4 tokens; quote the 64-token plateau (**2.54**) next to
+llama.cpp long **1.52** and H2 long **2.49** (smoke **2.31**). Same card, weights still spill
+off 12 GB (`smi` ~11.6 GiB). Matched JSON: [`docs/runs/compare-3080/`](runs/compare-3080/).
+Plate: [`docs/img/compare-3080.png`](img/compare-3080.png). Write-up:
+[`docs/compare-3080.md`](compare-3080.md).
+
+Ollama is llama-server, not a private GEMM. On this 3080 it auto-fit **33/65**
+layers (`--load-mode none --flash-attn auto`; mmap off because Windows+CUDA).
+CUDA0 **9559 MiB** + CUDA_Host **9367 MiB**. Decode `graph splits = 2` at
+batch 1: GPU prefix, CPU Q4_K suffix on the 5950X. Weights stay put.
+
+H2 still computes every layer on the GPU and streams **96** packed matrices
+(**6885 MiB**) each token. The 2.54 vs 2.49 long tie is CPU-suffix time vs
+PCIe copy time, not NF4 matching Q4_K mmvq. 3B (fully GPU) is the kernel
+gap: Ollama **187.3** vs H2 **35.2**.
+
+Standalone llama.cpp **1.52** used `-ngl 99`, which aborted auto-fit. Do not
+read that as “Ollama’s algorithm is newer llama.cpp” (0.34.0 vendors
+**b10760**; our zip is **b10964**).
 
 ## B — hard 12 — not run
 

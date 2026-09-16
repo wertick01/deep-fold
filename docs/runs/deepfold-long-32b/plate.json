@@ -1,0 +1,29 @@
+{
+  "schema": "deepfold.long.v1",
+  "size": "32B",
+  "model": "C:\\dev\\models\\Qwen2.5-32B-Instruct",
+  "chr": "C:\\dev\\models\\qwen25-32b.nf4.chr",
+  "overflow": true,
+  "device_mib": 9716.041015625,
+  "cap": {
+    "vram_mib": 12288,
+    "max_seq": 2048,
+    "overflow": true,
+    "cap_bytes": 10310189056,
+    "cap_mib": 9832.5625,
+    "codec": "nf4",
+    "reason": "NF4 packed weights 16599 MiB plus 1800 MiB runtime do not fit 12288 MiB VRAM (short 6111 MiB); NF4 overflow (H2), not VQ."
+  },
+  "smi_after_load_mib": 11646.0,
+  "warmup_ms": 4046.5197000012267,
+  "graph": "linears",
+  "prompt": "Write a long travelogue about rivers, forests, and cities. Keep going with more sentences.",
+  "reply": "My journey began along the banks of the mighty Amazon, a river so vast and powerful that it seemed to stretch endlessly into the horizon, its waters a deep, mysterious green. The Amazon is not just a river; it's a world in itself, teeming with life. The air was thick with the scent of damp",
+  "n_tokens": 64,
+  "decode_steps": 63,
+  "decode_ms": 25319.382500019856,
+  "prefill_ms": 925.0495999876875,
+  "decode_tok_s": 2.488212340879585,
+  "stop_token": null,
+  "report": "449 nf4 linears (9319.5 MiB), 321 bf16 tensors (2.13 MiB), embed=nf4-rows (394.5 MiB), tied_lm_head=False, total=9716.0 MiB, 21.4s, overflow streamed=96 (6885.0 MiB host) resident_plan=9713.9 MiB slot=71.72 MiB×2"
+}

@@ -1,0 +1,12 @@
+Ollama 0.34.0 vs H2 / llama.cpp, same PC / same Instruct / greedy smoke.
+Live dump stays outside git:
+
+  C:\dev\models\runs\ollama-h2-20260916-000706
+
+Command:
+
+  python -m gpu.lab.ollama_h2 --model qwen2.5:32b --size 32B
+
+Library tag qwen2.5:32b (~19 GB). ctx 2048, n_predict 64, temperature 0.
+Smoke mean is short EOS (8/8/4 tokens). Quote long 64-token plateau for decode.
+Not a GGUF import into .chr. Do not paste the Korean qwen2.5-coder:32b blog.

@@ -60,10 +60,10 @@ card may JIT the CUDA kernel (~1 min). Do not promise 3080 tok/s.
 | Need | Why | Check |
 |---|---|---|
 | NVIDIA driver (Ampere or Ada) | GPU | `nvidia-smi` prints the card name |
-| Python 3.11 or 3.12 | runtime | Windows: `py -3.11 --version`; Linux: `python3 --version` |
+| Python 3.11 or 3.12 | runtime | Windows: `py -3.11 --version`; Linux: `python3.11 --version` (Ubuntu 22.04 `python3` is 3.10) |
 | Go 1.22+ (optional) | `chr` compressor; setup fetches this from go.dev if missing | `go version`, or skip — `scripts/setup.*` / `deepfold setup` |
 | Windows: MSVC Build Tools | compile NF4 kernel; setup winget-installs if missing | `cl` after `vcvars64.bat` |
-| CUDA Toolkit 12.4 (`nvcc`) | compile `.cu`; setup winget-installs if missing | `nvcc --version`, or skip if a matching `.pyd` is already in `gpu/nf4` |
+| CUDA Toolkit 12.4 (`nvcc`) | compile `.cu`; Windows setup winget-installs if missing; Linux you install nvcc yourself | `nvcc --version`, or skip if a matching `.pyd`/`.so` is already in `gpu/nf4` |
 | Linux: `g++` | compile NF4 kernel (setup does not sudo apt) | `g++ --version` |
 | Disk | 3B ≈ 6 GB BF16, then a `.chr` | 3B is enough for smoke |
 
@@ -97,6 +97,9 @@ cd deep-fold
 bash scripts/setup.sh
 source .venv/bin/activate
 ```
+
+WSL2 uses the Windows GPU driver, so CopyRing joins H2D like WDDM
+(`DEEPFOLD_COPY_JOIN=1`). Native Linux stays off. Override with `0` or `1`.
 
 `doctor` exit codes:
 

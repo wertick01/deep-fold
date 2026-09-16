@@ -60,10 +60,10 @@ source .venv/bin/activate
 | Что | Зачем | Как проверить |
 |---|---|---|
 | Драйвер NVIDIA (Ampere или Ada) | GPU | `nvidia-smi` печатает имя карты |
-| Python 3.11 или 3.12 | рантайм | Windows: `py -3.11 --version`; Linux: `python3 --version` |
+| Python 3.11 или 3.12 | рантайм | Windows: `py -3.11 --version`; Linux: `python3.11 --version` (Ubuntu 22.04: `python3` — это 3.10) |
 | Go 1.22+ (необязательно) | компрессор `chr`; setup сам скачает с go.dev, если его нет | `go version`, либо пропустить — `scripts/setup.*` / `deepfold setup` |
 | Windows: MSVC Build Tools | сборка ядра NF4; setup поставит через winget, если нет | `cl` после `vcvars64.bat` |
-| CUDA Toolkit 12.4 (`nvcc`) | компиляция `.cu`; setup поставит через winget, если нет | `nvcc --version`, либо готовый `.pyd` в `gpu/nf4` |
+| CUDA Toolkit 12.4 (`nvcc`) | компиляция `.cu`; на Windows setup поставит через winget, на Linux nvcc ставите сами | `nvcc --version`, либо готовый `.pyd`/`.so` в `gpu/nf4` |
 | Linux: `g++` | сборка ядра (setup не делает sudo apt) | `g++ --version` |
 | Место на диске | 3B ≈ 6 ГБ BF16 + потом `.chr` | для дыма хватит 3B |
 
@@ -97,6 +97,10 @@ cd deep-fold
 bash scripts/setup.sh
 source .venv/bin/activate
 ```
+
+WSL2 ходит в тот же WDDM-драйвер Windows, поэтому CopyRing делает join
+как на Windows (`DEEPFOLD_COPY_JOIN=1`). Нативному Linux join не нужен.
+Переопределение: `0` или `1`.
 
 Код выхода `doctor`:
 

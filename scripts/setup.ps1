@@ -9,6 +9,12 @@
 
 $ErrorActionPreference = "Stop"
 
+function Test-Python311([string]$Exe) {
+    if (-not (Test-Path $Exe)) { return $false }
+    & $Exe -c "import sys; raise SystemExit(0 if sys.version_info[:2] >= (3, 11) else 1)" | Out-Null
+    return ($LASTEXITCODE -eq 0)
+}
+
 $Repo = Split-Path -Parent $PSScriptRoot
 Set-Location $Repo
 
@@ -20,8 +26,13 @@ if (-not (Test-Path $VenvPy)) {
     Write-Host "Creating venv at $Venv"
     $made = $false
     if (Get-Command py -ErrorAction SilentlyContinue) {
-        & py -3.11 -m venv $Venv
-        if ($LASTEXITCODE -eq 0 -and (Test-Path $VenvPy)) { $made = $true }
+        foreach ($ver in @("3.12", "3.11")) {
+            & py "-$ver" -m venv $Venv
+            if ($LASTEXITCODE -eq 0 -and (Test-Python311 $VenvPy)) {
+                $made = $true
+                break
+            }
+        }
     }
     if (-not $made) {
         & python -m venv $Venv
@@ -29,6 +40,10 @@ if (-not (Test-Path $VenvPy)) {
     if (-not (Test-Path $VenvPy)) {
         throw "venv python missing at $VenvPy (need Python 3.11+)"
     }
+}
+
+if (-not (Test-Python311 $VenvPy)) {
+    throw "$VenvPy is not Python 3.11+. Delete .venv and re-run with Python 3.11 or 3.12."
 }
 
 Write-Host "Using $VenvPy"

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import os
 from collections import deque
+from pathlib import Path
 from typing import Sequence
 
 import torch
@@ -34,18 +35,34 @@ from gpu.host.slots import SlotPair
 
 from .graph import Gemm
 
-__all__ = ["CopyRing", "default_join_copy"]
+__all__ = ["CopyRing", "default_join_copy", "version_is_wsl"]
 
 
 def _same_gemm(a: Gemm, b: Gemm) -> bool:
     return a is b or a.name == b.name
 
 
+def version_is_wsl(text: str) -> bool:
+    """``/proc/version`` on WSL1/WSL2 names Microsoft."""
+    return "microsoft" in text.lower()
+
+
+def _wsl2() -> bool:
+    if os.name == "nt":
+        return False
+    try:
+        text = Path("/proc/version").read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+    return version_is_wsl(text)
+
+
 def default_join_copy() -> bool:
     """CPU-join ``e_copy`` before prefetch.
 
     Windows (WDDM) needs the join; without it this 3080 fell to 0.01 tok/s.
-    POSIX defaults off: compute still ``wait_event``s. Override with
+    WSL2 talks to the same WDDM host GPU, so it joins too. Native Linux
+    defaults off: compute still ``wait_event``s. Override with
     ``DEEPFOLD_COPY_JOIN=1`` or ``0``.
     """
     raw = os.environ.get("DEEPFOLD_COPY_JOIN", "").strip().lower()
@@ -53,7 +70,7 @@ def default_join_copy() -> bool:
         return True
     if raw in ("0", "false", "no", "off"):
         return False
-    return os.name == "nt"
+    return os.name == "nt" or _wsl2()
 
 
 class CopyRing:

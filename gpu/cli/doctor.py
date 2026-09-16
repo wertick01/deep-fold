@@ -26,9 +26,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from gpu.ampere_gencode import FAMILY_CAPABILITIES, KERNEL_GENCODE, MEASURED_CAPABILITY
+from gpu.ext_bin import is_native, list_ext, matches_abi
 
 from . import messages
 from .paths import REPO, find_chr_bin
+from .smi import used_mib as _smi_query_used
 
 SHIP_CAPABILITY = MEASURED_CAPABILITY
 OVERRIDE_ENV = "DEEPFOLD_ALLOW_UNMEASURED_ARCH"
@@ -93,16 +95,17 @@ def _nf4_artifact() -> tuple[Path | None, bool, bool]:
 
     The ABI tag matters as much as the file's existence: a
     ``chr_nf4_ext.cp311-win_amd64.pyd`` is not importable from Python 3.12, and
-    reporting it as a green kernel is exactly the "file exists => this box"
-    assumption D8 forbids.
+    a Linux ``chr_nf4_ext.cpython-311-*.so`` is not ``cp311`` as a substring.
+    Reporting the wrong-ABI file as a green kernel is the "file exists => this
+    box" assumption D8 forbids. A Windows ``.pyd`` in a Linux tree is also not
+    importable.
     """
-    matches = sorted(_NF4_DIR.glob("chr_nf4_ext*.pyd")) + sorted(
-        _NF4_DIR.glob("chr_nf4_ext*.so")
-    )
+    matches = list_ext(_NF4_DIR, "chr_nf4_ext")
     if not matches:
         return None, False, True
-    tag = _interpreter_tag()
-    usable = [p for p in matches if "cp3" not in p.name or tag in p.name]
+    usable = [
+        p for p in matches if is_native(p) and matches_abi(p.name, _interpreter_tag())
+    ]
     artifact = (usable or matches)[0]
     built = artifact.stat().st_mtime
     stale = any(
@@ -110,6 +113,19 @@ def _nf4_artifact() -> tuple[Path | None, bool, bool]:
         for name in _KERNEL_SOURCES
     )
     return artifact, stale, bool(usable)
+
+
+def _cli_neighbor_hint() -> str:
+    """OS-specific setup line. Linux must not point at setup.ps1."""
+    if os.name == "nt":
+        return (
+            "not next to this Python; python -m gpu.cli still works. "
+            r"Neighbor: scripts/setup.ps1 then .\.venv\Scripts\Activate.ps1"
+        )
+    return (
+        "not next to this Python; python -m gpu.cli still works. "
+        "Neighbor: bash scripts/setup.sh then source .venv/bin/activate"
+    )
 
 
 def _find_cli_script() -> str | None:
@@ -153,26 +169,8 @@ def _host_compiler(*, inject: bool) -> str | None:
 
 
 def _smi_used_mib() -> int | None:
-    try:
-        out = subprocess.run(
-            [
-                "nvidia-smi",
-                "--id=0",
-                "--query-gpu=memory.used",
-                "--format=csv,nounits,noheader",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if out.returncode != 0:
-        return None
-    try:
-        return int(out.stdout.strip().splitlines()[0])
-    except (ValueError, IndexError):
-        return None
+    """Occupied MiB on the visible GPU. Spy seam for chat/run OOM copy."""
+    return _smi_query_used()
 
 
 def _chr_runs(chr_bin: Path) -> bool:
@@ -507,8 +505,7 @@ def checks(m: Machine, v: Verdict) -> list[Check]:
             Check(
                 "warn",
                 "deepfold CLI",
-                "not next to this Python; python -m gpu.cli still works. "
-                "Neighbor: scripts/setup.ps1 then .\\.venv\\Scripts\\Activate.ps1",
+                _cli_neighbor_hint(),
             )
         )
     if m.smi_used_mib is not None:

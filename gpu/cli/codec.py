@@ -1,7 +1,8 @@
 """Pick NF4 vs VQ from the model's config and the card's VRAM.
 
-No torch. The Go compressor still packs; this module only answers *which*
-``--codec`` to pass it. Default is ``auto``: NF4 when the packed file plus a
+``decide()`` does not import torch. ``detect_vram_mib`` may use it when
+nvidia-smi is missing. The Go compressor still packs; this module only
+answers *which* ``--codec`` to pass it. Default is ``auto``: NF4 when the packed file plus a
 fixed runtime overhead still sits on the card; otherwise NF4 with
 ``overflow=True`` (H2 ring) when 2-bit VQ would have fit. It never picks VQ:
 the 3B canary (``qwen25-3b.vq2.chr``) failed greedy Paris/Berlin/323 because
@@ -17,7 +18,7 @@ It is not a kernel benchmark.
 from __future__ import annotations
 
 import json
-import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -178,33 +179,46 @@ def decide(
     raise CodecFitError(too_big)
 
 
+def _smi_total_mib() -> int | None:
+    """Spy seam. Tests replace this."""
+    from .smi import total_mib
+
+    return total_mib()
+
+
+def _torch_vram_mib() -> int | None:
+    """Spy seam. Torch ``cuda:0`` (honours ``CUDA_VISIBLE_DEVICES``)."""
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return None
+        value = int(torch.cuda.get_device_properties(0).total_memory / (1024 * 1024))
+    except Exception:  # noqa: BLE001 - missing/broken torch is "no reading"
+        return None
+    return value if value > 0 else None
+
+
 def detect_vram_mib() -> int:
-    """Dedicated VRAM of GPU 0 from nvidia-smi, else the 3080 default.
+    """Dedicated VRAM of the visible GPU, else the 3080 default.
 
     ``--codec auto`` follows the card in front of the user, not a hardcoded
-    12 GB. No torch: ``deepfold compress`` is a CPU path.
+    12 GB. nvidia-smi first (same ``--id`` as ``CUDA_VISIBLE_DEVICES``), then
+    torch, then 12288 with a stderr warning. Pass ``--vram-mib`` when neither
+    probe works — an 8 GB laptop must not inherit the 12 GB plan.
     """
-    try:
-        out = subprocess.run(
-            [
-                "nvidia-smi",
-                "--id=0",
-                "--query-gpu=memory.total",
-                "--format=csv,nounits,noheader",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return DEFAULT_VRAM_MIB
-    if out.returncode != 0:
-        return DEFAULT_VRAM_MIB
-    try:
-        value = int(out.stdout.strip().splitlines()[0])
-    except (ValueError, IndexError):
-        return DEFAULT_VRAM_MIB
-    return value if value > 0 else DEFAULT_VRAM_MIB
+    hit = _smi_total_mib()
+    if hit is not None:
+        return hit
+    hit = _torch_vram_mib()
+    if hit is not None:
+        return hit
+    print(
+        f"deepfold: nvidia-smi/torch did not report VRAM; assuming "
+        f"{DEFAULT_VRAM_MIB} MiB (RTX 3080). Pass --vram-mib for this card.",
+        file=sys.stderr,
+    )
+    return DEFAULT_VRAM_MIB
 
 
 def suffix(codec: str) -> str:

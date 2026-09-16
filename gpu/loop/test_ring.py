@@ -26,7 +26,7 @@ from gpu.host.linear import CompressedLinear  # noqa: E402
 from gpu.host.slots import SlotPair  # noqa: E402
 from gpu.loop.generate import PREFILL_HOLD_SUPERCHUNK, TokenLoop  # noqa: E402
 from gpu.loop.graph import Gemm, GemmGroup, GraphedGemmGroup, group_is_resident  # noqa: E402
-from gpu.loop.ring import CopyRing, default_join_copy  # noqa: E402
+from gpu.loop.ring import CopyRing, default_join_copy, version_is_wsl  # noqa: E402
 from gpu.loop.test_attach import _bound, qwen2_model  # noqa: E402
 from gpu.loop import generate as generate_mod  # noqa: E402
 from gpu.tests.skips import Skip  # noqa: E402
@@ -164,6 +164,19 @@ def test_join_copy_env_override() -> None:
             os.environ.pop("DEEPFOLD_COPY_JOIN", None)
         else:
             os.environ["DEEPFOLD_COPY_JOIN"] = previous
+
+
+def test_wsl_version_triggers_copy_join() -> None:
+    check(
+        "WSL /proc/version is Microsoft",
+        version_is_wsl("Linux version 5.15.167.4-microsoft-standard-WSL2"),
+        "",
+    )
+    check(
+        "native Linux /proc/version is not WSL",
+        not version_is_wsl("Linux version 6.8.0-40-generic (Ubuntu)"),
+        "",
+    )
 
 
 def test_bind_prefetches_next_before_record_gemm() -> None:
@@ -1222,6 +1235,7 @@ TESTS = [
     test_attach_host_pins_pageable_arena,
     test_bind_cpu_join_before_prefetch,
     test_join_copy_env_override,
+    test_wsl_version_triggers_copy_join,
     test_bind_prefetches_next_before_record_gemm,
     test_timing_false_skips_elapsed_time_fields,
     test_three_overflow_slots_0_1_0,

@@ -1499,6 +1499,40 @@ def test_chat_picker_and_stalled_tool() -> None:
     row = next(c for c in checks(m, verdict(m, override=False)) if c.name == "deepfold CLI")
     assert row.tag == "warn"
     assert "python -m gpu.cli" in row.detail
+    if os.name == "nt":
+        assert "setup.ps1" in row.detail
+    else:
+        assert "setup.sh" in row.detail
+        assert "setup.ps1" not in row.detail
+
+
+def test_smi_device_follows_cuda_visible_devices() -> None:
+    from gpu.cli import smi as smi_mod
+
+    previous = os.environ.get("CUDA_VISIBLE_DEVICES")
+    try:
+        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        assert smi_mod.device_id() == "0"
+        os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+        assert smi_mod.device_id() == "1"
+        os.environ["CUDA_VISIBLE_DEVICES"] = "GPU-abc-def,0"
+        assert smi_mod.device_id() == "GPU-abc-def"
+        os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+        assert smi_mod.device_id() == "0"
+    finally:
+        if previous is None:
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        else:
+            os.environ["CUDA_VISIBLE_DEVICES"] = previous
+
+
+def test_cuda_oom_copy_names_this_card() -> None:
+    text = messages.cuda_oom(1000, 8192, 4000.0)
+    assert "8192" in text and "8 GB" in text
+    assert "12 GB" not in text
+    unknown = messages.cuda_oom(None, None, None)
+    assert "unknown size" in unknown
+    assert "12288" not in unknown
 
 
 def test_chat_without_tty_points_at_run_prompt() -> None:

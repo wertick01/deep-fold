@@ -224,15 +224,19 @@ def cuda_oom(
 ) -> str:
     """wave8-install.md §8. OOM is a recorded miss (wave8-runtime D9), not a crash."""
     used = str(used_mib) if used_mib is not None else "?"
-    total = str(total_mib) if total_mib is not None else "12288"
+    if total_mib is not None and total_mib > 0:
+        total = str(total_mib)
+        gb = total_mib / 1024.0
+        card = f"{gb:.0f} GB" if abs(gb - round(gb)) < 0.15 else f"{total_mib} MiB"
+    else:
+        total = "?"
+        card = "unknown size"
     weights = f"{weight_mib:.0f}" if weight_mib is not None else "?"
     return (
         "CUDA OOM. Recorded miss, not a crash.\n"
-        f"nvidia-smi: {used} / {total} MiB (this card is 12 GB). "
+        f"nvidia-smi: {used} / {total} MiB (this card is {card}). "
         f"Packed weights: {weights} MiB.\n"
-        "Close other GPU apps or use a model whose NF4 working set fits "
-        "(14B/20B are\n"
-        "the reason to use NF4; 3B also fits BF16 on this card)."
+        "Close other GPU apps or use a model whose NF4 working set fits."
     )
 
 

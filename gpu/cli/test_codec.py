@@ -133,28 +133,21 @@ def test_32b_on_24gb_stays_nf4() -> None:
 def test_detect_vram_reads_nvidia_smi() -> None:
     from gpu.cli import codec as codec_mod
 
-    class _Ok:
-        returncode = 0
-        stdout = "24576\n"
-
-    class _Bad:
-        returncode = 1
-        stdout = ""
-
-    original = codec_mod.subprocess.run
+    original_smi = codec_mod._smi_total_mib
+    original_torch = codec_mod._torch_vram_mib
     try:
-        codec_mod.subprocess.run = lambda *a, **k: _Ok()
-        check("smi 24 GB", codec_mod.detect_vram_mib() == 24576, "")
-        codec_mod.subprocess.run = lambda *a, **k: _Bad()
-        check("smi fail falls back", codec_mod.detect_vram_mib() == DEFAULT_VRAM_MIB, "")
+        codec_mod._smi_total_mib = lambda: 24576  # type: ignore[assignment]
+        codec_mod._torch_vram_mib = lambda: 8192  # type: ignore[assignment]
+        check("smi 24 GB wins over torch", codec_mod.detect_vram_mib() == 24576, "")
 
-        def _boom(*a, **k):
-            raise OSError("no nvidia-smi")
+        codec_mod._smi_total_mib = lambda: None  # type: ignore[assignment]
+        check("torch fallback 8 GB", codec_mod.detect_vram_mib() == 8192, "")
 
-        codec_mod.subprocess.run = _boom
-        check("no smi falls back", codec_mod.detect_vram_mib() == DEFAULT_VRAM_MIB, "")
+        codec_mod._torch_vram_mib = lambda: None  # type: ignore[assignment]
+        check("no probe falls back", codec_mod.detect_vram_mib() == DEFAULT_VRAM_MIB, "")
     finally:
-        codec_mod.subprocess.run = original
+        codec_mod._smi_total_mib = original_smi  # type: ignore[assignment]
+        codec_mod._torch_vram_mib = original_torch  # type: ignore[assignment]
 
 
 def test_70b_refuses_even_vq() -> None:

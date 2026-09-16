@@ -216,7 +216,8 @@ def _ensure_posix_tools() -> None:
         missing.append("nvcc")
     raise KernelBuildError(
         "missing " + " and ".join(missing) + ". On Linux install a C++ compiler "
-        "and CUDA 12.x toolkit (nvcc). This script does not sudo apt."
+        "and CUDA 12.x toolkit (nvcc), e.g. g++ plus the NVIDIA CUDA 12.4 "
+        "toolkit (or nvidia-cuda-toolkit). This script does not sudo apt."
     )
 
 

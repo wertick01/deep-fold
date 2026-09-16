@@ -2,7 +2,7 @@
 
 Короткий список команд. Полная справка (`-h`, флаги, ошибки): [`install.ru.md`](install.ru.md).
 
-После `scripts/setup.ps1` команда `deepfold` и `python -m gpu.cli` — одно и то же.
+После `scripts/setup.ps1` или `scripts/setup.sh` команда `deepfold` и `python -m gpu.cli` — одно и то же.
 Ниже — `deepfold`. Если её нет на PATH: `python -m gpu.cli` (так и задумано в
 conda env `torch-gpu`). После setup активируйте `.venv` или зовите
 `.\.venv\Scripts\deepfold.exe`.
@@ -35,7 +35,8 @@ source .venv/bin/activate
 deepfold doctor
 ```
 
-Нужны заранее: драйвер NVIDIA (Ampere или Ada), Python 3.11+.
+Нужны заранее: драйвер NVIDIA (Ampere или Ada), Python 3.11 или 3.12
+(на Ubuntu 22.04 `python3` — это 3.10, поставьте `python3.11`).
 Go 1.22+ необязателен: setup сам скачает переносной Go с go.dev, если нет
 `chr`. На Windows при отсутствии Build Tools (C++) и CUDA 12.4 setup ставит
 их через winget и компилирует `gpu/nf4`. Скрипт **не** ставит драйвер. Код

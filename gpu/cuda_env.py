@@ -46,11 +46,14 @@ def _toolkit_nvccs() -> list[Path]:
                 if hit.is_file():
                     found.append(hit)
     else:
-        for root in (
+        roots = [
             Path("/usr/local/cuda"),
+            Path("/opt/cuda"),
+            Path("/usr/lib/nvidia-cuda-toolkit"),
             *sorted(Path("/usr/local").glob("cuda-12*")),
             *sorted(Path("/usr/lib").glob("cuda*")),
-        ):
+        ]
+        for root in roots:
             hit = root / "bin" / _NVCC
             if hit.is_file():
                 found.append(hit)

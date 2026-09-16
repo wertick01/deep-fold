@@ -2,7 +2,7 @@
 
 Short command list. Full `-h` dumps and flags: [`install.md`](install.md).
 
-After `scripts/setup.ps1`, `deepfold` and `python -m gpu.cli` are the same.
+After `scripts/setup.ps1` or `scripts/setup.sh`, `deepfold` and `python -m gpu.cli` are the same.
 If `deepfold` is not on PATH, use `python -m gpu.cli` (this is normal in conda
 env `torch-gpu`). After setup, activate `.venv` or call
 `.\\.venv\\Scripts\\deepfold.exe`.
@@ -35,7 +35,8 @@ source .venv/bin/activate
 deepfold doctor
 ```
 
-You already need: NVIDIA driver (Ampere or Ada), Python 3.11+.
+You already need: NVIDIA driver (Ampere or Ada), Python 3.11 or 3.12
+(Ubuntu 22.04 `python3` is 3.10 — install `python3.11`).
 Go 1.22+ is optional — setup fetches a portable copy from go.dev when `chr`
 is missing. On Windows, missing Visual Studio Build Tools (C++) and CUDA
 Toolkit 12.4 are installed via winget, then `gpu/nf4` is compiled. The

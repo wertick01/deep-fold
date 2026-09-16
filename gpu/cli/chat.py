@@ -593,6 +593,13 @@ def chat(args: Namespace) -> int:
                 _err(f"resumed {current.id}  {current.title}")
             continue
         if kind == "stats":
+            ring = "off" if getattr(loop, "_ring", None) is None else "on"
+            _err(
+                f"compute={getattr(loop, 'compute', 'gpu')} "
+                f"gpu_layers={getattr(loop, 'n_gpu', '?')}/"
+                f"{getattr(loop, 'n_layers', '?')} "
+                f"cpu_layers={getattr(loop, 'n_cpu', 0)} ring={ring}"
+            )
             if last_out is None:
                 _err("no turn yet")
             else:

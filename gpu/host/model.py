@@ -72,6 +72,11 @@ class LoadReport:
     streamed_tape: tuple[str, ...] = ()
     slot_nbytes: int = 0
     slots: SlotPair | None = None
+    compute: str = "gpu"
+    n_gpu: int = 0
+    n_cpu: int = 0
+    cpu_linears: int = 0
+    cpu_bytes: int = 0
 
     @property
     def device_mib(self) -> float:
@@ -88,6 +93,13 @@ class LoadReport:
                 f"slot={self.slot_nbytes / MIB:.2f} MiB"
                 f"×{self.slots.count if self.slots is not None else OVERFLOW_SLOT_COUNT}"
             )
+        cpu = ""
+        if self.n_cpu:
+            cpu = (
+                f", compute={self.compute} gpu_layers={self.n_gpu} "
+                f"cpu_layers={self.n_cpu} "
+                f"({self.cpu_bytes / MIB:.1f} MiB pageable)"
+            )
         return (
             f"{self.linears} {self.codec} linears ({self.linear_bytes / MIB:.1f} MiB), "
             f"{self.bf16_tensors} bf16 tensors ({self.bf16_bytes / MIB:.2f} MiB), "
@@ -95,6 +107,7 @@ class LoadReport:
             f"tied_lm_head={self.tied_lm_head}, total={self.device_mib:.1f} MiB, "
             f"{self.seconds:.1f}s"
             + overflow
+            + cpu
             + (f", missing={self.missing}" if self.missing else "")
             + (f", leftover_meta={self.leftover_meta}" if self.leftover_meta else "")
         )
@@ -320,6 +333,7 @@ def load_chr_nf4(
     residency_policy: str = DEFAULT_POLICY,
     pin_embed: bool = True,
     refill_embed: bool = True,
+    compute_plan=None,
 ) -> LoadReport:
     """Fill a replaced skeleton from ``path``. The ``.chr`` is the only file read.
 
@@ -341,6 +355,11 @@ def load_chr_nf4(
     stays DEVICE unless ``pin_embed=False`` or ``residency_policy="D_host_embed"``
     (CPU packed rows, not CopyRing tape). Tied embeddings refuse host-embed.
 
+    ``compute_plan`` with ``n_cpu>0`` is the layer split (cpu-suffix / hybrid):
+    suffix matrices use :meth:`CompressedLinear.attach_cpu` (pageable, no pin)
+    and **no** :class:`SlotPair` / CopyRing. ``max_resident_bytes`` is ignored
+    on that path (v1 does not mix the tape with a CPU suffix).
+
     The header is parsed once and passed down, so 300+ matrices do not reparse
     65 KiB of JSON each (gpu-abi.md §2).
     """
@@ -352,6 +371,7 @@ def load_chr_nf4(
     layer_set = None if layers is None else sorted({int(v) for v in layers})
     host_names: set[str] = set()
     cpu_embed: set[str] = set()
+    cpu_layer_ids: set[int] = set()
     tied = bool(getattr(getattr(model, "config", None), "tie_word_embeddings", False))
     host_embed = (residency_policy == "D_host_embed") or (not pin_embed)
     if host_embed and tied:
@@ -359,6 +379,19 @@ def load_chr_nf4(
             "host-embed: tied embeddings share one packed table; refusing to "
             "put embed on CPU while lm_head stays DEVICE (3B)."
         )
+
+    if compute_plan is not None:
+        report.compute = compute_plan.compute
+        report.n_gpu = int(compute_plan.n_gpu)
+        report.n_cpu = int(compute_plan.n_cpu)
+        model.deepfold_compute = compute_plan
+        if compute_plan.n_cpu > 0:
+            cpu_layer_ids = set(compute_plan.cpu_layer_ids)
+            max_resident_bytes = None
+            if compute_plan.lm_head != "device" or compute_plan.embed != "device":
+                raise RuntimeError("v1: embed and lm_head stay DEVICE")
+            if compute_plan.ring != "none":
+                raise RuntimeError("v1: CPU suffix does not mix CopyRing")
 
     if max_resident_bytes is not None:
         descs = descs_from_header(hdr)
@@ -433,6 +466,20 @@ def load_chr_nf4(
         if not _in_scope(info.layer, layer_set):
             report.skipped.append(f"{name} (layer {info.layer} out of scope)")
             continue
+        if info.layer is not None and int(info.layer) in cpu_layer_ids:
+            if not isinstance(mod, CompressedLinear):
+                raise TypeError(f"{name}: CPU suffix requires CompressedLinear")
+            cpu_mat = materialize_nf4(path, name, torch.device("cpu"), header=hdr)
+            mod.attach_cpu(cpu_mat)
+            report.linears += 1
+            report.cpu_linears += 1
+            report.cpu_bytes += cpu_mat.nbytes
+            if verbose:
+                print(
+                    f"  {name}: CPU [{cpu_mat.M},{cpu_mat.K}] "
+                    f"{cpu_mat.nbytes / MIB:.2f} MiB pageable"
+                )
+            continue
         if name in host_names:
             if not isinstance(mod, CompressedLinear):
                 raise TypeError(f"{name}: HOST overflow requires CompressedLinear")
@@ -464,7 +511,12 @@ def load_chr_nf4(
         if target is None:
             report.skipped.append(f"{name} (no module)")
             continue
-        tensor = load_bf16(path, name, dev, header=hdr)
+        bf16_dev = (
+            torch.device("cpu")
+            if info.layer is not None and int(info.layer) in cpu_layer_ids
+            else dev
+        )
+        tensor = load_bf16(path, name, bf16_dev, header=hdr)
         if isinstance(target, (CompressedLinear, CompressedVqLinear)) and attr == "bias":
             target.set_bias(tensor)
         else:
@@ -669,6 +721,7 @@ def load_model(
     residency_policy: str = DEFAULT_POLICY,
     pin_embed: bool = True,
     refill_embed: bool = True,
+    compute_plan=None,
 ):
     """``build_skeleton`` + ``attach`` + packed seats + load from the ``.chr``.
 
@@ -684,7 +737,8 @@ def load_model(
     ``max_resident_bytes`` is NF4 overflow (default policy D). ``None`` keeps
     every matrix on ``device``. Ignored for VQ. ``residency_policy`` selects
     WHO (default ``D``); ``pin_embed=False`` / ``D_host_embed`` puts packed
-    embed on CPU, not the CopyRing tape.
+    embed on CPU, not the CopyRing tape. ``compute_plan`` with ``n_cpu>0``
+    skips CopyRing and loads the suffix with ``attach_cpu``.
     """
     from .attach import attach_module, plan_violations
 
@@ -694,6 +748,8 @@ def load_model(
         raise RuntimeError(
             f"{chr_path}: quantized codec {codec!r}; load_model drives nf4 or vq"
         )
+    if codec == "vq" and compute_plan is not None and getattr(compute_plan, "n_cpu", 0):
+        raise RuntimeError("cpu-suffix/hybrid is NF4 only; --codec vq refuses a CPU suffix")
     seat = CompressedVqLinear if codec == "vq" else CompressedLinear
     filler = load_chr_vq_model if codec == "vq" else load_chr_nf4
 
@@ -708,6 +764,7 @@ def load_model(
         fill_kw["residency_policy"] = residency_policy
         fill_kw["pin_embed"] = pin_embed
         fill_kw["refill_embed"] = refill_embed
+        fill_kw["compute_plan"] = compute_plan
     report = filler(model, chr_path, **fill_kw)
     model.deepfold_plan = plan
     if strict and layers is None:

@@ -54,6 +54,18 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--plan-only", action="store_true")
     p.add_argument("--no-graphs", dest="graphs", action="store_false")
     p.add_argument("--trust-remote-code", action="store_true")
+    p.add_argument(
+        "--compute",
+        choices=("gpu", "cpu-suffix", "hybrid"),
+        default="gpu",
+        help="Overflow compute policy (default gpu = CopyRing). Not a tok/s claim.",
+    )
+    p.add_argument(
+        "--gpu-layers",
+        type=int,
+        default=None,
+        help="Repeating GPU layers; requires --compute cpu-suffix|hybrid.",
+    )
     return p
 
 
@@ -107,12 +119,34 @@ def run_live(args: argparse.Namespace, dest: Path, preset: dict[str, str]) -> di
     from gpu.lab.sampler import smi_used_mib
     from gpu.loop import TokenLoop
 
+    from gpu.cli.codec import load_config
+    from gpu.host.compute import format_compute_stderr, plan_compute
+    from gpu.host.residency import descs_from_header, descs_from_qwen
+
     model_dir = str(args.model or preset["model"])
     chr_path = str(args.chr_path or preset["chr"])
+    cfg = load_config(model_dir)
+    try:
+        from gpu.chr0 import load_header
+
+        descs = descs_from_header(load_header(chr_path))
+    except Exception:
+        descs = descs_from_qwen(cfg)
+    compute_plan = plan_compute(
+        descs,
+        cfg,
+        compute=getattr(args, "compute", "gpu") or "gpu",
+        gpu_layers=getattr(args, "gpu_layers", None),
+        max_seq=int(args.max_seq),
+    )
     cap, cap_info = auto_max_resident_bytes(model_dir, chr_path, int(args.max_seq))
+    if compute_plan.n_cpu > 0:
+        cap = None
+        cap_info = {"skipped": "cpu suffix, no CopyRing"}
     tokenizer = AutoTokenizer.from_pretrained(
         model_dir, local_files_only=True, trust_remote_code=args.trust_remote_code
     )
+    print(format_compute_stderr(compute_plan), flush=True)
     model, report = load_model(
         model_dir,
         chr_path,
@@ -120,6 +154,7 @@ def run_live(args: argparse.Namespace, dest: Path, preset: dict[str, str]) -> di
         strict=True,
         max_resident_bytes=cap,
         residency_policy="D",
+        compute_plan=compute_plan,
     )
     torch.cuda.synchronize()
     smi_load = smi_used_mib()
@@ -153,6 +188,10 @@ def run_live(args: argparse.Namespace, dest: Path, preset: dict[str, str]) -> di
         "decode_tok_s": run.decode_tok_s,
         "stop_token": run.stop_token,
         "report": str(report),
+        "compute": compute_plan.compute,
+        "n_gpu": compute_plan.n_gpu,
+        "n_cpu": compute_plan.n_cpu,
+        "ring": compute_plan.ring,
     }
     print(
         f"long tok/s={run.decode_tok_s:.3f} n={len(run.tokens)} "
@@ -181,6 +220,41 @@ def main(argv: list[str] | None = None) -> int:
     chr_path = str(args.chr_path or preset["chr"])
     compare_id = str(args.compare_id or preset["compare_id"])
     if args.plan_only:
+        from gpu.host.compute import format_compute_stderr, plan_compute
+        from gpu.host.residency import descs_from_qwen
+
+        cfg_path = Path(model_dir) / "config.json"
+        if cfg_path.is_file():
+            from gpu.cli.codec import load_config
+
+            cfg = load_config(model_dir)
+        else:
+            cfg = {
+                "hidden_size": 5120,
+                "intermediate_size": 27648,
+                "num_hidden_layers": 64,
+                "num_attention_heads": 40,
+                "num_key_value_heads": 8,
+                "vocab_size": 152064,
+                "tie_word_embeddings": False,
+            }
+            if args.size == "3B":
+                cfg = {
+                    "hidden_size": 2048,
+                    "intermediate_size": 11008,
+                    "num_hidden_layers": 36,
+                    "num_attention_heads": 16,
+                    "num_key_value_heads": 2,
+                    "vocab_size": 151936,
+                    "tie_word_embeddings": True,
+                }
+        compute_plan = plan_compute(
+            descs_from_qwen(cfg),
+            cfg,
+            compute=getattr(args, "compute", "gpu") or "gpu",
+            gpu_layers=getattr(args, "gpu_layers", None),
+            max_seq=int(args.max_seq),
+        )
         plate = {
             "schema": SCHEMA,
             "plan_only": True,
@@ -191,17 +265,26 @@ def main(argv: list[str] | None = None) -> int:
             "compare_id": compare_id,
             "long_n": int(args.long_n),
             "prompt": LONG_PROMPT,
+            "compute_plan": compute_plan.to_dict(),
         }
+        print(format_compute_stderr(compute_plan), flush=True)
         print(f"plan-only out={dest} chr_exists={plate['chr_exists']}", flush=True)
     else:
         plate = run_live(args, dest, preset)
-        _merge_long(
-            compare_id,
-            tok_s=float(plate["decode_tok_s"]),
-            source=str(dest),
-            predicted_n=int(plate["n_tokens"]),
-            decode_steps=int(plate["decode_steps"]),
-        )
+        if str(getattr(args, "compute", "gpu") or "gpu") == "gpu":
+            _merge_long(
+                compare_id,
+                tok_s=float(plate["decode_tok_s"]),
+                source=str(dest),
+                predicted_n=int(plate["n_tokens"]),
+                decode_steps=int(plate["decode_steps"]),
+            )
+        else:
+            print(
+                "skip compare.json merge for cpu-suffix/hybrid "
+                "(do not overwrite deepfold-nf4-32B-overflow)",
+                flush=True,
+            )
     (dest / "plate.json").write_text(
         json.dumps(plate, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )

@@ -197,6 +197,23 @@ class Gemm:
                 host_image=img,
                 home="host",
             )
+        if home == "cpu":
+            if packed is None or packed.numel() == 0:
+                raise RuntimeError(f"{name}: home=cpu but packed is empty")
+            if packed.device.type == "cuda":
+                raise RuntimeError(f"{name}: home=cpu but packed is CUDA")
+            return cls(
+                name=name,
+                M=int(linear.M),
+                K=int(linear.K),
+                K_pad=int(linear.K_pad),
+                bias=linear.bias,
+                packed=packed,
+                scale=linear.scale,
+                codec="nf4",
+                host_image=None,
+                home="cpu",
+            )
         if packed is None or packed.numel() == 0:
             raise RuntimeError(f"{name}: seat is loaded but has neither NF4 packed nor VQ index")
         return cls(
@@ -208,6 +225,7 @@ class Gemm:
             packed=packed,
             scale=linear.scale,
             codec="nf4",
+            home="device",
         )
 
     @property
@@ -220,6 +238,8 @@ class Gemm:
 
     @property
     def device(self) -> torch.device:
+        if self.home == "cpu":
+            return self.packed.device
         if self.home == "host":
             packed = self.packed
             if packed is not None and packed.device.type == "cuda":
@@ -415,10 +435,15 @@ class GemmGroup:
         self.gemms = tuple(gemms)
         self.K = int(gemms[0].K)
         self.ring = None
-        # Fork only all-DEVICE. Any HOST member (including mixed) is serial so
-        # CopyRing's per-slot events stay ordered; QKV overflow is copy/GEMM
-        # per member, not a side-stream fork.
-        if any(g.home == "host" for g in gemms):
+        homes = {g.home for g in gemms}
+        if "cpu" in homes and "device" in homes:
+            raise ValueError(
+                f"{name}: mixed DEVICE/CPU in one group (a layer is atomic)"
+            )
+        if "cpu" in homes and "host" in homes:
+            raise ValueError(f"{name}: mixed HOST/CPU in one group")
+        # Fork only all-DEVICE. HOST (CopyRing) and CPU suffix stay serial.
+        if any(g.home != "device" for g in gemms):
             self.streams = ()
         else:
             # One stream per member past the first; a single-member group stays serial.
@@ -450,6 +475,10 @@ class GemmGroup:
             if y is None:
                 y = nf4_gemm(packed, scale, xk, g.M, g.K, g.K_pad).t()
             ring.record_gemm(g)
+        elif g.home == "cpu":
+            from gpu.host.cpu_linear import nf4_gemm_cpu
+
+            y = nf4_gemm_cpu(g.packed, g.scale, xk, g.M, g.K, g.K_pad).t()
         else:
             y = nf4_gemm(g.packed, g.scale, xk, g.M, g.K, g.K_pad).t()
         if g.bias is not None:
@@ -543,8 +572,8 @@ class GraphedGemmGroup:
 
 
 def group_is_resident(group: GemmGroup) -> bool:
-    """True when every GEMM is DEVICE: safe to CUDA-graph, no H2D in the recipe."""
-    return all(g.home != "host" for g in group.gemms)
+    """True when every GEMM is DEVICE: safe to CUDA-graph, no H2D / CPU in the recipe."""
+    return all(g.home == "device" for g in group.gemms)
 
 
 def capture(

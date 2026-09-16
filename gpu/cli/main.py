@@ -90,7 +90,39 @@ def _add_runtime_flags(
     p.add_argument(
         "--residency",
         default="D",
-        help="overflow residency policy (default D)",
+        help="matrix overflow for --compute gpu only (default D)",
+    )
+    p.add_argument(
+        "--compute",
+        choices=("gpu", "cpu-suffix", "hybrid"),
+        default="gpu",
+        help=(
+            "Overflow compute policy (default: gpu = all layers on device, "
+            "policy D CopyRing). cpu-suffix / hybrid are 32B overflow "
+            "experiments; they do not speed up 3B."
+        ),
+    )
+    p.add_argument(
+        "--gpu-layers",
+        type=int,
+        default=None,
+        help=(
+            "Repeating transformer layers on GPU (0..num_hidden_layers). "
+            "lm_head stays on GPU. Requires --compute cpu-suffix|hybrid. "
+            "Default: 32 with cpu-suffix, 36 with hybrid."
+        ),
+    )
+    p.add_argument(
+        "--cpu-layers",
+        type=int,
+        default=None,
+        help="Repeating layers on CPU; sets --gpu-layers to n_layers-N.",
+    )
+    p.add_argument(
+        "--gpu-frac",
+        type=float,
+        default=None,
+        help="Fraction of repeating layers on GPU, floored.",
     )
 
 

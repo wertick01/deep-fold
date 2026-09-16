@@ -264,6 +264,11 @@ class _RunArgs:
             debug=False,
             codec="auto",
             max_resident_mib=None,
+            residency="D",
+            compute="gpu",
+            gpu_layers=None,
+            cpu_layers=None,
+            gpu_frac=None,
         )
         self.__dict__.update(over)
 
@@ -842,6 +847,10 @@ def test_parser_run_flags() -> None:
     assert args.codec == "auto"
     assert args.max_resident_mib is None
     assert args.residency == "D"
+    assert args.compute == "gpu"
+    assert args.gpu_layers is None
+    assert args.cpu_layers is None
+    assert args.gpu_frac is None
     vq = build_parser().parse_args(["run", "--model", "D:/m", "--codec", "vq"])
     assert vq.codec == "vq"
     cap = build_parser().parse_args(
@@ -850,6 +859,74 @@ def test_parser_run_flags() -> None:
     assert cap.max_resident_mib == 2048
     packed = build_parser().parse_args(["compress", "--in", "D:/m"])
     assert packed.codec == "auto"
+
+
+def test_parser_compute_family() -> None:
+    hy = build_parser().parse_args(
+        ["run", "--model", "D:/m", "--compute", "hybrid", "--gpu-layers", "36"]
+    )
+    assert hy.compute == "hybrid" and hy.gpu_layers == 36
+    suf = build_parser().parse_args(
+        ["chat", "--compute", "cpu-suffix", "--cpu-layers", "32"]
+    )
+    assert suf.compute == "cpu-suffix" and suf.cpu_layers == 32
+    frac = build_parser().parse_args(["run", "--model", "D:/m", "--compute", "hybrid", "--gpu-frac", "0.5"])
+    assert frac.gpu_frac == 0.5
+    import argparse as _ap
+
+    sub = next(a for a in build_parser()._actions if isinstance(a, _ap._SubParsersAction))
+    run_p, chat_p = sub.choices["run"], sub.choices["chat"]
+    helps = " ".join((a.help or "") for a in run_p._actions) + " " + " ".join(
+        (a.help or "") for a in chat_p._actions
+    )
+    assert "cpu-suffix" in helps and "hybrid" in helps
+    assert "they do not speed up 3B" in helps
+    assert "matrix overflow for --compute gpu only" in helps
+    assert "Default: 32 with cpu-suffix, 36 with hybrid" in helps
+    assert "n_layers-N" in helps
+
+
+def test_compute_plan_from_args_32b_defaults() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        model = _fake_model(Path(tmp), "qwen2", name="Qwen2.5-32B", **_QWEN32B_OVERFLOW)
+        dummy = Path(tmp) / "unused.nf4.chr"
+        dummy.write_bytes(b"not-a-chr")
+        hy = run_mod._compute_plan_from_args(
+            _RunArgs(compute="hybrid", max_seq=2048), str(model), dummy, 12288
+        )
+        assert hy.n_gpu == 36 and hy.n_cpu == 28 and hy.ring == "none"
+        suf = run_mod._compute_plan_from_args(
+            _RunArgs(compute="cpu-suffix", max_seq=2048), str(model), dummy, 12288
+        )
+        assert suf.n_gpu == 32 and suf.ring == "none"
+        gpu = run_mod._compute_plan_from_args(
+            _RunArgs(compute="gpu", max_seq=2048), str(model), dummy, 12288
+        )
+        assert gpu.n_cpu == 0 and gpu.ring_matrices == 96
+
+
+def test_compute_plan_3b_needs_explicit() -> None:
+    from gpu.host.compute import ComputePlanError
+
+    with tempfile.TemporaryDirectory() as tmp:
+        model = _fake_model(Path(tmp), "qwen2", **_QWEN3B_FIT)
+        dummy = Path(tmp) / "x.chr"
+        dummy.write_bytes(b"x")
+        try:
+            run_mod._compute_plan_from_args(
+                _RunArgs(compute="hybrid", max_seq=512), str(model), dummy, 12288
+            )
+        except ComputePlanError as exc:
+            assert "explicit" in str(exc)
+        else:
+            raise AssertionError("3B hybrid without --gpu-layers must refuse")
+        canary = run_mod._compute_plan_from_args(
+            _RunArgs(compute="hybrid", gpu_layers=8, max_seq=512),
+            str(model),
+            dummy,
+            12288,
+        )
+        assert canary.n_gpu == 8 and canary.n_cpu == 28
 
 
 _QWEN3B_FIT = dict(
@@ -1211,9 +1288,13 @@ def test_slash_commands_are_not_prompts() -> None:
     assert chat_mod.classify_slash("/agent") == "agent"
     assert chat_mod.classify_slash("/agent on") == "agent"
     assert chat_mod.classify_slash("/rm") == "unknown"
+    assert chat_mod.classify_slash("/gpu-layers") == "unknown"
+    assert chat_mod.classify_slash("/compute") == "unknown"
     assert "Ctrl+C" in messages.CHAT_HELP
     assert "/copy" in messages.CHAT_HELP
     assert "/agent" in messages.CHAT_HELP
+    assert "--compute" in messages.CHAT_HELP
+    assert "/gpu-layers" in messages.CHAT_HELP
 
 
 def test_chat_status_and_toolbar() -> None:

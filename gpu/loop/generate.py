@@ -42,6 +42,7 @@ __all__ = [
     "PACKERS",
     "PREFILL_HOLD_SUPERCHUNK",
     "rms_norm_exact",
+    "repeat_kv",
     "split_concat_qkv",
     "split_internlm_wqkv",
     "split_neox_qkv",
@@ -238,6 +239,13 @@ def _sdpa_has_gqa() -> bool:
     return True
 
 
+def repeat_kv(t: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """Expand GQA K/V along the head axis. ``t`` is ``[1, n_kv, seq, hd]``."""
+    if int(n_rep) == 1:
+        return t
+    return t.repeat_interleave(int(n_rep), dim=1)
+
+
 # --------------------------------------------------------------------------- #
 # results
 # --------------------------------------------------------------------------- #
@@ -337,6 +345,18 @@ class TokenLoop:
             raise ValueError(
                 f"config says {self.n_layers} layers, the plan walked {plan.n_layers}"
             )
+        cplan = getattr(model, "deepfold_compute", None)
+        self.compute_plan = cplan
+        self.compute = str(getattr(cplan, "compute", "gpu"))
+        self.n_gpu = int(getattr(cplan, "n_gpu", self.n_layers))
+        self.n_cpu = int(getattr(cplan, "n_cpu", 0))
+        if self.n_gpu + self.n_cpu != self.n_layers:
+            raise ValueError(
+                f"compute split n_gpu={self.n_gpu} + n_cpu={self.n_cpu} "
+                f"!= n_layers={self.n_layers}"
+            )
+        if not 0 <= self.n_gpu <= self.n_layers:
+            raise ValueError(f"n_gpu={self.n_gpu} outside 0..{self.n_layers}")
 
         get = model.get_submodule
         attn0 = get(plan.layers[0].attn)
@@ -376,6 +396,9 @@ class TokenLoop:
         self._streams = tuple(torch.cuda.Stream() for _ in range(2)) if self.overlap else ()
         if slots is None:
             slots = getattr(model, "deepfold_slots", None)
+        if self.n_cpu > 0:
+            # v1: do not mix CopyRing with a CPU suffix (WDDM depth, two taxes).
+            slots = None
         self.slots = slots
         self._ring = CopyRing(slots, timing=ring_timing) if slots is not None else None
         self._compute = None
@@ -398,20 +421,45 @@ class TokenLoop:
         self.graph_error: str | None = None
 
         # --- everything long-lived, allocated here and nowhere else ---------
-        self.kv = KVCache(
-            self.n_layers,
-            self.max_seq,
-            self.n_kv,
-            self.head_dim,
-            device=self.device,
-            dtype=torch.bfloat16,
-        )
+        if self.n_gpu > 0:
+            self.kv = KVCache(
+                self.n_gpu,
+                self.max_seq,
+                self.n_kv,
+                self.head_dim,
+                device=self.device,
+                dtype=torch.bfloat16,
+            )
+        else:
+            self.kv = None
+        self.kv_cpu = None
+        if self.n_cpu > 0:
+            from gpu.host.cpu_linear import ensure_cpu_threads
+
+            ensure_cpu_threads()
+            self.kv_cpu = KVCache(
+                self.n_cpu,
+                self.max_seq,
+                self.n_kv,
+                self.head_dim,
+                device=torch.device("cpu"),
+                dtype=torch.bfloat16,
+            )
         self.cos, self.sin = _rope_tables(
             model, plan, self.max_seq, self.device, torch.bfloat16
         )
         # [max_seq, 1, head_dim] so a token slice is already broadcast-ready.
         self.cos = self.cos.unsqueeze(1)
         self.sin = self.sin.unsqueeze(1)
+        if self.n_cpu > 0:
+            self.cos_cpu = self.cos.to("cpu")
+            self.sin_cpu = self.sin.to("cpu")
+            for li in range(self.n_gpu, self.n_layers):
+                self._norm1[li] = self._norm1[li].detach().to("cpu")
+                self._norm2[li] = self._norm2[li].detach().to("cpu")
+        else:
+            self.cos_cpu = None
+            self.sin_cpu = None
         self._tok = torch.zeros(1, dtype=torch.long, device=self.device)
         self._gqa = _sdpa_has_gqa()
         self._rope_pair: _RopePairGraph | None = None
@@ -420,6 +468,10 @@ class TokenLoop:
         )
         if prefill_mode not in ("chunk", "hold"):
             raise ValueError(f"prefill_mode={prefill_mode!r}; expected 'chunk' or 'hold'")
+        if prefill_mode == "hold" and self.n_cpu > 0:
+            raise ValueError(
+                "prefill_mode='hold' is --compute gpu only; hybrid/cpu-suffix use chunk"
+            )
         self.prefill_mode = prefill_mode
 
     # --- setup ------------------------------------------------------------
@@ -486,7 +538,7 @@ class TokenLoop:
         seen: dict[int, int] = {}
         for g in self._groups:
             for m in g.gemms:
-                if m.home == "host":
+                if m.home == "host" or m.home == "cpu":
                     continue
                 t = m.packed if m.codec != "vq" else m.index
                 if t is None or int(t.numel()) == 0:
@@ -506,7 +558,35 @@ class TokenLoop:
 
     def reset(self) -> None:
         """Forget the conversation, keep the memory."""
-        self.kv.reset()
+        if self.kv is not None:
+            self.kv.reset()
+        if self.kv_cpu is not None:
+            self.kv_cpu.reset()
+
+    def _seq_len(self) -> int:
+        if self.kv is not None:
+            return self.kv.seq_len
+        if self.kv_cpu is not None:
+            return self.kv_cpu.seq_len
+        return 0
+
+    def _set_seq_len(self, seq: int) -> None:
+        if self.kv is not None:
+            self.kv.seq_len = seq
+        if self.kv_cpu is not None:
+            self.kv_cpu.seq_len = seq
+
+    def _bounce_to_cpu(self, x: torch.Tensor) -> torch.Tensor:
+        """10 KiB (N=1) D2H after the GPU prefix. Compute stream, not copy_stream."""
+        if x.device.type != "cuda":
+            return x
+        torch.cuda.synchronize()
+        return x.to("cpu")
+
+    def _bounce_to_device(self, h: torch.Tensor) -> torch.Tensor:
+        if h.device == self.device:
+            return h
+        return h.to(self.device)
 
     @torch.no_grad()
     def capture_graphs(self) -> str:
@@ -610,7 +690,7 @@ class TokenLoop:
                 x, start_pos, n, seq, cos, sin, self._causal_mask(start_pos, seq)
             )
 
-        self.kv.seq_len = seq
+        self._set_seq_len(seq)
         if all_positions:
             src = x
         elif not logits:
@@ -642,9 +722,63 @@ class TokenLoop:
         one fused kernel). CUDA bf16 can differ by ~1 ULP from
         :func:`rms_norm_exact`; greedy needles are quality checks, not bitwise
         logits. Do not ``torch.compile`` this method: it would break CUDA graphs
-        and CopyRing.
+        and CopyRing. CPU suffix is a second walk after one 10 KiB bounce.
         """
-        kv = self.kv
+        n_gpu = self.n_gpu
+        if n_gpu:
+            kv = self.kv
+            write, view = kv.write, kv.view
+            eps = self.eps
+            hd = self.head_dim
+            n_q, n_kv, n_rep = self.n_q, self.n_kv, self.n_rep
+            q_dim, scaling = self.q_dim, self.scaling
+            pack = self._pack
+            sdpa = F.scaled_dot_product_attention
+            silu = F.silu
+            pair = self._rope_pair
+            if pair is not None:
+                pair.load_pos(cos, sin)
+            shape = self._rms_shape
+            norm1, norm2, layers = self._norm1, self._norm2, self._layer
+            ring = self._ring
+
+            for li in range(n_gpu):
+                g_qkv, g_o, g_gu, g_down = layers[li]
+                if ring is not None:
+                    ring.prefetch()  # first HOST of this layer overlaps qkv
+                h = F.rms_norm(x, shape, norm1[li], eps)
+                if pack is not None:
+                    q, k, v = pack(g_qkv.run(h)[0], n_q, n_kv, hd)
+                else:
+                    q, k, v = g_qkv.run(h)
+                    q = q.view(1, n_q, hd)
+                    k = k.view(1, n_kv, hd)
+                    v = v.view(1, n_kv, hd)
+                if pair is not None:
+                    q, k = pair.apply(q, k)
+                else:
+                    q = _rope(q, cos, sin)
+                    k = _rope(k, cos, sin)
+                write(li, pos, k, v)
+                k_all, v_all = view(li, seq)
+                a = sdpa(q.view(1, n_kv, n_rep, hd), k_all, v_all, scale=scaling)
+                x = x.add_(g_o.run(a.reshape(1, q_dim))[0])
+
+                if ring is not None:
+                    ring.prefetch()  # HOST gate/up (tail D) overlaps remaining DEVICE
+                h = F.rms_norm(x, shape, norm2[li], eps)
+                gate, up = g_gu.run(h)
+                if ring is not None:
+                    ring.prefetch()  # down if not already in flight
+                x = x.add_(g_down.run(silu(gate) * up)[0])
+        if self.n_cpu == 0:
+            return x
+        return self._decode_cpu_suffix(x, pos, seq)
+
+    def _decode_cpu_suffix(self, x: torch.Tensor, pos: int, seq: int) -> torch.Tensor:
+        """CPU repeating layers after one D2H. Never capture; never CopyRing."""
+        x = self._bounce_to_cpu(x)
+        kv = self.kv_cpu
         write, view = kv.write, kv.view
         eps = self.eps
         hd = self.head_dim
@@ -653,16 +787,14 @@ class TokenLoop:
         pack = self._pack
         sdpa = F.scaled_dot_product_attention
         silu = F.silu
-        pair = self._rope_pair
-        if pair is not None:
-            pair.load_pos(cos, sin)
         shape = self._rms_shape
         norm1, norm2, layers = self._norm1, self._norm2, self._layer
-        ring = self._ring
-
-        for li, (g_qkv, g_o, g_gu, g_down) in enumerate(layers):
-            if ring is not None:
-                ring.prefetch()  # first HOST of this layer overlaps qkv
+        cos = self.cos_cpu[pos:seq]
+        sin = self.sin_cpu[pos:seq]
+        n_gpu = self.n_gpu
+        for li in range(n_gpu, self.n_layers):
+            g_qkv, g_o, g_gu, g_down = layers[li]
+            cpu_li = li - n_gpu
             h = F.rms_norm(x, shape, norm1[li], eps)
             if pack is not None:
                 q, k, v = pack(g_qkv.run(h)[0], n_q, n_kv, hd)
@@ -671,24 +803,16 @@ class TokenLoop:
                 q = q.view(1, n_q, hd)
                 k = k.view(1, n_kv, hd)
                 v = v.view(1, n_kv, hd)
-            if pair is not None:
-                q, k = pair.apply(q, k)
-            else:
-                q = _rope(q, cos, sin)
-                k = _rope(k, cos, sin)
-            write(li, pos, k, v)
-            k_all, v_all = view(li, seq)
+            q = _rope(q, cos, sin)
+            k = _rope(k, cos, sin)
+            write(cpu_li, pos, k, v)
+            k_all, v_all = view(cpu_li, seq)
             a = sdpa(q.view(1, n_kv, n_rep, hd), k_all, v_all, scale=scaling)
             x = x.add_(g_o.run(a.reshape(1, q_dim))[0])
-
-            if ring is not None:
-                ring.prefetch()  # HOST gate/up (tail D) overlaps remaining DEVICE
             h = F.rms_norm(x, shape, norm2[li], eps)
             gate, up = g_gu.run(h)
-            if ring is not None:
-                ring.prefetch()  # down if not already in flight
             x = x.add_(g_down.run(silu(gate) * up)[0])
-        return x
+        return self._bounce_to_device(x)
 
     def _prefill_layers(
         self,
@@ -702,18 +826,68 @@ class TokenLoop:
     ) -> torch.Tensor:
         if self.prefill_mode == "hold":
             return self._prefill_layers_hold(x, start_pos, n, seq, cos, sin, mask)
-        kv, eps = self.kv, self.eps
+        n_gpu = self.n_gpu
+        if n_gpu:
+            kv, eps = self.kv, self.eps
+            rms, hd, n_kv = self.rms, self.head_dim, self.n_kv
+            pack = self._pack
+            n_q = self.n_q
+            attend = self._attend
+            silu = F.silu
+            norm1, norm2, layers = self._norm1, self._norm2, self._layer
+            ring = self._ring
+
+            for li in range(n_gpu):
+                g_qkv, g_o, g_gu, g_down = layers[li]
+                if ring is not None:
+                    ring.prefetch()
+                h = rms(x, norm1[li], eps)
+                if pack is not None:
+                    q, k, v = pack(g_qkv.run(h)[0], n_q, n_kv, hd)
+                else:
+                    q, k, v = g_qkv.run(h)
+                    q = q.reshape(n, n_q, hd)
+                    k = k.reshape(n, n_kv, hd)
+                    v = v.reshape(n, n_kv, hd)
+                q = _rope(q, cos, sin)
+                k = _rope(k, cos, sin)
+                kv.write(li, start_pos, k, v)
+                k_all, v_all = kv.view(li, seq)
+                x = x.add_(g_o.run(attend(q, k_all, v_all, n, mask))[0])
+
+                if ring is not None:
+                    ring.prefetch()
+                h = rms(x, norm2[li], eps)
+                gate, up = g_gu.run(h)
+                if ring is not None:
+                    ring.prefetch()
+                x = x.add_(g_down.run(silu(gate) * up)[0])
+        if self.n_cpu == 0:
+            return x
+        return self._prefill_cpu_suffix(x, start_pos, n, seq)
+
+    def _prefill_cpu_suffix(
+        self,
+        x: torch.Tensor,
+        start_pos: int,
+        n: int,
+        seq: int,
+    ) -> torch.Tensor:
+        x = self._bounce_to_cpu(x)
+        kv, eps = self.kv_cpu, self.eps
         rms, hd, n_kv = self.rms, self.head_dim, self.n_kv
         pack = self._pack
         n_q = self.n_q
-        attend = self._attend
+        attend = self._attend_cpu
         silu = F.silu
         norm1, norm2, layers = self._norm1, self._norm2, self._layer
-        ring = self._ring
-
-        for li, (g_qkv, g_o, g_gu, g_down) in enumerate(layers):
-            if ring is not None:
-                ring.prefetch()
+        cos = self.cos_cpu[start_pos:seq]
+        sin = self.sin_cpu[start_pos:seq]
+        mask = self._causal_mask(start_pos, seq, device=x.device)
+        n_gpu = self.n_gpu
+        for li in range(n_gpu, self.n_layers):
+            g_qkv, g_o, g_gu, g_down = layers[li]
+            cpu_li = li - n_gpu
             h = rms(x, norm1[li], eps)
             if pack is not None:
                 q, k, v = pack(g_qkv.run(h)[0], n_q, n_kv, hd)
@@ -724,18 +898,13 @@ class TokenLoop:
                 v = v.reshape(n, n_kv, hd)
             q = _rope(q, cos, sin)
             k = _rope(k, cos, sin)
-            kv.write(li, start_pos, k, v)
-            k_all, v_all = kv.view(li, seq)
+            kv.write(cpu_li, start_pos, k, v)
+            k_all, v_all = kv.view(cpu_li, seq)
             x = x.add_(g_o.run(attend(q, k_all, v_all, n, mask))[0])
-
-            if ring is not None:
-                ring.prefetch()
             h = rms(x, norm2[li], eps)
             gate, up = g_gu.run(h)
-            if ring is not None:
-                ring.prefetch()
             x = x.add_(g_down.run(silu(gate) * up)[0])
-        return x
+        return self._bounce_to_device(x)
 
     def _prefill_layers_hold(
         self,
@@ -882,10 +1051,42 @@ class TokenLoop:
         )
         return a.squeeze(0).permute(1, 0, 2).reshape(n, self.q_dim)
 
-    def _causal_mask(self, start_pos: int, seq: int) -> torch.Tensor:
+    def _attend_cpu(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        n: int,
+        mask: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """CPU SDPA. If this build lacks ``enable_gqa``, expand K/V by ``n_rep``."""
+        if n == 1:
+            a = F.scaled_dot_product_attention(
+                q.view(1, self.n_kv, self.n_rep, self.head_dim), k, v, scale=self.scaling
+            )
+            return a.view(1, self.q_dim)
+        qh = q.permute(1, 0, 2).unsqueeze(0)
+        if self._gqa:
+            a = F.scaled_dot_product_attention(
+                qh, k, v, attn_mask=mask, scale=self.scaling, enable_gqa=True
+            )
+        else:
+            a = F.scaled_dot_product_attention(
+                qh,
+                repeat_kv(k, self.n_rep),
+                repeat_kv(v, self.n_rep),
+                attn_mask=mask,
+                scale=self.scaling,
+            )
+        return a.squeeze(0).permute(1, 0, 2).reshape(n, self.q_dim)
+
+    def _causal_mask(
+        self, start_pos: int, seq: int, *, device: torch.device | None = None
+    ) -> torch.Tensor:
         """``[1, 1, n, seq]`` bool, ``True`` = attend. Only built for ``N > 1``."""
-        q_pos = torch.arange(start_pos, seq, device=self.device).unsqueeze(1)
-        k_pos = torch.arange(seq, device=self.device).unsqueeze(0)
+        dev = self.device if device is None else device
+        q_pos = torch.arange(start_pos, seq, device=dev).unsqueeze(1)
+        k_pos = torch.arange(seq, device=dev).unsqueeze(0)
         return (k_pos <= q_pos)[None, None]
 
     # --- phases ------------------------------------------------------------
@@ -949,7 +1150,7 @@ class TokenLoop:
     def step(self, token_id: int) -> torch.Tensor:
         """One decode token at position ``seq_len``. ``N == 1``, RoPE at ``seq-1``."""
         self._tok[0] = token_id
-        return self.forward(self._tok, self.kv.seq_len)
+        return self.forward(self._tok, self._seq_len())
 
     @torch.no_grad()
     def warmup(self, *, prompt: int = 8, tokens: int = 16) -> float:
@@ -978,7 +1179,7 @@ class TokenLoop:
 
         runners = [g for row in self._layer for g in row] + [self._head]
         groups = []
-        n_graph = n_eager = n_host = n_dev = 0
+        n_graph = n_eager = n_host = n_dev = n_cpu = 0
         for g in runners:
             graphed = isinstance(g, GraphedGemmGroup)
             eager = g.eager if graphed else g
@@ -988,7 +1189,8 @@ class TokenLoop:
             else:
                 n_eager += 1
             n_host += sum(1 for h in homes if h == "host")
-            n_dev += sum(1 for h in homes if h != "host")
+            n_cpu += sum(1 for h in homes if h == "cpu")
+            n_dev += sum(1 for h in homes if h == "device")
             groups.append(
                 {
                     "name": g.name,
@@ -999,9 +1201,14 @@ class TokenLoop:
                     "streams": len(getattr(eager, "streams", ())),
                 }
             )
+        kv_gpu = 0.0 if self.kv is None else float(self.kv.mib)
+        kv_cpu = 0.0 if self.kv_cpu is None else float(self.kv_cpu.mib)
         return {
             "max_seq": self.max_seq,
             "n_layers": self.n_layers,
+            "n_gpu": self.n_gpu,
+            "n_cpu": self.n_cpu,
+            "compute": self.compute,
             "hidden": self.hidden,
             "n_q": self.n_q,
             "n_kv": self.n_kv,
@@ -1014,9 +1221,12 @@ class TokenLoop:
             "n_graphed_groups": n_graph,
             "n_eager_groups": n_eager,
             "n_host_gemms": n_host,
+            "n_cpu_gemms": n_cpu,
             "n_device_gemms": n_dev,
             "weight_bytes_device": int(self.weight_bytes),
-            "kv_mib": float(self.kv.mib),
+            "kv_mib": kv_gpu + kv_cpu,
+            "kv_gpu_mib": kv_gpu,
+            "kv_cpu_mib": kv_cpu,
             "host_tape": [g.name for g in self._host_tape],
             "ring": None if self._ring is None else self._ring.snapshot(),
             "groups": groups,

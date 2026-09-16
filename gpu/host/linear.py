@@ -23,6 +23,18 @@ __all__ = ["CompressedLinear", "nf4_linear", "k_pad"]
 GROUP_SIZE = 64
 
 
+def _pageable_cpu(t: torch.Tensor) -> torch.Tensor:
+    """CPU tensor that is never pinned (clone of a pinned tensor can stay pinned)."""
+    src = t.detach()
+    if src.device.type != "cpu":
+        src = src.cpu()
+    if not cpu_is_pinned(src):
+        return src
+    out = torch.empty(src.shape, dtype=src.dtype, device="cpu")
+    out.copy_(src)
+    return out
+
+
 def k_pad(k: int) -> int:
     """``64 * ceil(K / 64)`` -- stitch-gpu.md size formulas."""
     return GROUP_SIZE * ((int(k) + GROUP_SIZE - 1) // GROUP_SIZE)
@@ -120,6 +132,7 @@ class CompressedLinear(nn.Module):
             self.register_buffer("bias", None)
         self.chr_name: str | None = None
         self.host_image: HostImage | None = None
+        self._home: str | None = None
 
     # --- the weight that is not there ------------------------------------
     @property
@@ -143,7 +156,9 @@ class CompressedLinear(nn.Module):
 
     @property
     def home(self) -> str:
-        """``device`` if packed lives here, ``host`` if :attr:`host_image`, else ``empty``."""
+        """``device`` / ``host`` (CopyRing) / ``cpu`` (pageable suffix) / ``empty``."""
+        if self._home is not None:
+            return self._home
         if int(self.packed.numel()) > 0:
             return "device"
         if self.host_image is not None:
@@ -174,6 +189,7 @@ class CompressedLinear(nn.Module):
         self.scale = matrix.scale
         self.chr_name = matrix.name
         self.host_image = None
+        self._home = "device"
 
     def attach_host(self, image: HostImage) -> None:
         """Keep packed/scale empty; the matrix lives on pinned host (CopyRing is H2-4).
@@ -196,17 +212,52 @@ class CompressedLinear(nn.Module):
             self.packed = torch.empty(0, dtype=torch.uint8, device=dev)
             self.scale = torch.empty(0, dtype=torch.float16, device=dev)
         self.host_image = image
+        self._home = "host"
+
+    def attach_cpu(self, matrix: ChrMatrix) -> None:
+        """Packed+scale on pageable CPU. No pin, no H2D, not CopyRing.
+
+        ``home="cpu"``. A CUDA ``ChrMatrix`` is copied to a new pageable
+        allocation so attach never leaves a pinned or device buffer.
+        """
+        if (int(matrix.M), int(matrix.K)) != (self.M, self.K):
+            raise ValueError(
+                f"{matrix.name}: matrix is [{matrix.M},{matrix.K}], "
+                f"this linear is [{self.M},{self.K}]"
+            )
+        if int(matrix.K_pad) != self.K_pad:
+            raise ValueError(f"{matrix.name}: K_pad {matrix.K_pad} != {self.K_pad}")
+        if matrix.packed.dtype is not torch.uint8 or matrix.scale.dtype is not torch.float16:
+            raise TypeError(
+                f"{matrix.name}: expected uint8 packed / float16 scale, "
+                f"got {matrix.packed.dtype} / {matrix.scale.dtype}"
+            )
+        packed = _pageable_cpu(matrix.packed)
+        scale = _pageable_cpu(matrix.scale)
+        if cpu_is_pinned(packed) or cpu_is_pinned(scale):
+            raise RuntimeError(
+                f"{matrix.name}: attach_cpu must not pin packed/scale "
+                "(CPU suffix is pageable; pin fights the gpu-mode ring)"
+            )
+        self.packed = packed
+        self.scale = scale
+        self.chr_name = matrix.name
+        self.host_image = None
+        self._home = "cpu"
 
     def set_bias(self, bias: torch.Tensor) -> None:
         if self.bias is None:
             raise ValueError(f"{self.chr_name or self}: built with bias=False")
         if bias.shape != (self.M,):
             raise ValueError(f"bias {tuple(bias.shape)} != {(self.M,)}")
-        self.bias = bias.to(self.compute_dtype)
+        dest = self.packed.device if self.home == "cpu" else bias.device
+        self.bias = bias.to(device=dest, dtype=self.compute_dtype)
 
     # --- forward ----------------------------------------------------------
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.host_image is not None and int(self.packed.numel()) == 0:
+        if self.home == "host" or (
+            self.host_image is not None and int(self.packed.numel()) == 0
+        ):
             raise RuntimeError(
                 f"CompressedLinear[{self.M},{self.K}] "
                 f"({self.chr_name or 'unnamed'}) is host-resident; "
@@ -216,6 +267,18 @@ class CompressedLinear(nn.Module):
             raise RuntimeError(
                 f"CompressedLinear[{self.M},{self.K}] "
                 f"({self.chr_name or 'unnamed'}) has no weights: call load_chr_nf4 first"
+            )
+        if self.home == "cpu":
+            if x.device.type == "cuda":
+                raise RuntimeError(
+                    f"CompressedLinear[{self.M},{self.K}] "
+                    f"({self.chr_name or 'unnamed'}) is CPU-resident; "
+                    "refuse silent H2D in forward (TokenLoop bounces the hidden state)"
+                )
+            from .cpu_linear import nf4_linear_cpu
+
+            return nf4_linear_cpu(
+                x, self.packed, self.scale, self.M, self.K, self.K_pad, self.bias
             )
         return nf4_linear(x, self.packed, self.scale, self.M, self.K, self.K_pad, self.bias)
 

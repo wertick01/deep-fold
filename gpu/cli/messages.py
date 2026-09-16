@@ -86,7 +86,9 @@ CHAT_HELP = (
     "History is JSON on disk; each turn prefills it (KV is not reused). "
     "Ctrl+C does not copy; use /copy or the terminal's copy (Ctrl+Shift+C). "
     "Agent mode (--agent or /agent on) can list/read/write the workspace and "
-    "run pytest; writes and tests ask first. There is no general shell."
+    "run pytest; writes and tests ask first. There is no general shell. "
+    "Compute placement (--compute / --gpu-layers) is a launch flag; "
+    "there is no /gpu-layers."
 )
 
 #: Kept for the doctor / catalog copy. It is *not* the generate authority any

@@ -363,6 +363,34 @@ def _overflow_cap_from_chr(chr_file: Path, vram_mib: int, max_seq: int) -> int:
     return overflow_cap_from_chr(str(chr_file), int(vram_mib), int(max_seq))
 
 
+def _compute_plan_from_args(args, model_dir: str, chr_file: Path, vram_mib: int | None):
+    """Layer-split plan. CPU-only; uses header shapes when the ``.chr`` parses."""
+    from gpu.host.compute import plan_compute
+    from gpu.host.residency import descs_from_header, descs_from_qwen
+
+    cfg = load_config(model_dir)
+    descs = None
+    try:
+        from gpu.chr0 import load_header
+
+        descs = descs_from_header(load_header(str(chr_file)))
+    except Exception:
+        descs = None
+    if not descs:
+        descs = descs_from_qwen(cfg)
+    return plan_compute(
+        descs,
+        cfg,
+        compute=getattr(args, "compute", "gpu") or "gpu",
+        gpu_layers=getattr(args, "gpu_layers", None),
+        cpu_layers=getattr(args, "cpu_layers", None),
+        gpu_frac=getattr(args, "gpu_frac", None),
+        vram_mib=int(vram_mib or detect_vram_mib() or 12288),
+        max_seq=int(args.max_seq),
+        residency_policy=getattr(args, "residency", "D"),
+    )
+
+
 def _max_resident_bytes(
     args,
     model_dir: str,
@@ -408,6 +436,15 @@ def _open_loop(
     )
 
     cap = _max_resident_bytes(args, model, chr_file, vram_mib)
+    from gpu.host.compute import ComputePlanError, format_compute_stderr
+
+    try:
+        compute_plan = _compute_plan_from_args(args, model, chr_file, vram_mib)
+    except ComputePlanError as exc:
+        _err(str(exc))
+        raise SystemExit(1) from exc
+    if compute_plan.n_cpu > 0:
+        cap = None
     _err(f"loading {chr_file} (the only weight file opened)")
     loaded, report = load_model(
         model,
@@ -415,6 +452,7 @@ def _open_loop(
         trust_remote_code=trust_remote_code,
         max_resident_bytes=cap,
         residency_policy=getattr(args, "residency", "D"),
+        compute_plan=compute_plan,
     )
     weight_mib = report.device_mib
     smi = _smi_used_mib()
@@ -437,6 +475,7 @@ def _open_loop(
         + (f", nvidia-smi {smi} MiB" if smi is not None else "")
         + f", load {report.seconds:.1f} s"
     )
+    _err(format_compute_stderr(compute_plan))
 
     loop = TokenLoop(loaded, max_seq=args.max_seq)
     _err(f"graph family: {loop.plan.family} (qkv pack: {loop.plan.qkv_pack or 'split'})")

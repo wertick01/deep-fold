@@ -12,6 +12,7 @@ import sys
 import time
 from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 
@@ -361,6 +362,74 @@ def test_group_is_resident_skips_host() -> None:
     check("HOST group not resident", not group_is_resident(GemmGroup("down", [host])), "")
     mixed = GemmGroup("qkv", [dev, host, _dev_gemm("v", 8, 64)])
     check("mixed HOST not resident", not group_is_resident(mixed), "")
+    cpu = Gemm(
+        name="cpu.down",
+        M=8,
+        K=64,
+        K_pad=64,
+        bias=None,
+        packed=torch.zeros(8, 32, dtype=torch.uint8),
+        scale=torch.zeros(8, 1, dtype=torch.float16),
+        home="cpu",
+    )
+    check("CPU group not resident", not group_is_resident(GemmGroup("cpu.down", [cpu])), "")
+    fake_streams = (object(), object())
+    cpu_grp = GemmGroup("cpu.down", [cpu], fake_streams)
+    check("CPU group streams=()", cpu_grp.streams == (), str(cpu_grp.streams))
+
+
+def test_tokenloop_cpu_suffix_no_ring_and_hold_refused() -> None:
+    """Hybrid v1: no CopyRing even if slots exist; hold is gpu-only."""
+    from gpu.host.compute import ComputePlan
+    from gpu.host.linear import CompressedLinear
+    from gpu.tests.nf4_oracle import k_pad, toy_nf4
+
+    model, plan = _bound(qwen2_model())
+    for slot in plan.layers[1].gemms.values():
+        seat = model.get_submodule(slot)
+        if not isinstance(seat, CompressedLinear):
+            continue
+        packed_np, scale_np = toy_nf4(seat.M, seat.K, seed=1)
+        seat.attach_cpu(
+            SimpleNamespace(
+                name=slot,
+                M=seat.M,
+                K=seat.K,
+                K_pad=k_pad(seat.K),
+                packed=torch.from_numpy(packed_np),
+                scale=torch.from_numpy(scale_np),
+            )
+        )
+    model.deepfold_compute = ComputePlan(
+        compute="hybrid",
+        n_gpu=1,
+        n_cpu=1,
+        n_layers=2,
+        kv="split",
+        ring="none",
+    )
+    down0 = model.get_submodule(plan.layers[0].gemms["down"])
+    img = _host_image(down0.M, down0.K)
+    model.deepfold_slots = SlotPair(img.nbytes, "cpu")
+    loop = _cpu_loop(model)
+    check("suffix ignores slots / no CopyRing", loop._ring is None, str(loop._ring))
+    check("n_gpu 1", loop.n_gpu == 1, f"{loop.n_gpu}")
+    check("n_cpu 1", loop.n_cpu == 1, f"{loop.n_cpu}")
+    check("split GPU KV 1 layer", loop.kv is not None and loop.kv.n_layers == 1, "")
+    check("CPU KV 1 layer", loop.kv_cpu is not None and loop.kv_cpu.n_layers == 1, "")
+    l1_qkv = loop._groups[4]
+    check("L1 qkv home cpu", all(g.home == "cpu" for g in l1_qkv.gemms), str([g.home for g in l1_qkv.gemms]))
+    check("L1 not CUDA-graph resident", not group_is_resident(l1_qkv), "")
+    check("lm_head still device", loop._groups[-1].gemms[0].home == "device", "")
+    mode = loop.capture_graphs()
+    check("hybrid capture not overflow", loop.graph_error != "overflow", str(loop.graph_error))
+    check("cpu seats capture off or prefix only", mode in ("off", "linears"), mode)
+    hold_ok = False
+    try:
+        _cpu_loop(model, prefill_mode="hold")
+    except ValueError as exc:
+        hold_ok = "hold" in str(exc)
+    check("hold refused with n_cpu", hold_ok, "")
 
 
 def test_capture_cpu_does_not_run_host_groups() -> None:
@@ -1230,6 +1299,7 @@ TESTS = [
     test_tape_prefetch_three_slots,
     test_ring_lifetime_bytes_survive_arm,
     test_group_is_resident_skips_host,
+    test_tokenloop_cpu_suffix_no_ring_and_hold_refused,
     test_capture_cpu_does_not_run_host_groups,
     test_any_host_group_streams_empty,
     test_tokenloop_device_qkv_two_streams,

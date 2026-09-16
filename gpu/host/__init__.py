@@ -39,6 +39,8 @@ from .attach import (
 )
 from .blobs import iter_bf16, load_bf16, read_bf16_host
 from .embedding import NF4_LEVELS, Nf4Embedding, dequant_nf4_rows, dequant_table
+from .cpu_linear import nf4_gemm_cpu, nf4_linear_cpu
+from .compute import ComputePlan, ComputePlanError, plan_compute
 from .linear import CompressedLinear, k_pad, nf4_linear
 from .model import (
     LINEAR_KINDS,
@@ -66,6 +68,11 @@ __all__ = [
     "CompressedLinear",
     "Nf4Embedding",
     "nf4_linear",
+    "nf4_gemm_cpu",
+    "nf4_linear_cpu",
+    "ComputePlan",
+    "ComputePlanError",
+    "plan_compute",
     "k_pad",
     "build_skeleton",
     "replace_linears",

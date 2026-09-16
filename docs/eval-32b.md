@@ -100,7 +100,8 @@ batch 1: GPU prefix, CPU Q4_K suffix on the 5950X. Weights stay put.
 H2 still computes every layer on the GPU and streams **96** packed matrices
 (**6885 MiB**) each token. The 2.54 vs 2.49 long tie is CPU-suffix time vs
 PCIe copy time, not NF4 matching Q4_K mmvq. 3B (fully GPU) is the kernel
-gap: Ollama **187.3** vs H2 **35.2**.
+gap: Ollama **187.3** vs H2 **35.2**. A layer-split hybrid on
+`exp/cpu-hybrid-overflow` was **2.091** long and did not ship here.
 
 Standalone llama.cpp **1.52** used `-ngl 99`, which aborted auto-fit. Do not
 read that as “Ollama’s algorithm is newer llama.cpp” (0.34.0 vendors

@@ -85,14 +85,20 @@ Both 3B nets fit. Ollama/llama.cpp Q4_K fused CUDA (mmvq, graphs, FA) is
 ~187 tok/s. Our resident NF4 TokenLoop is 35.2. `LIVE_MAX_N=32`; decode N=1
 does not feed the prefill tile. That gap is the kernel, not overflow.
 
-## Hybrid CPU option (not in this commit)
+## Hybrid CPU option (tried; did not ship)
 
-A later branch can expose overflow policy as a generate option:
+`exp/cpu-hybrid-overflow` tried an Ollama-style layer split (resident NF4
+GPU prefix, CPU suffix, optional `i4c` sidecar). Same 64-token travelogue.
+It did **not** beat **2.54**. Product generate is still `--compute gpu` /
+CopyRing **2.49**. This branch does not contain that code.
 
-- `gpu` — current CopyRing (all compute on device, stream packed tails)
-- `cpu-suffix` — Ollama-style: keep a GPU prefix, run leftover **layers**
-  on CPU (activations move, weights do not)
-- `hybrid` — a shorter CPU suffix than Ollama’s ~50%, rest CopyRing or
-  resident, so the CPU does less than half and PCIe moves fewer than 6885 MiB
+| Stack | 32B long tok/s |
+|---|---:|
+| Ollama Q4_K_M | **2.54** |
+| `--compute gpu` CopyRing | **2.49** |
+| hybrid 36 GPU + 28 CPU i4c | **2.091** |
+| cpu-suffix 32, NF4 on CPU | **1.694** |
 
-That is an experiment, not a measured row. Do not write a tok/s for it here.
+Write-up on the experiment branch:
+[results.md](https://github.com/wertick01/deep-fold/blob/exp/cpu-hybrid-overflow/docs/runs/cpu-hybrid-overflow/results.md)
+([GitLab](https://gitlab.com/wertick01/deep-fold/-/blob/exp/cpu-hybrid-overflow/docs/runs/cpu-hybrid-overflow/results.md)).

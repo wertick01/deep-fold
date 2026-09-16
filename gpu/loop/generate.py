@@ -31,7 +31,7 @@ from typing import Callable, Literal, Sequence
 import torch
 import torch.nn.functional as F
 
-from .graph import Gemm, GemmGroup, GraphedGemmGroup, capture, linear_max_n
+from .graph import Gemm, GemmGroup, GraphedGemmGroup, capture, group_is_resident, linear_max_n
 from .kv_cache import KVCache
 from .ring import CopyRing
 from gpu.nf4.plan import LIVE_MAX_N
@@ -396,8 +396,8 @@ class TokenLoop:
         self._streams = tuple(torch.cuda.Stream() for _ in range(2)) if self.overlap else ()
         if slots is None:
             slots = getattr(model, "deepfold_slots", None)
-        if self.n_cpu > 0:
-            # v1: do not mix CopyRing with a CPU suffix (WDDM depth, two taxes).
+        if self.n_cpu > 0 and str(getattr(cplan, "ring", "none")) == "none":
+            # Whole-layer prefix: no tape. ring=D keeps SlotPair for prefix MLP.
             slots = None
         self.slots = slots
         self._ring = CopyRing(slots, timing=ring_timing) if slots is not None else None
@@ -589,7 +589,13 @@ class TokenLoop:
         return h.to(self.device)
 
     @torch.no_grad()
-    def capture_graphs(self) -> str:
+    def capture_graphs(
+        self,
+        *,
+        force: bool = False,
+        max_graphs: int | None = None,
+        fork: bool = False,
+    ) -> str:
         """CUDA graph plan A on all-DEVICE groups. Idempotent; returns the mode.
 
         Must be called after :meth:`warmup`. HOST overflow groups stay eager.
@@ -597,12 +603,22 @@ class TokenLoop:
         DEVICE capture failure the loop keeps running eager and
         :attr:`graph_error` says why -- eager is the contract, the graph is
         the optimization. Mixed sessions do not use ``graph_error="overflow"``.
+
+        Default skip is mixed CPU suffix + CopyRing only (hybrid-48: 0.592).
+        32B gpu overflow captures a serial DEVICE recipe (``fork=False``):
+        177 graphs, long ~2.09, no H2D wedge. Capturing TokenLoop overlap
+        streams, or a private QKV fork, lost tok/s on the 64-token plateau
+        (0.325 / 1.355). ``force`` recaptures; ``max_graphs`` takes a prefix.
         """
-        if self.graph_mode == "linears":
+        if self.graph_mode == "linears" and not force and max_graphs is None:
+            return self.graph_mode
+        if self._ring is not None and not force and self.n_cpu > 0:
+            self.graph_mode, self.graph_error = "off", None
+            self._capture_decode_glue()
             return self.graph_mode
         # Mixed overflow: DEVICE groups graph, HOST groups stay eager. capture()
         # skips HOST warmup (no CopyRing in that path). Not a full "overflow" off.
-        runners, mode, err = capture(self._groups)
+        runners, mode, err = capture(self._groups, max_graphs=max_graphs, fork=fork)
         self._apply(runners)
         self.graph_mode, self.graph_error = mode, err
         self._capture_decode_glue()

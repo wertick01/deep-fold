@@ -138,14 +138,32 @@ def test_gpu_layers_64_with_compute_gpu_is_noop() -> None:
     check("noop n_cpu 0", plan.n_cpu == 0 and plan.compute == "gpu", str(plan.compute))
 
 
-def test_n38_split_slack_refuses() -> None:
+def test_n38_mixes_copyring_on_prefix() -> None:
     descs = descs_from_qwen(QWEN_32B)
-    try:
-        plan_compute(descs, QWEN_32B, compute="hybrid", gpu_layers=38)
-    except ComputePlanError as exc:
-        check("N=38 raises", "38" in str(exc) or "fit" in str(exc).lower(), str(exc)[:160])
-        return
-    check("N=38 raises", False, "no error")
+    plan = plan_compute(descs, QWEN_32B, compute="hybrid", gpu_layers=38)
+    check("N=38 n_gpu", plan.n_gpu == 38, f"{plan.n_gpu}")
+    check("N=38 n_cpu 26", plan.n_cpu == 26, f"{plan.n_cpu}")
+    check("N=38 ring D", plan.ring == "D", plan.ring)
+    check("N=38 tape > 0", plan.ring_matrices > 0, f"{plan.ring_matrices}")
+
+
+def test_hybrid_48_prefix_tape_cpu_tail() -> None:
+    descs = descs_from_qwen(QWEN_32B)
+    plan = plan_compute(descs, QWEN_32B, compute="hybrid", gpu_layers=48)
+    check("N=48 n_gpu", plan.n_gpu == 48, f"{plan.n_gpu}")
+    check("N=48 n_cpu 16", plan.n_cpu == 16, f"{plan.n_cpu}")
+    check("N=48 ring D", plan.ring == "D", plan.ring)
+    check("N=48 tape shorter than 64-layer D", plan.ring_matrices < 96, f"{plan.ring_matrices}")
+    check("N=48 cpu weights > 0", plan.cpu_weight_mib > 0, f"{plan.cpu_weight_mib}")
+    dump = format_compute_stderr(plan)
+    check("stderr mixed streamed", "streamed=" in dump and "cpu_weights" in dump, dump)
+
+
+def test_hybrid_36_still_whole_layers() -> None:
+    descs = descs_from_qwen(QWEN_32B)
+    plan = plan_compute(descs, QWEN_32B, compute="hybrid", gpu_layers=36)
+    check("N=36 ring none", plan.ring == "none", plan.ring)
+    check("N=36 no tape", plan.ring_matrices == 0, f"{plan.ring_matrices}")
 
 
 def test_gpu_plus_cpu_layers_sum() -> None:
@@ -212,18 +230,49 @@ def test_suffix_contiguous_tail() -> None:
     )
 
 
+def test_cpu_codec_i4c_hybrid() -> None:
+    descs = descs_from_qwen(QWEN_32B)
+    plan = plan_compute(descs, QWEN_32B, compute="hybrid", cpu_codec="i4c")
+    check("hybrid i4c default N=36", plan.n_gpu == 36 and plan.n_cpu == 28, str(plan.n_gpu))
+    check("hybrid i4c codec", plan.cpu_codec == "i4c", plan.cpu_codec)
+    dump = format_compute_stderr(plan)
+    check("stderr cpu_codec=i4c", "cpu_codec=i4c" in dump, dump)
+
+
+def test_cpu_codec_i4c_refuses_gpu_only() -> None:
+    descs = descs_from_qwen(QWEN_32B)
+    raised = False
+    msg = ""
+    try:
+        plan_compute(descs, QWEN_32B, compute="gpu", cpu_codec="i4c")
+    except ComputePlanError as exc:
+        raised = True
+        msg = str(exc)
+    check("i4c on gpu raises", raised and "cpu-suffix" in msg, msg)
+    raised2 = False
+    try:
+        plan_compute(descs, QWEN_32B, compute="hybrid", cpu_codec="q4k")
+    except ComputePlanError:
+        raised2 = True
+    check("bogus cpu_codec raises", raised2, "")
+
+
 TESTS = [
     test_32b_layer_and_table,
     test_cpu_suffix_default_32,
     test_hybrid_default_36,
     test_gpu_32b_policy_d_tape,
     test_gpu_layers_64_with_compute_gpu_is_noop,
-    test_n38_split_slack_refuses,
+    test_n38_mixes_copyring_on_prefix,
+    test_hybrid_48_prefix_tape_cpu_tail,
+    test_hybrid_36_still_whole_layers,
     test_gpu_plus_cpu_layers_sum,
     test_gpu_frac_floor,
     test_3b_refuse_without_explicit,
     test_flags_require_split_mode,
     test_suffix_contiguous_tail,
+    test_cpu_codec_i4c_hybrid,
+    test_cpu_codec_i4c_refuses_gpu_only,
 ]
 
 

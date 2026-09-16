@@ -1,8 +1,10 @@
 # CPU/GPU hybrid overflow (32B)
 
-**Branch:** `exp/cpu-hybrid-overflow`. This file is the design. It is not a
-measured row. Do not write a tok/s for `cpu-suffix` or `hybrid` until the
-same long travelogue as [`docs/compare-3080.md`](compare-3080.md) exists.
+**Branch:** `exp/cpu-hybrid-overflow`. Design plus live numbers.
+Measured long plateaus: [`docs/runs/cpu-hybrid-overflow/results.md`](runs/cpu-hybrid-overflow/results.md).
+They did **not** beat Ollama **2.54**. Product default stays `--compute gpu`
+(**2.49**). Do not merge hybrid tok/s into `compare.json` row
+`deepfold-nf4-32B-overflow`.
 
 **Wave goal:** a user-facing generate option that chooses *where overflow
 layers compute* on Qwen2.5-32B-Instruct NF4 (RTX 3080 12 GB, Windows/WDDM).
@@ -433,6 +435,7 @@ python -m gpu.lab.deepfold_long --size 32B --compute gpu
 python -m gpu.lab.deepfold_long --size 32B --compute cpu-suffix
 python -m gpu.lab.deepfold_long --size 32B --compute hybrid
 python -m gpu.lab.deepfold_long --size 32B --compute hybrid --gpu-layers 36
+python -m gpu.lab.deepfold_long --size 32B --compute hybrid --cpu-codec i4c
 ```
 
 Ollama long stays `python -m gpu.lab.ollama_h2 --model qwen2.5:32b --size 32B`.
@@ -527,8 +530,8 @@ no). Hard-12 32B: **not run** until Pavel says “run it.”
 - `lm_head` on CPU; host-embed combined with hybrid.
 - `max_seq=4096`, 70B, VQ.
 - Speculative decode / draft model on the same 12 GB.
-- Claiming a hybrid tok/s in README or compare-3080 before a long file
-  exists.
+- Claiming hybrid as the product 32B number. Quote **2.49** for `--compute gpu`.
+  Hybrid i4c long is **2.091**, recorded on this branch only.
 
 ---
 
@@ -550,7 +553,7 @@ python gpu/loop/test_ring.py
 | CH-1 | `ComputePlan` + CLI parse + load wiring (`attach_cpu`, no ring when `n_cpu>0`). No generate. |
 | CH-2 | `nf4_gemm_cpu` vs oracle, N=1 and N≤32. Microbench 32B shapes. |
 | CH-3 | TokenLoop split + bounce. 3B canary needles. Ring tests still PASS. |
-| CH-4 | Live 32B long: gpu / cpu-suffix / hybrid-36. Files under `docs/runs/`. No tok/s in this plan. |
+| CH-4 | Live 32B long: gpu **2.49** / cpu-suffix-32 NF4 **1.694** / hybrid-36 i4c **2.091** (prefill 209 s). See `docs/runs/cpu-hybrid-overflow/results.md`. |
 
 ---
 

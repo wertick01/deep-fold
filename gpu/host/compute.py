@@ -13,6 +13,7 @@ from typing import Any, Mapping, Sequence
 
 from .residency import (
     DEFAULT_POLICY,
+    KV_BYTES_PER_TOKEN_32B,
     MIB,
     RUNTIME_OVERHEAD_MIB,
     WeightDesc,
@@ -33,9 +34,11 @@ __all__ = [
     "net_fits_resident",
     "plan_compute",
     "prefix_budget_mib",
+    "prefix_weight_descs",
 ]
 
 COMPUTE_MODES = frozenset({"gpu", "cpu-suffix", "hybrid"})
+CPU_CODECS = frozenset({"nf4", "i4c"})
 DEFAULT_HYBRID_GPU_LAYERS = 36
 DEFAULT_CPU_SUFFIX_GPU_LAYERS = 32
 # Auto-fit / unsafe-N pad. On 12 GB / 2048 / split this keeps N=38 off the
@@ -71,6 +74,7 @@ class ComputePlan:
     ring_matrices: int = 0
     ring_streamed_mib: float = 0.0
     layer_mib: float = 0.0
+    cpu_codec: str = "nf4"
 
     @property
     def gpu_layer_ids(self) -> tuple[int, ...]:
@@ -124,6 +128,18 @@ def net_fits_resident(
     n_layers = int(cfg["num_hidden_layers"])
     kv = kv_mib_per_layer(cfg, max_seq) * n_layers
     return packed + RUNTIME_OVERHEAD_MIB + kv <= int(vram_mib)
+
+
+def prefix_weight_descs(descs: Sequence[WeightDesc], n_gpu: int) -> tuple[WeightDesc, ...]:
+    """Embed, lm_head, and repeating layers ``[0, n_gpu)``. Suffix stays off the tape."""
+    n_gpu = int(n_gpu)
+    out: list[WeightDesc] = []
+    for desc in descs:
+        if desc.kind in ("embed", "lm_head"):
+            out.append(desc)
+        elif desc.layer is not None and int(desc.layer) < n_gpu:
+            out.append(desc)
+    return tuple(out)
 
 
 def prefix_budget_mib(
@@ -240,12 +256,18 @@ def plan_compute(
     vram_mib: int = VRAM_MIB_3080,
     max_seq: int = 2048,
     residency_policy: str = DEFAULT_POLICY,
+    cpu_codec: str = "nf4",
 ) -> ComputePlan:
     """Build a :class:`ComputePlan`. CPU-only; no ``.chr`` required."""
     compute = str(compute)
     if compute not in COMPUTE_MODES:
         raise ComputePlanError(
             f"--compute {compute!r}; expected one of gpu, cpu-suffix, hybrid"
+        )
+    cpu_codec = str(cpu_codec or "nf4")
+    if cpu_codec not in CPU_CODECS:
+        raise ComputePlanError(
+            f"--cpu-codec {cpu_codec!r}; expected nf4 or i4c"
         )
     n_layers = int(cfg["num_hidden_layers"])
     if n_layers < 1:
@@ -262,6 +284,10 @@ def plan_compute(
         fits=fits,
     )
     n_cpu = n_layers - n_gpu
+    if cpu_codec == "i4c" and n_cpu == 0:
+        raise ComputePlanError(
+            "--cpu-codec i4c needs --compute cpu-suffix or hybrid"
+        )
     layer_n = _typical_layer_nbytes(descs)
     layer_mib = layer_n / MIB
 
@@ -308,18 +334,35 @@ def plan_compute(
             ring_matrices=ring_n,
             ring_streamed_mib=ring_mib,
             layer_mib=layer_mib,
+            cpu_codec="nf4",
         )
 
     kv_policy = "split"
     budget = prefix_budget_mib(descs, cfg, n_gpu, max_seq=seq, kv=kv_policy)
-    # N that make used+1800+slack > 12 GB are unsafe (N=38 split).
-    if budget["used_plus_overhead_mib"] + SLACK_MIB > vram:
-        raise ComputePlanError(
-            f"--gpu-layers {n_gpu} does not fit as whole resident layers on "
-            f"{vram} MiB (used {budget['used_mib']:.1f} + overhead "
-            f"{RUNTIME_OVERHEAD_MIB} + slack {SLACK_MIB} MiB). "
-            "Move more layers to the CPU; v1 does not mix CopyRing with a CPU suffix."
+    ring = "none"
+    ring_n = 0
+    ring_mib = 0.0
+    resident_mib = budget["resident_mib"]
+    used_mib = budget["used_mib"]
+    used_plus = budget["used_plus_overhead_mib"]
+    # Whole-layer prefix fits: no tape. If it does not, GPU still *computes*
+    # those layers: policy D streams prefix MLP from pinned RAM (CopyRing),
+    # suffix stays pageable CPU. Join the ring before the 10 KiB bounce.
+    if used_plus + SLACK_MIB > vram:
+        prefix = prefix_weight_descs(descs, n_gpu)
+        kv_tok = max(
+            1, KV_BYTES_PER_TOKEN_32B * n_gpu // max(1, n_layers)
         )
+        cap = overflow_resident_cap(
+            vram, seq, prefix, kv_bytes_per_token=kv_tok
+        )
+        rplan = plan_residency(prefix, cap, policy=residency_policy)
+        ring = "D" if residency_policy in ("D", DEFAULT_POLICY) else str(residency_policy)
+        ring_n = len(rplan.streamed)
+        ring_mib = rplan.streamed_bytes / MIB
+        resident_mib = rplan.resident_bytes / MIB
+        used_mib = resident_mib + budget["kv_gpu_mib"]
+        used_plus = used_mib + RUNTIME_OVERHEAD_MIB
     return ComputePlan(
         compute=compute,
         n_gpu=n_gpu,
@@ -328,34 +371,42 @@ def plan_compute(
         lm_head="device",
         embed="device",
         kv=kv_policy,
-        ring="none",
+        ring=ring,
         max_seq=seq,
         vram_mib=vram,
-        resident_mib=budget["resident_mib"],
+        resident_mib=resident_mib,
         cpu_weight_mib=budget["cpu_weight_mib"],
         kv_gpu_mib=budget["kv_gpu_mib"],
         kv_cpu_mib=budget["kv_cpu_mib"],
-        used_mib=budget["used_mib"],
-        used_plus_overhead_mib=budget["used_plus_overhead_mib"],
-        ring_matrices=0,
-        ring_streamed_mib=0.0,
+        used_mib=used_mib,
+        used_plus_overhead_mib=used_plus,
+        ring_matrices=ring_n,
+        ring_streamed_mib=ring_mib,
         layer_mib=layer_mib,
+        cpu_codec=cpu_codec,
     )
 
 
 def format_compute_stderr(plan: ComputePlan) -> str:
     """Load-time dump. Hybrid example is in docs/plan-cpu-hybrid.md §5.1."""
     ring = "off" if plan.ring == "none" else "on"
+    codec = f" cpu_codec={plan.cpu_codec}" if plan.n_cpu else ""
     lines = [
         f"compute={plan.compute} gpu_layers={plan.n_gpu}/{plan.n_layers} "
-        f"cpu_layers={plan.n_cpu} lm_head={plan.lm_head}",
+        f"cpu_layers={plan.n_cpu}{codec} lm_head={plan.lm_head}",
         f"kv gpu={plan.kv_gpu_mib:.0f} MiB cpu={plan.kv_cpu_mib:.0f} MiB  "
         f"({plan.kv}, max_seq={plan.max_seq})",
     ]
     if plan.n_cpu:
+        extra = ""
+        if plan.ring != "none":
+            extra = (
+                f" streamed={plan.ring_matrices} ({plan.ring_streamed_mib:.0f} MiB)"
+            )
         lines.append(
             f"resident {plan.resident_mib:.0f} MiB  "
-            f"cpu_weights {plan.cpu_weight_mib:.0f} MiB pageable  ring={ring}"
+            f"cpu_weights {plan.cpu_weight_mib:.0f} MiB pageable  "
+            f"ring={ring}{extra}"
         )
     elif plan.ring != "none":
         lines.append(

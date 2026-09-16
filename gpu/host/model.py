@@ -25,7 +25,13 @@ from .blobs import iter_bf16, load_bf16
 from .embedding import Nf4Embedding, dequant_table
 from .host_image import HostImage
 from .linear import CompressedLinear
-from .residency import DEFAULT_POLICY, descs_from_header, plan_residency
+from .residency import (
+    DEFAULT_POLICY,
+    KV_BYTES_PER_TOKEN_32B,
+    descs_from_header,
+    overflow_resident_cap,
+    plan_residency,
+)
 from .slots import OVERFLOW_SLOT_COUNT, SlotPair
 from .vq_blobs import materialize_vq, reconstruct_vq
 from .vq_linear import CompressedVqLinear, VqEmbedding
@@ -77,6 +83,7 @@ class LoadReport:
     n_cpu: int = 0
     cpu_linears: int = 0
     cpu_bytes: int = 0
+    cpu_codec: str = "nf4"
 
     @property
     def device_mib(self) -> float:
@@ -356,9 +363,12 @@ def load_chr_nf4(
     (CPU packed rows, not CopyRing tape). Tied embeddings refuse host-embed.
 
     ``compute_plan`` with ``n_cpu>0`` is the layer split (cpu-suffix / hybrid):
-    suffix matrices use :meth:`CompressedLinear.attach_cpu` (pageable, no pin)
-    and **no** :class:`SlotPair` / CopyRing. ``max_resident_bytes`` is ignored
-    on that path (v1 does not mix the tape with a CPU suffix).
+    suffix matrices use :meth:`CompressedLinear.attach_cpu` (pageable, no pin).
+    ``cpu_codec=i4c`` transcodes those tables in RAM from NF4 (not written
+    into the ``.chr``). When the GPU prefix does not fit as whole layers,
+    ``ring=D`` streams prefix MLP through :class:`SlotPair` (pinned RAM, GPU
+    compute). Join that tape before the hidden bounce; do not prefetch during
+    the CPU suffix.
 
     The header is parsed once and passed down, so 300+ matrices do not reparse
     65 KiB of JSON each (gpu-abi.md §2).
@@ -380,20 +390,63 @@ def load_chr_nf4(
             "put embed on CPU while lm_head stays DEVICE (3B)."
         )
 
+    mixed_ring = False
+    cpu_codec = "nf4"
     if compute_plan is not None:
         report.compute = compute_plan.compute
         report.n_gpu = int(compute_plan.n_gpu)
         report.n_cpu = int(compute_plan.n_cpu)
+        cpu_codec = str(getattr(compute_plan, "cpu_codec", "nf4") or "nf4")
+        report.cpu_codec = cpu_codec
         model.deepfold_compute = compute_plan
         if compute_plan.n_cpu > 0:
             cpu_layer_ids = set(compute_plan.cpu_layer_ids)
-            max_resident_bytes = None
             if compute_plan.lm_head != "device" or compute_plan.embed != "device":
                 raise RuntimeError("v1: embed and lm_head stay DEVICE")
-            if compute_plan.ring != "none":
-                raise RuntimeError("v1: CPU suffix does not mix CopyRing")
+            mixed_ring = str(compute_plan.ring) != "none"
+            if not mixed_ring:
+                max_resident_bytes = None
 
-    if max_resident_bytes is not None:
+    if mixed_ring:
+        from .compute import prefix_weight_descs
+
+        descs = descs_from_header(hdr)
+        prefix = prefix_weight_descs(descs, compute_plan.n_gpu)
+        kv_tok = max(
+            1,
+            KV_BYTES_PER_TOKEN_32B
+            * int(compute_plan.n_gpu)
+            // max(1, int(compute_plan.n_layers)),
+        )
+        cap = overflow_resident_cap(
+            int(compute_plan.vram_mib),
+            int(compute_plan.max_seq),
+            prefix,
+            kv_bytes_per_token=kv_tok,
+        )
+        plan = plan_residency(
+            prefix,
+            cap,
+            policy=residency_policy,
+            pin_embed=not host_embed,
+            refill_embed=refill_embed,
+        )
+        report.slots = SlotPair(plan.slot_nbytes, dev, count=OVERFLOW_SLOT_COUNT)
+        report.slot_nbytes = plan.slot_nbytes
+        report.streamed = len(plan.streamed)
+        report.streamed_bytes = plan.streamed_bytes
+        report.resident_bytes = plan.resident_bytes
+        report.streamed_tape = plan.streamed
+        report.overflow = bool(plan.streamed)
+        model.deepfold_residency = plan
+        host_names = set(plan.streamed)
+        cpu_embed = set(plan.cpu)
+        embed_tape = [d.name for d in prefix if d.kind == "embed" and d.name in host_names]
+        if embed_tape:
+            raise RuntimeError(
+                f"embed must not be on CopyRing tape, plan streamed {embed_tape}"
+            )
+    elif max_resident_bytes is not None:
         descs = descs_from_header(hdr)
         plan = plan_residency(
             descs,
@@ -470,14 +523,16 @@ def load_chr_nf4(
             if not isinstance(mod, CompressedLinear):
                 raise TypeError(f"{name}: CPU suffix requires CompressedLinear")
             cpu_mat = materialize_nf4(path, name, torch.device("cpu"), header=hdr)
-            mod.attach_cpu(cpu_mat)
+            mod.attach_cpu(cpu_mat, codec=cpu_codec)
             report.linears += 1
             report.cpu_linears += 1
-            report.cpu_bytes += cpu_mat.nbytes
-            if verbose:
+            report.cpu_bytes += int(mod.nbytes)
+            if verbose or cpu_codec == "i4c":
+                tag = "i4c sidecar" if cpu_codec == "i4c" else "CPU"
                 print(
-                    f"  {name}: CPU [{cpu_mat.M},{cpu_mat.K}] "
-                    f"{cpu_mat.nbytes / MIB:.2f} MiB pageable"
+                    f"  {name}: {tag} [{mod.M},{mod.K}] "
+                    f"{mod.nbytes / MIB:.2f} MiB pageable",
+                    flush=True,
                 )
             continue
         if name in host_names:
@@ -738,7 +793,8 @@ def load_model(
     every matrix on ``device``. Ignored for VQ. ``residency_policy`` selects
     WHO (default ``D``); ``pin_embed=False`` / ``D_host_embed`` puts packed
     embed on CPU, not the CopyRing tape. ``compute_plan`` with ``n_cpu>0``
-    skips CopyRing and loads the suffix with ``attach_cpu``.
+    loads the suffix with ``attach_cpu``. A GPU prefix that does not fit as
+    whole layers uses policy D CopyRing on the prefix only.
     """
     from .attach import attach_module, plan_violations
 

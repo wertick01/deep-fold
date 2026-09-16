@@ -102,6 +102,11 @@ H2 still computes every layer on the GPU and streams **96** packed matrices
 PCIe copy time, not NF4 matching Q4_K mmvq. 3B (fully GPU) is the kernel
 gap: Ollama **187.3** vs H2 **35.2**.
 
+Layer-split hybrid on this branch (`--compute hybrid --gpu-layers 36
+--cpu-codec i4c --no-graphs`) was **2.091** long, prefill **209 s**, and did
+not replace CopyRing. Write-up:
+[`docs/runs/cpu-hybrid-overflow/results.md`](runs/cpu-hybrid-overflow/results.md).
+
 Standalone llama.cpp **1.52** used `-ngl 99`, which aborted auto-fit. Do not
 read that as “Ollama’s algorithm is newer llama.cpp” (0.34.0 vendors
 **b10760**; our zip is **b10964**).

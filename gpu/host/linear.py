@@ -133,6 +133,7 @@ class CompressedLinear(nn.Module):
         self.chr_name: str | None = None
         self.host_image: HostImage | None = None
         self._home: str | None = None
+        self.cpu_codec: str = "nf4"
 
     # --- the weight that is not there ------------------------------------
     @property
@@ -190,6 +191,7 @@ class CompressedLinear(nn.Module):
         self.chr_name = matrix.name
         self.host_image = None
         self._home = "device"
+        self.cpu_codec = "nf4"
 
     def attach_host(self, image: HostImage) -> None:
         """Keep packed/scale empty; the matrix lives on pinned host (CopyRing is H2-4).
@@ -213,12 +215,14 @@ class CompressedLinear(nn.Module):
             self.scale = torch.empty(0, dtype=torch.float16, device=dev)
         self.host_image = image
         self._home = "host"
+        self.cpu_codec = "nf4"
 
-    def attach_cpu(self, matrix: ChrMatrix) -> None:
+    def attach_cpu(self, matrix: ChrMatrix, *, codec: str = "nf4") -> None:
         """Packed+scale on pageable CPU. No pin, no H2D, not CopyRing.
 
         ``home="cpu"``. A CUDA ``ChrMatrix`` is copied to a new pageable
         allocation so attach never leaves a pinned or device buffer.
+        ``codec="i4c"`` transcodes the NF4 table in RAM (sidecar; not ``.chr``).
         """
         if (int(matrix.M), int(matrix.K)) != (self.M, self.K):
             raise ValueError(
@@ -244,6 +248,24 @@ class CompressedLinear(nn.Module):
         self.chr_name = matrix.name
         self.host_image = None
         self._home = "cpu"
+        self.cpu_codec = "nf4"
+        codec = str(codec or "nf4")
+        if codec not in ("nf4", "i4c"):
+            raise ValueError(f"attach_cpu codec={codec!r}; expected nf4 or i4c")
+        if codec == "i4c":
+            from .i4c import pack_i4c_from_nf4
+
+            p, s, kp = pack_i4c_from_nf4(self.packed, self.scale, self.M, self.K)
+            if int(kp) != int(self.K_pad):
+                raise ValueError(
+                    f"{matrix.name}: i4c K_pad {kp} != NF4 K_pad {self.K_pad}"
+                )
+            self.packed = p
+            self.scale = s
+            self.cpu_codec = "i4c"
+            import gc
+
+            gc.collect()
 
     def set_bias(self, bias: torch.Tensor) -> None:
         if self.bias is None:
@@ -275,6 +297,12 @@ class CompressedLinear(nn.Module):
                     f"({self.chr_name or 'unnamed'}) is CPU-resident; "
                     "refuse silent H2D in forward (TokenLoop bounces the hidden state)"
                 )
+            if getattr(self, "cpu_codec", "nf4") == "i4c":
+                from .i4c import i4c_linear_cpu
+
+                return i4c_linear_cpu(
+                    x, self.packed, self.scale, self.M, self.K, self.K_pad, self.bias
+                )
             from .cpu_linear import nf4_linear_cpu
 
             return nf4_linear_cpu(
@@ -283,8 +311,11 @@ class CompressedLinear(nn.Module):
         return nf4_linear(x, self.packed, self.scale, self.M, self.K, self.K_pad, self.bias)
 
     def extra_repr(self) -> str:
+        codec = "nf4"
+        if self.home == "cpu":
+            codec = getattr(self, "cpu_codec", "nf4")
         return (
             f"in_features={self.in_features}, out_features={self.out_features}, "
-            f"bias={self.bias is not None}, codec=nf4-g{GROUP_SIZE}, "
+            f"bias={self.bias is not None}, codec={codec}-g{GROUP_SIZE}, "
             f"K_pad={self.K_pad}, home={self.home}, loaded={self.is_loaded}"
         )

@@ -85,14 +85,27 @@ Both 3B nets fit. Ollama/llama.cpp Q4_K fused CUDA (mmvq, graphs, FA) is
 ~187 tok/s. Our resident NF4 TokenLoop is 35.2. `LIVE_MAX_N=32`; decode N=1
 does not feed the prefill tile. That gap is the kernel, not overflow.
 
-## Hybrid CPU option (not in this commit)
+## Hybrid CPU option (tried; did not win)
 
-A later branch can expose overflow policy as a generate option:
+`exp/cpu-hybrid-overflow` wired `--compute {gpu,cpu-suffix,hybrid}` and an
+in-RAM `i4c` sidecar for the CPU suffix. Same 64-token travelogue. It did
+**not** beat Ollama **2.54**. Product generate is still `--compute gpu` /
+**2.49**. Details: [`docs/runs/cpu-hybrid-overflow/results.md`](runs/cpu-hybrid-overflow/results.md).
 
-- `gpu` — current CopyRing (all compute on device, stream packed tails)
-- `cpu-suffix` — Ollama-style: keep a GPU prefix, run leftover **layers**
-  on CPU (activations move, weights do not)
-- `hybrid` — a shorter CPU suffix than Ollama’s ~50%, rest CopyRing or
-  resident, so the CPU does less than half and PCIe moves fewer than 6885 MiB
+| Stack | 32B long tok/s |
+|---|---:|
+| Ollama Q4_K_M layer-split | **2.54** |
+| `--compute gpu` CopyRing | **2.49** |
+| hybrid 36 GPU NF4 + 28 CPU i4c, no graphs | **2.091** |
+| cpu-suffix 32, NF4 CPU | **1.694** |
+| hybrid-48 + CopyRing + graphs | **0.592** |
 
-That is an experiment, not a measured row. Do not write a tok/s for it here.
+N=36 already sits at ~11750 MiB smi. A 50–56 layer *resident* GPU prefix
+does not fit. Mixing CopyRing with a CPU suffix (N=48) lost tok/s. CUDA is
+idle during the suffix because residual layers are a chain; CopyRing is two
+H2D slots, not a second compute device. Prefill on i4c N>1 was **209 s**
+(python decode), not a PCIe number.
+
+Every 32B decode token still reads ~16 GiB of packed weights. On 12 GB that
+is either PCIe (277 ms copy floor) or DDR4 on the suffix. That neighborhood
+is **~2.5 tok/s**, not a 2× Ollama gap.

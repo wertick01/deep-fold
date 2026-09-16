@@ -44,6 +44,7 @@ further, since the Python cost per layer is unchanged and there are more layers.
 from __future__ import annotations
 
 import gc
+import os
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -210,7 +211,7 @@ class Gemm:
                 bias=linear.bias,
                 packed=packed,
                 scale=linear.scale,
-                codec="nf4",
+                codec=str(getattr(linear, "cpu_codec", "nf4") or "nf4"),
                 host_image=None,
                 home="cpu",
             )
@@ -382,6 +383,13 @@ def try_host_slot_gemm(
     K_pad: int,  # noqa: N803
 ) -> torch.Tensor | None:
     """Replay or capture N=1 nf4_gemm on a slot view. ``None`` means use eager."""
+    if os.environ.get("DEEPFOLD_HOST_SLOT", "1").strip().lower() in (
+        "0",
+        "off",
+        "false",
+        "no",
+    ):
+        return None
     n = 1 if xk.dim() == 1 else int(xk.shape[-1])
     if n != 1:
         return None
@@ -476,9 +484,14 @@ class GemmGroup:
                 y = nf4_gemm(packed, scale, xk, g.M, g.K, g.K_pad).t()
             ring.record_gemm(g)
         elif g.home == "cpu":
-            from gpu.host.cpu_linear import nf4_gemm_cpu
+            if g.codec == "i4c":
+                from gpu.host.i4c import i4c_gemm_cpu
 
-            y = nf4_gemm_cpu(g.packed, g.scale, xk, g.M, g.K, g.K_pad).t()
+                y = i4c_gemm_cpu(g.packed, g.scale, xk, g.M, g.K, g.K_pad).t()
+            else:
+                from gpu.host.cpu_linear import nf4_gemm_cpu
+
+                y = nf4_gemm_cpu(g.packed, g.scale, xk, g.M, g.K, g.K_pad).t()
         else:
             y = nf4_gemm(g.packed, g.scale, xk, g.M, g.K, g.K_pad).t()
         if g.bias is not None:
@@ -576,12 +589,38 @@ def group_is_resident(group: GemmGroup) -> bool:
     return all(g.home == "device" for g in group.gemms)
 
 
+_CAPTURE_FORK_STREAMS: tuple | None = None
+
+
+def _capture_fork_streams(n: int) -> tuple:
+    """Private GEMM-fork streams for plan A. Not TokenLoop._streams.
+
+    Capturing the loop's two overlap streams 177 times wedged CopyRing on
+    32B WDDM (0.325 tok/s). Empty streams during capture recovered CopyRing
+    (long 2.09) but serialized QKV inside the graph. These handles exist only
+    for capture/replay topology; CopyRing never waits on them.
+    """
+    global _CAPTURE_FORK_STREAMS
+    n = max(0, int(n))
+    if n == 0:
+        return ()
+    if _CAPTURE_FORK_STREAMS is None or len(_CAPTURE_FORK_STREAMS) < n:
+        _CAPTURE_FORK_STREAMS = tuple(torch.cuda.Stream() for _ in range(n))
+    return _CAPTURE_FORK_STREAMS[:n]
+
+
 def capture(
     groups: Sequence[GemmGroup],
     *,
     warmup: int = 3,
+    max_graphs: int | None = None,
+    fork: bool = False,
 ) -> tuple[list[GemmGroup | GraphedGemmGroup], str, str | None]:
     """Capture all-DEVICE groups. HOST groups stay eager (H2 overflow).
+
+    ``max_graphs`` captures only the first N resident groups (rest stay eager).
+    ``fork=True`` records QKV on private streams (not TokenLoop overlap
+    streams). ``fork=False`` is a serial recipe.
 
     Fully resident: all-or-nothing as before -- one DEVICE failure returns the
     eager list, ``mode="off"``. Mixed: DEVICE groups are captured as a set
@@ -599,6 +638,8 @@ def capture(
         return [], "off", "no groups"
 
     resident = [(i, g) for i, g in enumerate(groups) if group_is_resident(g)]
+    if max_graphs is not None:
+        resident = resident[: max(0, int(max_graphs))]
     if not resident:
         return list(groups), "off", None
     if not torch.cuda.is_available():
@@ -616,32 +657,57 @@ def capture(
     statics = {
         i: torch.zeros((1, g.K), dtype=torch.bfloat16, device=dev) for i, g in resident
     }
+    # Private fork streams, not TokenLoop overlap streams: 32B WDDM CopyRing
+    # shares those two streams for the life of the loop, and capturing them
+    # 177 times wedged H2D. Prefill N!=1 still forks on restored loop streams.
+    saved_streams = [g.streams for _, g in resident]
+    if fork:
+        need = max((len(g.gemms) - 1) for _, g in resident)
+        priv = _capture_fork_streams(need)
+        for _, g in resident:
+            n_fork = max(0, len(g.gemms) - 1)
+            g.streams = tuple(priv)[:n_fork] if n_fork else ()
+            if g.streams and len(g.streams) != n_fork:
+                g.streams = ()
+    else:
+        for _, g in resident:
+            g.streams = ()
+
+    def _restore() -> None:
+        for (_, g), st in zip(resident, saved_streams):
+            g.streams = st
 
     # Warm DEVICE groups on the capture stream: the extension calls
     # cudaFuncSetAttribute on its first launch, and one-time work inside a
     # capture is how graphs come out subtly wrong (or get refused).
     side = torch.cuda.Stream()
     side.wait_stream(torch.cuda.current_stream())
-    with torch.cuda.stream(side):
-        for i, g in resident:
-            for _ in range(max(1, warmup)):
-                g.run(statics[i])
-    torch.cuda.current_stream().wait_stream(side)
-    torch.cuda.synchronize()
-    gc.collect()
-
-    pool = torch.cuda.graph_pool_handle()
-    runners: list[GemmGroup | GraphedGemmGroup] = list(groups)
     try:
-        for i, g in resident:
-            # Every stream idle before capture_begin: a group's fork streams still
-            # holding uncaptured work make the join "a dependency on uncaptured
-            # work in another stream" and the capture is refused.
-            torch.cuda.synchronize()
-            with torch.cuda.stream(side):
-                runners[i] = GraphedGemmGroup(g, statics[i], pool)
-    except Exception as exc:  # noqa: BLE001 - eager must still PASS
+        with torch.cuda.stream(side):
+            for i, g in resident:
+                for _ in range(max(1, warmup)):
+                    g.run(statics[i])
+        torch.cuda.current_stream().wait_stream(side)
         torch.cuda.synchronize()
-        return list(groups), "off", f"{type(exc).__name__}: {exc}"
-    torch.cuda.synchronize()
-    return runners, "linears", None
+        gc.collect()
+
+        pool = torch.cuda.graph_pool_handle()
+        runners: list[GemmGroup | GraphedGemmGroup] = list(groups)
+        try:
+            n_cap = len(resident)
+            for n, (i, g) in enumerate(resident):
+                # Every stream idle before capture_begin: a group's fork streams still
+                # holding uncaptured work make the join "a dependency on uncaptured
+                # work in another stream" and the capture is refused.
+                torch.cuda.synchronize()
+                if n_cap >= 40 and (n == 0 or (n + 1) % 20 == 0 or n + 1 == n_cap):
+                    print(f"capture DEVICE {n + 1}/{n_cap} {g.name}", flush=True)
+                with torch.cuda.stream(side):
+                    runners[i] = GraphedGemmGroup(g, statics[i], pool)
+        except Exception as exc:  # noqa: BLE001 - eager must still PASS
+            torch.cuda.synchronize()
+            return list(groups), "off", f"{type(exc).__name__}: {exc}"
+        torch.cuda.synchronize()
+        return runners, "linears", None
+    finally:
+        _restore()

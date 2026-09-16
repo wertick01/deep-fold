@@ -269,6 +269,7 @@ class _RunArgs:
             gpu_layers=None,
             cpu_layers=None,
             gpu_frac=None,
+            cpu_codec="nf4",
         )
         self.__dict__.update(over)
 
@@ -851,6 +852,7 @@ def test_parser_run_flags() -> None:
     assert args.gpu_layers is None
     assert args.cpu_layers is None
     assert args.gpu_frac is None
+    assert args.cpu_codec == "nf4"
     vq = build_parser().parse_args(["run", "--model", "D:/m", "--codec", "vq"])
     assert vq.codec == "vq"
     cap = build_parser().parse_args(
@@ -872,6 +874,10 @@ def test_parser_compute_family() -> None:
     assert suf.compute == "cpu-suffix" and suf.cpu_layers == 32
     frac = build_parser().parse_args(["run", "--model", "D:/m", "--compute", "hybrid", "--gpu-frac", "0.5"])
     assert frac.gpu_frac == 0.5
+    i4 = build_parser().parse_args(
+        ["run", "--model", "D:/m", "--compute", "hybrid", "--cpu-codec", "i4c"]
+    )
+    assert i4.cpu_codec == "i4c"
     import argparse as _ap
 
     sub = next(a for a in build_parser()._actions if isinstance(a, _ap._SubParsersAction))
@@ -884,6 +890,7 @@ def test_parser_compute_family() -> None:
     assert "matrix overflow for --compute gpu only" in helps
     assert "Default: 32 with cpu-suffix, 36 with hybrid" in helps
     assert "n_layers-N" in helps
+    assert "in-RAM sidecar" in helps
 
 
 def test_compute_plan_from_args_32b_defaults() -> None:

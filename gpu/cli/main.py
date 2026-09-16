@@ -124,6 +124,15 @@ def _add_runtime_flags(
         default=None,
         help="Fraction of repeating layers on GPU, floored.",
     )
+    p.add_argument(
+        "--cpu-codec",
+        choices=("nf4", "i4c"),
+        default="nf4",
+        help=(
+            "CPU-suffix packed codec (default nf4). i4c is an in-RAM sidecar "
+            "from NF4 decode; not written into the .chr. Needs cpu-suffix|hybrid."
+        ),
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:

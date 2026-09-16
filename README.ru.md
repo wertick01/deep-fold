@@ -407,7 +407,10 @@ transformers 5 больше не передаёт `cache_position`, и моде�
 `-ngl 99`: **1,52 ток/с** decode, TTFT **1010 мс**, `nvidia-smi` **11 520 МиБ**
 — auto-fit оборвался, это не «Ollama новее». H2 long **2,49** против Ollama
 **2,54** — два разных потолка (PCIe 6885 МиБ/ток против CPU-хвоста), не победа
-ядра. На 3B ядро Q4_K ~187 ток/с, наш NF4 35,2. Пластина:
+ядра. На этой ветке слойный гибрид (NF4 на GPU, i4c на CPU) дал long **2,091**
+и prefill 209 с; Ollama не обогнали. Продукт остаётся CopyRing **2,49**.
+Запись: [docs/runs/cpu-hybrid-overflow/results.md](docs/runs/cpu-hybrid-overflow/results.md).
+На 3B ядро Q4_K ~187 ток/с, наш NF4 35,2. Пластина:
 [`docs/img/compare-3080.png`](docs/img/compare-3080.png). Протокол:
 [`docs/eval-32b.md`](docs/eval-32b.md),
 [`docs/compare-3080.md`](docs/compare-3080.md).

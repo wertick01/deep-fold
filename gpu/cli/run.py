@@ -388,6 +388,7 @@ def _compute_plan_from_args(args, model_dir: str, chr_file: Path, vram_mib: int 
         vram_mib=int(vram_mib or detect_vram_mib() or 12288),
         max_seq=int(args.max_seq),
         residency_policy=getattr(args, "residency", "D"),
+        cpu_codec=getattr(args, "cpu_codec", "nf4") or "nf4",
     )
 
 

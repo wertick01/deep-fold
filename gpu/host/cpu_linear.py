@@ -1,12 +1,14 @@
-"""CPU NF4 GEMM: row-chunked dequant + float32 matmul. No CUDA extension.
+"""CPU NF4 GEMM for the TokenLoop suffix. No CUDA, no GGUF.
 
-``N=1`` is a matvec. ``N=2..32`` is a thin GEMM with the same decode. A 32B
-``gate_proj`` ``[27648, 5120]`` never materializes a 540 MiB float32 ``W_hat``.
+Hot path is ``gpu.cpu``: fused AVX2 GEMV + a persistent std::thread pool (ATen
+``parallel_for`` stayed serial in the .pyd), never writes ``W_hat``, releases
+the GIL. ``impl="python"`` is the chunked dequant + matmul oracle path
+(tests / fallback). ``N=1`` is a matvec; ``N=2..32`` is the same decode. A 32B
+``gate_proj`` ``[27648, 5120]`` never materializes a 540 MiB float32 table.
 
-GIL: torch CPU GEMM can release it; the Python chunk loop does not. Default
-threads are ``min(16, cpu_count)`` (Ollama used 16 AVX2 threads on the 5950X).
+Default threads are ``min(16, cpu_count)`` (Ollama used 16 AVX2 on the 5950X).
 Honor ``OMP_NUM_THREADS`` / ``torch.set_num_threads`` if already set below 16.
-v1 is serial with the GPU prefix: join, then this GEMM, then the 10 KiB bounce.
+The GPU prefix still joins before this GEMM; the 10 KiB bounce is after.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ __all__ = [
     "LIVE_MAX_N",
     "cpu_thread_count",
     "ensure_cpu_threads",
+    "nf4_cpu_backend",
     "nf4_gemm_cpu",
     "nf4_linear_cpu",
 ]
@@ -56,6 +59,40 @@ def ensure_cpu_threads() -> int:
     return n
 
 
+def nf4_cpu_backend() -> str:
+    """``avx2`` / ``scalar`` when ``gpu.cpu`` loaded, else ``python``."""
+    try:
+        from gpu.cpu import available, isa
+
+        if available():
+            return str(isa())
+    except Exception:
+        pass
+    return "python"
+
+
+def _nf4_gemm_python(
+    packed: torch.Tensor,
+    scale: torch.Tensor,
+    x: torch.Tensor,
+    m: int,
+    k: int,
+    n: int,
+    row_chunk: int,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    chunk = max(1, int(row_chunk))
+    x32 = x.reshape(k, n).to(torch.float32)
+    y = torch.empty((m, n), dtype=torch.float32)
+    ids_dev = packed.device
+    for lo in range(0, m, chunk):
+        hi = min(lo + chunk, m)
+        ids = torch.arange(lo, hi, device=ids_dev, dtype=torch.long)
+        w = dequant_nf4_rows(packed, scale, ids, k, dtype=torch.float32)
+        y[lo:hi] = w @ x32
+    return y.to(dtype)
+
+
 def nf4_gemm_cpu(
     packed: torch.Tensor,
     scale: torch.Tensor,
@@ -66,6 +103,7 @@ def nf4_gemm_cpu(
     *,
     row_chunk: int = 256,
     dtype: torch.dtype = torch.bfloat16,
+    impl: str = "auto",
 ) -> torch.Tensor:
     """``y = dequant_nf4(packed, scale) @ x`` on CPU.
 
@@ -73,8 +111,10 @@ def nf4_gemm_cpu(
     ``scale``: fp16 ``[M, n_groups]`` CPU.
     ``x``: bf16/fp32 ``[K, N]`` CPU, ``N`` in 1..32 (TokenLoop chunks above that).
     ``y``: ``dtype`` ``[M, N]`` (product path is bf16).
+    ``impl``: ``auto`` (AVX2 C, else Python), ``avx2`` (must load), ``python``.
     """
-    del K_pad  # packed shape is the source of truth; K_pad is the seat's value
+    if impl not in ("auto", "avx2", "python"):
+        raise ValueError(f"impl={impl!r}; expected auto, avx2, or python")
     ensure_cpu_threads()
     if packed.device.type == "cuda" or scale.device.type == "cuda" or x.device.type == "cuda":
         raise RuntimeError(
@@ -95,16 +135,17 @@ def nf4_gemm_cpu(
     n = 1 if x.dim() == 1 else int(x.shape[-1])
     if n < 1:
         raise ValueError(f"nf4_gemm_cpu: empty N from x{tuple(x.shape)}")
-    chunk = max(1, int(row_chunk))
-    x32 = x.reshape(k, n).to(torch.float32)
-    y = torch.empty((m, n), dtype=torch.float32)
-    ids_dev = packed.device
-    for lo in range(0, m, chunk):
-        hi = min(lo + chunk, m)
-        ids = torch.arange(lo, hi, device=ids_dev, dtype=torch.long)
-        w = dequant_nf4_rows(packed, scale, ids, k, dtype=torch.float32)
-        y[lo:hi] = w @ x32
-    return y.to(dtype)
+    if n > LIVE_MAX_N:
+        raise ValueError(f"nf4_gemm_cpu: N={n} > LIVE_MAX_N={LIVE_MAX_N}")
+
+    if impl != "python":
+        from gpu.cpu import available as avx2_available
+        from gpu.cpu import nf4_gemm as avx2_gemm
+
+        if impl == "avx2" or (impl == "auto" and n == 1 and avx2_available()):
+            y32 = avx2_gemm(packed, scale, x.reshape(k, n), m, k, int(K_pad))
+            return y32.to(dtype)
+    return _nf4_gemm_python(packed, scale, x, m, k, n, row_chunk, dtype)
 
 
 def nf4_linear_cpu(
@@ -193,7 +234,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = p.parse_args(argv)
     ensure_cpu_threads()
-    print(f"cpu threads={torch.get_num_threads()} (cap 16; OMP_NUM_THREADS honored)", flush=True)
+    print(
+        f"cpu threads={torch.get_num_threads()} backend={nf4_cpu_backend()} "
+        "(cap 16; OMP_NUM_THREADS honored)",
+        flush=True,
+    )
     if not args.bench:
         _bench_one("toy", 64, 64, 1)
         _bench_one("toy", 64, 64, 32)

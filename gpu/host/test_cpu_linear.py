@@ -21,6 +21,7 @@ from gpu.host.linear import CompressedLinear  # noqa: E402
 from gpu.loop.generate import repeat_kv  # noqa: E402
 from gpu.loop.graph import Gemm  # noqa: E402
 from gpu.tests.nf4_oracle import decode_nf4, k_pad, matmul_f32, toy_nf4  # noqa: E402
+from gpu.tests.skips import Skip  # noqa: E402
 
 CHECKS: list[tuple[str, bool, str]] = []
 
@@ -49,7 +50,15 @@ def test_oracle_match_n1_and_n32() -> None:
         scale = torch.from_numpy(scale_np)
         x = torch.from_numpy(x_np.astype("float32"))
         y32 = nf4_gemm_cpu(
-            packed, scale, x, m, k, k_pad(k), row_chunk=8, dtype=torch.float32
+            packed,
+            scale,
+            x,
+            m,
+            k,
+            k_pad(k),
+            row_chunk=8,
+            dtype=torch.float32,
+            impl="python",
         )
         err = _maxabs(y32, torch.from_numpy(y_ref))
         check(
@@ -57,7 +66,9 @@ def test_oracle_match_n1_and_n32() -> None:
             err < 1e-4,
             f"maxabs={err:.2e}",
         )
-        y_bf = nf4_gemm_cpu(packed, scale, x, m, k, k_pad(k), row_chunk=8)
+        y_bf = nf4_gemm_cpu(
+            packed, scale, x, m, k, k_pad(k), row_chunk=8, impl="python"
+        )
         err_bf = _maxabs(y_bf.float(), torch.from_numpy(y_ref).to(torch.bfloat16).float())
         check(
             f"bf16 roundtrip N={n} M={m} K={k}",
@@ -83,7 +94,9 @@ def test_row_chunk_never_full_w() -> None:
 
     cpu_mod.dequant_nf4_rows = spy
     try:
-        y = cpu_mod.nf4_gemm_cpu(packed, scale, x, m, k, k_pad(k), row_chunk=256)
+        y = cpu_mod.nf4_gemm_cpu(
+            packed, scale, x, m, k, k_pad(k), row_chunk=256, impl="python"
+        )
     finally:
         cpu_mod.dequant_nf4_rows = orig
     check("chunk sizes <= 256", bool(seen) and all(s <= 256 for s in seen), str(seen[:8]))
@@ -170,6 +183,42 @@ def test_nf4_linear_cpu_n32() -> None:
     check("linear vs oracle bf16 x", err < 0.05, f"maxabs={err:.3e}")
 
 
+def test_avx2_matches_oracle() -> None:
+    from gpu.cpu import available as avx2_available
+    from gpu.tests.skips import skip
+
+    if not avx2_available():
+        skip("chr_nf4_cpu_ext not built")
+    from gpu.cpu import isa
+
+    check("cpu isa is avx2 or scalar", isa() in ("avx2", "scalar"), isa())
+    for n, m, k, seed in ((1, 32, 64, 11), (32, 48, 96, 12), (1, 17, 65, 13), (3, 24, 128, 14)):
+        packed_np, scale_np = toy_nf4(m, k, seed=seed)
+        x = torch.randn(k, n, generator=torch.Generator().manual_seed(seed), dtype=torch.float32)
+        w = decode_nf4(packed_np, scale_np, m, k)
+        y_ref = matmul_f32(w, x.numpy())
+        packed = torch.from_numpy(packed_np)
+        scale = torch.from_numpy(scale_np)
+        y = nf4_gemm_cpu(
+            packed, scale, x, m, k, k_pad(k), dtype=torch.float32, impl="avx2"
+        )
+        err = _maxabs(y, torch.from_numpy(y_ref))
+        check(
+            f"avx2 oracle N={n} M={m} K={k}",
+            err < 2e-4,
+            f"maxabs={err:.2e} isa={isa()}",
+        )
+        y_py = nf4_gemm_cpu(
+            packed, scale, x, m, k, k_pad(k), dtype=torch.float32, impl="python"
+        )
+        err_pp = _maxabs(y, y_py)
+        check(
+            f"avx2 vs python N={n} M={m} K={k}",
+            err_pp < 2e-4,
+            f"maxabs={err_pp:.2e}",
+        )
+
+
 def test_repeat_kv_gqa_n_rep_5() -> None:
     """32B is 40/8, n_rep=5. Expand path for CPU SDPA without enable_gqa."""
     k = torch.arange(16, dtype=torch.float32).view(1, 2, 2, 4)
@@ -179,22 +228,55 @@ def test_repeat_kv_gqa_n_rep_5() -> None:
     check("n_rep 1 identity", repeat_kv(k, 1) is k or torch.equal(repeat_kv(k, 1), k), "")
 
 
+def test_attach_cpu_i4c() -> None:
+    m, k = 16, 64
+    lin = CompressedLinear(k, m)
+    packed_np, scale_np = toy_nf4(m, k, seed=8)
+    mat = SimpleNamespace(
+        name="toy.i4c",
+        M=m,
+        K=k,
+        K_pad=k_pad(k),
+        packed=torch.from_numpy(packed_np),
+        scale=torch.from_numpy(scale_np),
+    )
+    lin.attach_cpu(mat, codec="i4c")
+    check("cpu_codec i4c", lin.cpu_codec == "i4c", lin.cpu_codec)
+    check("i4c packed live", int(lin.packed.numel()) > 0, "")
+    check("i4c not pinned", not cpu_is_pinned(lin.packed), "")
+    g = Gemm.of(lin, "L0.i4c")
+    check("Gemm.of codec=i4c", g.codec == "i4c", g.codec)
+    x = torch.randn(1, k, dtype=torch.bfloat16)
+    y = lin(x)
+    check("i4c forward shape", tuple(y.shape) == (1, m), str(tuple(y.shape)))
+    y32 = lin(torch.randn(4, k, dtype=torch.bfloat16))
+    check("i4c prefill N=4", tuple(y32.shape) == (4, m), str(tuple(y32.shape)))
+
+
 TESTS = [
     test_oracle_match_n1_and_n32,
     test_row_chunk_never_full_w,
     test_refuse_cuda_x,
     test_attach_cpu_home_not_pinned,
     test_nf4_linear_cpu_n32,
+    test_avx2_matches_oracle,
     test_repeat_kv_gqa_n_rep_5,
+    test_attach_cpu_i4c,
 ]
 
 
 def main() -> int:
     print("gpu/host nf4_gemm_cpu vs oracle, CPU only\n")
+    skipped = 0
     for fn in TESTS:
-        fn()
+        try:
+            fn()
+        except Skip as exc:
+            skipped += 1
+            print(f"  SKIP  {fn.__name__}  -- {exc}")
     failed = [n for n, ok, _ in CHECKS if not ok]
-    print(f"\n{len(CHECKS) - len(failed)}/{len(CHECKS)} checks passed")
+    tail = f", {skipped} skipped" if skipped else ""
+    print(f"\n{len(CHECKS) - len(failed)}/{len(CHECKS)} checks passed{tail}")
     if failed:
         print("failed: " + ", ".join(failed))
     print("TEST: PASS" if not failed else "TEST: FAIL")

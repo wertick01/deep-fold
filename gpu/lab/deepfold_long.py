@@ -53,6 +53,29 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--compare-id", default="")
     p.add_argument("--plan-only", action="store_true")
     p.add_argument("--no-graphs", dest="graphs", action="store_false")
+    p.add_argument(
+        "--force-graphs",
+        action="store_true",
+        help="Capture DEVICE graphs even with a CPU suffix (skips plan A by default).",
+    )
+    p.add_argument(
+        "--max-graphs",
+        type=int,
+        default=None,
+        help="Capture only the first N DEVICE groups. Requires graphs on.",
+    )
+    p.add_argument(
+        "--graph-fork",
+        dest="graph_fork",
+        action="store_true",
+        help="Capture DEVICE QKV fork on private streams (can lose tok/s on 32B long).",
+    )
+    p.add_argument(
+        "--no-overlap",
+        dest="overlap",
+        action="store_false",
+        help="Serial DEVICE GEMMs (no GemmGroup stream fork).",
+    )
     p.add_argument("--trust-remote-code", action="store_true")
     p.add_argument(
         "--compute",
@@ -65,6 +88,12 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Repeating GPU layers; requires --compute cpu-suffix|hybrid.",
+    )
+    p.add_argument(
+        "--cpu-codec",
+        choices=("nf4", "i4c"),
+        default="nf4",
+        help="CPU suffix codec. i4c is an in-RAM sidecar from NF4; not .chr.",
     )
     return p
 
@@ -138,11 +167,19 @@ def run_live(args: argparse.Namespace, dest: Path, preset: dict[str, str]) -> di
         compute=getattr(args, "compute", "gpu") or "gpu",
         gpu_layers=getattr(args, "gpu_layers", None),
         max_seq=int(args.max_seq),
+        cpu_codec=getattr(args, "cpu_codec", "nf4") or "nf4",
     )
     cap, cap_info = auto_max_resident_bytes(model_dir, chr_path, int(args.max_seq))
-    if compute_plan.n_cpu > 0:
+    if compute_plan.n_cpu > 0 and compute_plan.ring == "none":
         cap = None
         cap_info = {"skipped": "cpu suffix, no CopyRing"}
+    elif compute_plan.n_cpu > 0:
+        cap_info = {
+            **cap_info,
+            "mixed_ring": compute_plan.ring,
+            "ring_matrices": compute_plan.ring_matrices,
+            "ring_streamed_mib": compute_plan.ring_streamed_mib,
+        }
     tokenizer = AutoTokenizer.from_pretrained(
         model_dir, local_files_only=True, trust_remote_code=args.trust_remote_code
     )
@@ -158,11 +195,33 @@ def run_live(args: argparse.Namespace, dest: Path, preset: dict[str, str]) -> di
     )
     torch.cuda.synchronize()
     smi_load = smi_used_mib()
+    from gpu.host.cpu_linear import cpu_thread_count, nf4_cpu_backend
+
+    cpu_backend = nf4_cpu_backend() if compute_plan.n_cpu > 0 else "n/a"
+    if compute_plan.n_cpu > 0 and str(compute_plan.cpu_codec) == "i4c":
+        cpu_backend = f"i4c/{cpu_backend}"
+    cpu_threads = cpu_thread_count() if compute_plan.n_cpu > 0 else 0
+    print(
+        f"cpu_backend={cpu_backend} cpu_threads={cpu_threads} "
+        f"smi_after_load_mib={smi_load}",
+        flush=True,
+    )
     loop = TokenLoop(
-        model, max_seq=int(args.max_seq), norm="exact", overlap=True, ring_timing=False
+        model,
+        max_seq=int(args.max_seq),
+        norm="exact",
+        overlap=bool(getattr(args, "overlap", True)),
+        ring_timing=False,
     )
     warm_ms = loop.warmup(prompt=8, tokens=8)
-    graph_mode = loop.capture_graphs() if args.graphs else "off"
+    if args.graphs:
+        graph_mode = loop.capture_graphs(
+            force=bool(getattr(args, "force_graphs", False)),
+            max_graphs=getattr(args, "max_graphs", None),
+            fork=bool(getattr(args, "graph_fork", False)),
+        )
+    else:
+        graph_mode = "off"
     packed = chat_text(tokenizer, LONG_PROMPT)
     ids = tokenizer(packed, return_tensors="pt", add_special_tokens=False).input_ids[0]
     # Empty stop set = ignore EOS, same as llama.cpp ignore_eos.
@@ -192,6 +251,13 @@ def run_live(args: argparse.Namespace, dest: Path, preset: dict[str, str]) -> di
         "n_gpu": compute_plan.n_gpu,
         "n_cpu": compute_plan.n_cpu,
         "ring": compute_plan.ring,
+        "cpu_codec": compute_plan.cpu_codec,
+        "cpu_backend": cpu_backend,
+        "cpu_threads": cpu_threads,
+        "overlap": bool(getattr(args, "overlap", True)),
+        "force_graphs": bool(getattr(args, "force_graphs", False)),
+        "max_graphs": getattr(args, "max_graphs", None),
+        "ollama_long_tok_s_ref": 2.54,
     }
     print(
         f"long tok/s={run.decode_tok_s:.3f} n={len(run.tokens)} "
@@ -254,6 +320,7 @@ def main(argv: list[str] | None = None) -> int:
             compute=getattr(args, "compute", "gpu") or "gpu",
             gpu_layers=getattr(args, "gpu_layers", None),
             max_seq=int(args.max_seq),
+            cpu_codec=getattr(args, "cpu_codec", "nf4") or "nf4",
         )
         plate = {
             "schema": SCHEMA,
@@ -271,17 +338,39 @@ def main(argv: list[str] | None = None) -> int:
         print(f"plan-only out={dest} chr_exists={plate['chr_exists']}", flush=True)
     else:
         plate = run_live(args, dest, preset)
-        if str(getattr(args, "compute", "gpu") or "gpu") == "gpu":
-            _merge_long(
-                compare_id,
-                tok_s=float(plate["decode_tok_s"]),
-                source=str(dest),
-                predicted_n=int(plate["n_tokens"]),
-                decode_steps=int(plate["decode_steps"]),
+        experimental = (
+            bool(getattr(args, "force_graphs", False))
+            or bool(getattr(args, "graph_fork", False))
+            or not bool(getattr(args, "overlap", True))
+            or getattr(args, "max_graphs", None) is not None
+        )
+        if str(getattr(args, "compute", "gpu") or "gpu") == "gpu" and not experimental:
+            old = next(
+                (
+                    row
+                    for row in (load().get("rows") or [])
+                    if row.get("id") == compare_id
+                ),
+                None,
             )
+            prev = float((old or {}).get("long_decode_tok_s") or 0.0)
+            now = float(plate["decode_tok_s"])
+            if prev > 0.0 and now + 0.005 < prev:
+                print(
+                    f"skip compare.json merge: {now:.3f} tok/s < recorded {prev:.3f}",
+                    flush=True,
+                )
+            else:
+                _merge_long(
+                    compare_id,
+                    tok_s=now,
+                    source=str(dest),
+                    predicted_n=int(plate["n_tokens"]),
+                    decode_steps=int(plate["decode_steps"]),
+                )
         else:
             print(
-                "skip compare.json merge for cpu-suffix/hybrid "
+                "skip compare.json merge for cpu-suffix/hybrid/experimental "
                 "(do not overwrite deepfold-nf4-32B-overflow)",
                 flush=True,
             )
@@ -295,8 +384,12 @@ def main(argv: list[str] | None = None) -> int:
                 f"size {args.size}",
                 f"compare_id {compare_id}",
                 f"long_decode_tok_s {plate.get('decode_tok_s')}",
-                f"n_tokens {plate.get('n_tokens')}",
-                f"decode_steps {plate.get('decode_steps')}",
+                f"ring {plate.get('ring')}",
+                f"cpu_backend {plate.get('cpu_backend')}",
+                f"cpu_threads {plate.get('cpu_threads')}",
+                f"smi_after_load_mib {plate.get('smi_after_load_mib')}",
+                f"graph {plate.get('graph')}",
+                "ollama_long_ref 2.54 (docs/compare-3080.md, not this run)",
             ]
         )
         + "\n",

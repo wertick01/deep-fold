@@ -2,5 +2,6 @@ schema deepfold.long.v1
 size 32B
 compare_id deepfold-nf4-32B-overflow
 long_decode_tok_s 2.488212340879585
+long_eval_tok_s 2.5277077748618004
 n_tokens 64
 decode_steps 63

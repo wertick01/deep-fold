@@ -1173,11 +1173,18 @@ def test_parser_k5_commands() -> None:
     assert defaults.max_new_tokens == 256 and defaults.max_seq == 2048
     assert defaults.new is False and defaults.session is None
     assert defaults.agent is False and defaults.workspace is None
-    assert defaults.max_tool_rounds == 8
+    assert defaults.max_tool_rounds == 24 and defaults.agent_trust == "ask"
+    assert defaults.agent_web is False
     agent = build_parser().parse_args(
         ["chat", "--model", "D:/m", "--agent", "--workspace", "D:/proj"]
     )
     assert agent.agent is True and agent.workspace == "D:/proj"
+    trusted = build_parser().parse_args(
+        ["chat", "--model", "D:/m", "--agent-trust", "workspace"]
+    )
+    assert trusted.agent_trust == "workspace"
+    web = build_parser().parse_args(["chat", "--model", "D:/m", "--agent", "--agent-web"])
+    assert web.agent_web is True
     run_defaults = build_parser().parse_args(["run", "--model", "D:/m"])
     assert run_defaults.max_new_tokens == 64 and run_defaults.max_seq == 512
     setup = build_parser().parse_args(["setup", "--dry-run"])
@@ -1214,6 +1221,8 @@ def test_slash_commands_are_not_prompts() -> None:
     assert "Ctrl+C" in messages.CHAT_HELP
     assert "/copy" in messages.CHAT_HELP
     assert "/agent" in messages.CHAT_HELP
+    assert "--agent-trust" in messages.CHAT_HELP
+    assert "--agent-web" in messages.CHAT_HELP
 
 
 def test_chat_status_and_toolbar() -> None:
@@ -1263,8 +1272,10 @@ def test_chat_status_and_toolbar() -> None:
         max_new_tokens=64,
         out=None,
         agent=True,
+        trust="write",
+        todos=2,
     )
-    assert "agent" in agent_bar
+    assert "agent" in agent_bar and "write" in agent_bar and "todo 2" in agent_bar
 
 
 def test_transcript_roundtrip_under_home() -> None:
@@ -1409,6 +1420,289 @@ def test_agent_parse_and_sandbox() -> None:
         finally:
             agent_mod.subprocess.run = orig  # type: ignore[method-assign]
         assert out.startswith("exit 0")
+
+
+def test_agent_v2_tools() -> None:
+    from gpu.cli import agent as agent_mod
+
+    names = [item["name"] for item in agent_mod.SCHEMAS]
+    for need in (
+        "glob",
+        "grep",
+        "git_status",
+        "git_diff",
+        "str_replace",
+        "delete_file",
+        "run_argv",
+        "web_search",
+        "todo",
+    ):
+        assert need in names
+    assert all(item["name"] != "web_search" for item in agent_mod.tool_schemas(web=False))
+    assert any(item["name"] == "web_search" for item in agent_mod.tool_schemas(web=True))
+    assert agent_mod.looks_like_small_agent_model(
+        {"hidden_size": 2048, "num_hidden_layers": 36}
+    )
+    assert not agent_mod.looks_like_small_agent_model(
+        {"hidden_size": 5120, "num_hidden_layers": 48}
+    )
+    assert agent_mod.suffix_after([1, 2], [1, 2, 3]) == [3]
+    assert agent_mod.suffix_after([1, 2], [1, 9, 3]) is None
+    assert agent_mod.suffix_after([1, 2, 3], [1, 2]) is None
+    raw = 'prose <tool_call>\n{"name": "grep", "arguments": {"query": "x"}}\n</tool_call>'
+    assert agent_mod.visible_stream_text(raw).strip() == "prose"
+    assert agent_mod.visible_stream_text("hi <tool") == "hi "
+    assert agent_mod.tool_call_closed(raw)
+    assert agent_mod.truncated_tool_call('<tool_call>\n{"name": "grep"')
+    assert not agent_mod.truncated_tool_call(raw)
+    assert agent_mod.needs_confirm("write_file")
+    assert not agent_mod.needs_confirm("write_file", {}, trust="write")
+    assert agent_mod.needs_confirm("run_tests", {}, trust="write")
+    assert not agent_mod.needs_confirm("run_tests", {}, trust="workspace")
+    assert agent_mod.needs_confirm(
+        "run_argv", {"argv": ["git", "add", "."]}, trust="workspace"
+    )
+    assert not agent_mod.needs_confirm(
+        "run_argv", {"argv": ["git", "status"]}, trust="workspace"
+    )
+    assert agent_mod.needs_confirm("web_search")
+    assert not agent_mod.needs_confirm("web_search", {"query": "x"}, trust="workspace")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "pkg").mkdir()
+        (root / "pkg" / "a.py").write_text("alpha = 1\nbeta = 1\n", encoding="utf-8")
+        (root / "pkg" / "b.py").write_text("gamma = 2\n", encoding="utf-8")
+        (root / "notes.txt").write_text("alpha notes\n", encoding="utf-8")
+        (root / "AGENTS.md").write_text("always use pytest\n", encoding="utf-8")
+        assert "always use pytest" in agent_mod.load_workspace_rules(root)
+        sys_prompt = agent_mod.agent_system(root)
+        assert "always use pytest" in sys_prompt and "str_replace" in sys_prompt
+
+        globbed = agent_mod.execute("glob", {"pattern": "pkg/*.py"}, root)
+        assert "pkg/a.py" in globbed.replace("\\", "/") and "notes.txt" not in globbed
+        hits = agent_mod.execute(
+            "grep", {"query": "alpha", "glob": "*.py"}, root
+        )
+        assert "pkg/a.py:1:" in hits.replace("\\", "/")
+        assert "notes.txt" not in hits
+        once = agent_mod.execute(
+            "str_replace",
+            {
+                "path": "pkg/a.py",
+                "old_string": "beta = 1",
+                "new_string": "beta = 2",
+            },
+            root,
+        )
+        assert "ok" in once
+        assert (root / "pkg" / "a.py").read_text(encoding="utf-8") == "alpha = 1\nbeta = 2\n"
+        missing = agent_mod.execute(
+            "str_replace",
+            {
+                "path": "pkg/a.py",
+                "old_string": "nope",
+                "new_string": "x",
+            },
+            root,
+        )
+        assert "not found" in missing
+        twice = agent_mod.execute(
+            "str_replace",
+            {
+                "path": "pkg/a.py",
+                "old_string": " = ",
+                "new_string": "=",
+            },
+            root,
+        )
+        assert "matched" in twice and "once" in twice
+        preview = agent_mod.edit_preview(
+            "str_replace",
+            {
+                "path": "pkg/a.py",
+                "old_string": "alpha = 1",
+                "new_string": "alpha = 9",
+            },
+            root,
+        )
+        assert preview is not None and "alpha = 9" in preview
+        gone = agent_mod.execute("delete_file", {"path": "notes.txt"}, root)
+        assert "deleted" in gone
+        assert not (root / "notes.txt").exists()
+        dir_err = agent_mod.execute("delete_file", {"path": "pkg"}, root)
+        assert "directory" in dir_err
+
+        denied = agent_mod.execute(
+            "run_argv", {"argv": ["powershell", "-Command", "dir"]}, root
+        )
+        assert "shell" in denied
+        push = agent_mod.execute("run_argv", {"argv": ["git", "push"]}, root)
+        assert "not allowed" in push
+        dash_c = agent_mod.execute(
+            "run_argv", {"argv": ["python", "-c", "print(1)"]}, root
+        )
+        assert "python -c" in dash_c
+        bare = agent_mod.execute("run_argv", {"argv": ["python"]}, root)
+        assert "needs" in bare
+        pyver = agent_mod.execute("run_argv", {"argv": ["python", "--version"]}, root)
+        assert pyver.startswith("exit 0")
+        compiled = agent_mod.execute(
+            "run_argv", {"argv": ["python", "-m", "py_compile", "pkg/b.py"]}, root
+        )
+        assert compiled.startswith("exit 0")
+        session = agent_mod.AgentSession()
+        plan = agent_mod.execute(
+            "todo",
+            {
+                "items": [
+                    {"id": "1", "content": "search", "status": "done"},
+                    {"id": "2", "content": "patch", "status": "pending"},
+                ]
+            },
+            root,
+            session=session,
+        )
+        assert "done\t1\tsearch" in plan
+        assert len(session.todos) == 2
+        calls = [
+            {"name": "read_file", "arguments": {"path": "pkg/a.py"}},
+            {"name": "read_file", "arguments": {"path": "pkg/b.py"}},
+        ]
+        rows = agent_mod.execute_calls(calls, root)
+        assert rows[0][0] == "read_file" and "alpha" in rows[0][2]
+        assert rows[1][0] == "read_file" and "gamma" in rows[1][2]
+
+        hits = {"n": 0}
+
+        def _boom(url: str, *, timeout: int, **kwargs):
+            hits["n"] += 1
+            raise AssertionError("web_search must not touch the network")
+
+        orig_http = agent_mod._http_get
+        agent_mod._http_get = _boom  # type: ignore[method-assign]
+        old_key = os.environ.get("DEEPFOLD_GOOGLE_CSE_KEY")
+        old_cx = os.environ.get("DEEPFOLD_GOOGLE_CSE_CX")
+        old_brave = os.environ.get("DEEPFOLD_BRAVE_KEY")
+        old_brave_alt = os.environ.get("BRAVE_API_KEY")
+        old_home = os.environ.get("DEEPFOLD_HOME")
+        os.environ["DEEPFOLD_HOME"] = str(root / "dfhome")
+        (root / "dfhome").mkdir()
+        os.environ.pop("DEEPFOLD_GOOGLE_CSE_KEY", None)
+        os.environ.pop("DEEPFOLD_GOOGLE_CSE_CX", None)
+        os.environ.pop("DEEPFOLD_BRAVE_KEY", None)
+        os.environ.pop("BRAVE_API_KEY", None)
+        try:
+            off = agent_mod.execute("web_search", {"query": "Qwen2.5"}, root)
+            assert "off" in off and hits["n"] == 0
+            sess = agent_mod.AgentSession(web=True)
+            missing = agent_mod.execute(
+                "web_search", {"query": "Qwen2.5"}, root, session=sess
+            )
+            assert "DEEPFOLD_BRAVE_KEY" in missing and hits["n"] == 0
+            (root / "dfhome" / "cse.env").write_text(
+                "DEEPFOLD_GOOGLE_CSE_CX=only-cx\n", encoding="utf-8"
+            )
+            need_key = agent_mod.execute(
+                "web_search", {"query": "Qwen2.5"}, root, session=sess
+            )
+            assert "DEEPFOLD_BRAVE_KEY" in need_key and hits["n"] == 0
+            os.environ["DEEPFOLD_GOOGLE_CSE_KEY"] = "test-key"
+            os.environ["DEEPFOLD_GOOGLE_CSE_CX"] = "test-cx"
+
+            def _fake_get(url: str, *, timeout: int, **kwargs):
+                hits["n"] += 1
+                assert "customsearch" in url
+                payload = {
+                    "items": [
+                        {
+                            "title": "Qwen2.5",
+                            "link": "https://example.com/qwen",
+                            "snippet": "model card",
+                        }
+                    ]
+                }
+                return 200, json.dumps(payload).encode("utf-8")
+
+            agent_mod._http_get = _fake_get  # type: ignore[method-assign]
+            found = agent_mod.execute(
+                "web_search",
+                {"query": "Qwen2.5", "num": 3},
+                root,
+                session=sess,
+            )
+            assert "https://example.com/qwen" in found and "model card" in found
+            assert hits["n"] == 1
+
+            def _empty(url: str, *, timeout: int, **kwargs):
+                return 200, b'{"items": []}'
+
+            agent_mod._http_get = _empty  # type: ignore[method-assign]
+            none = agent_mod.execute(
+                "web_search", {"query": "zzz"}, root, session=sess
+            )
+            assert "no results" in none
+            os.environ.pop("DEEPFOLD_GOOGLE_CSE_KEY", None)
+            os.environ.pop("DEEPFOLD_GOOGLE_CSE_CX", None)
+            (root / "dfhome" / "cse.env").write_text(
+                "DEEPFOLD_GOOGLE_CSE_KEY=file-key\n"
+                "DEEPFOLD_GOOGLE_CSE_CX=file-cx\n",
+                encoding="utf-8",
+            )
+            from_file = agent_mod.execute(
+                "web_search", {"query": "zzz"}, root, session=sess
+            )
+            assert "no results" in from_file
+            os.environ.pop("DEEPFOLD_GOOGLE_CSE_KEY", None)
+            os.environ.pop("DEEPFOLD_GOOGLE_CSE_CX", None)
+            os.environ["DEEPFOLD_BRAVE_KEY"] = "brave-test"
+
+            def _fake_brave(url: str, *, timeout: int, headers=None, **kwargs):
+                hits["n"] += 1
+                assert "api.search.brave.com" in url
+                assert "count=" in url
+                if headers:
+                    assert "X-Subscription-Token" in headers
+                payload = {
+                    "web": {
+                        "results": [
+                            {
+                                "title": "Brave hit",
+                                "url": "https://brave.example/qwen",
+                                "description": "from brave",
+                            }
+                        ]
+                    }
+                }
+                return 200, json.dumps(payload).encode("utf-8")
+
+            agent_mod._http_get = _fake_brave  # type: ignore[method-assign]
+            brave_hit = agent_mod.execute(
+                "web_search", {"query": "Qwen2.5"}, root, session=sess
+            )
+            assert "https://brave.example/qwen" in brave_hit and "from brave" in brave_hit
+        finally:
+            agent_mod._http_get = orig_http  # type: ignore[method-assign]
+            if old_key is None:
+                os.environ.pop("DEEPFOLD_GOOGLE_CSE_KEY", None)
+            else:
+                os.environ["DEEPFOLD_GOOGLE_CSE_KEY"] = old_key
+            if old_cx is None:
+                os.environ.pop("DEEPFOLD_GOOGLE_CSE_CX", None)
+            else:
+                os.environ["DEEPFOLD_GOOGLE_CSE_CX"] = old_cx
+            if old_brave is None:
+                os.environ.pop("DEEPFOLD_BRAVE_KEY", None)
+            else:
+                os.environ["DEEPFOLD_BRAVE_KEY"] = old_brave
+            if old_brave_alt is None:
+                os.environ.pop("BRAVE_API_KEY", None)
+            else:
+                os.environ["BRAVE_API_KEY"] = old_brave_alt
+            if old_home is None:
+                os.environ.pop("DEEPFOLD_HOME", None)
+            else:
+                os.environ["DEEPFOLD_HOME"] = old_home
 
 
 def test_markdown_stream_identity_and_fences() -> None:
@@ -1900,6 +2194,24 @@ def test_kernel_installs_tools_when_missing() -> None:
         kb._install_vs = orig_vs  # type: ignore[assignment]
         kb._install_cuda = orig_cuda  # type: ignore[assignment]
         kb._compile = orig_compile  # type: ignore[assignment]
+
+
+def test_install_cuda_never_unpins_version() -> None:
+    calls: list[list[str]] = []
+    orig_install = kb._winget_install
+    orig_nvcc = kb._find_nvcc
+    try:
+        kb._winget_install = lambda args: calls.append(list(args)) or 1  # type: ignore[assignment]
+        kb._find_nvcc = lambda: None  # type: ignore[assignment]
+        code = kb._install_cuda()
+        assert code == 1
+        assert calls
+        for args in calls:
+            assert "--version" in args, args
+            assert args[args.index("--id") + 1] == "Nvidia.CUDA"
+    finally:
+        kb._winget_install = orig_install  # type: ignore[assignment]
+        kb._find_nvcc = orig_nvcc  # type: ignore[assignment]
 
 
 def test_winget_install_pins_community_source() -> None:

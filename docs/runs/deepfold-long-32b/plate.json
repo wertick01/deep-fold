@@ -24,6 +24,7 @@
   "decode_ms": 25319.382500019856,
   "prefill_ms": 925.0495999876875,
   "decode_tok_s": 2.488212340879585,
+  "eval_tok_s": 2.5277077748618004,
   "stop_token": null,
   "report": "449 nf4 linears (9319.5 MiB), 321 bf16 tensors (2.13 MiB), embed=nf4-rows (394.5 MiB), tied_lm_head=False, total=9716.0 MiB, 21.4s, overflow streamed=96 (6885.0 MiB host) resident_plan=9713.9 MiB slot=71.72 MiB×2"
 }

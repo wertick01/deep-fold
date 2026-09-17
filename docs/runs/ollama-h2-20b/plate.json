@@ -1,0 +1,104 @@
+{
+  "schema": "deepfold.ollama_h2.v1",
+  "plan_only": false,
+  "model": "internlm2.5:20b-q4km",
+  "ctx": 2048,
+  "n_predict": 64,
+  "tags": [
+    "internlm2.5:20b-q4km",
+    "qwen2.5:32b",
+    "qwen2.5:3b"
+  ],
+  "smi_before_mib": 1115.0,
+  "messages": [
+    {
+      "id": 1,
+      "prompt": "Reply with one short sentence. What is the capital of France?",
+      "reply": "Paris is the capital of France.",
+      "needles": [
+        "paris",
+        "париж"
+      ],
+      "quality_ok": true,
+      "prompt_n": 23,
+      "prompt_cached_n": 4,
+      "prompt_ms": 211.388,
+      "predicted_n": 8,
+      "predicted_ms": 647.194,
+      "decode_tok_s": 12.361054027076888,
+      "wall_ms": 869.2894999994678,
+      "client_ttft_ms": 222.02629999992496,
+      "ttft_comparable": false
+    },
+    {
+      "id": 2,
+      "prompt": "And the capital of Germany?",
+      "reply": "The capital of Germany is Berlin. It is not only the political and administrative center but also a major cultural, scientific, and media hub. Berlin has a rich history and is known for its diverse architecture, vibrant arts scene, and numerous museums and galleries. The city is also famous for its historical landmarks such as the Brand",
+      "needles": [
+        "berlin",
+        "берлин"
+      ],
+      "quality_ok": true,
+      "prompt_n": 16,
+      "prompt_cached_n": 4,
+      "prompt_ms": 130.757,
+      "predicted_n": 64,
+      "predicted_ms": 5708.653,
+      "decode_tok_s": 11.211051013260045,
+      "wall_ms": 5850.085400000353,
+      "client_ttft_ms": 141.52240000021266,
+      "ttft_comparable": false
+    },
+    {
+      "id": 3,
+      "prompt": "What is 17 times 19? Reply with the number only.",
+      "reply": "323",
+      "needles": [
+        "323"
+      ],
+      "quality_ok": true,
+      "prompt_n": 24,
+      "prompt_cached_n": 4,
+      "prompt_ms": 205.264,
+      "predicted_n": 2,
+      "predicted_ms": 96.339,
+      "decode_tok_s": 20.76002449682891,
+      "wall_ms": 312.94879999950354,
+      "client_ttft_ms": 216.55989999999292,
+      "ttft_comparable": false
+    }
+  ],
+  "warmup": {
+    "reply": "Hello! How can I assist you today",
+    "prompt_n": 12,
+    "prompt_cached_n": 0,
+    "prompt_ms": 182.457,
+    "predicted_n": 8,
+    "predicted_ms": 664.362,
+    "decode_tok_s": 12.041627907676839,
+    "wall_ms": 5949.307500000032,
+    "client_ttft_ms": 5290.117000000464,
+    "ttft_comparable": true
+  },
+  "smi_after_load_mib": 11415.0,
+  "long": {
+    "prompt": "Write a long travelogue about rivers, forests, and cities. Keep going with more sentences.",
+    "reply": "Embarking on a journey that weaves through the sinuous threads of rivers, the verdant tapestries of forests, and the pulsating heartbeats of cities, I found myself captivated by the symphony of nature and civilization. The adventure began at the river's edge, where the water, a",
+    "prompt_n": 29,
+    "prompt_cached_n": 4,
+    "prompt_ms": 231.157,
+    "predicted_n": 64,
+    "predicted_ms": 5553.033,
+    "decode_tok_s": 11.525233147362892,
+    "wall_ms": 5812.318700000105,
+    "client_ttft_ms": 259.2320000003383,
+    "ttft_comparable": false
+  },
+  "mean_decode_tok_s": 14.777376512388614,
+  "mean_server_prompt_ms": 182.46966666666665,
+  "mean_client_ttft_ms": 193.36953333337684,
+  "mean_ttft_ms": null,
+  "ttft_note": "stream=True. client_ttft_ms is first NDJSON content chunk. mean_ttft_ms is that timer only when prompt_eval_cached_count=0. TokenLoop resets KV each prompt; cached prompt_eval_duration is not TTFT.",
+  "smoke_ok": true,
+  "smi_after_generate_mib": 11443.0
+}

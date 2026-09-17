@@ -350,10 +350,15 @@ deepfold chat --model D:\weights\Qwen2.5-3B-Instruct --max-seq 1024 --no-warmup
 deepfold chat --model D:\weights\Qwen2.5-14B-Instruct --agent --workspace C:\dev\deep-fold
 ```
 
-`--agent` (or `/agent on`) lets the model list, read, and write files under
-`--workspace` (cwd if omitted) and run pytest on a path there. Writes and
-tests prompt `allow this tool? [y/N]`. There is no general shell. Prefer 14B
-over 3B for tool JSON. `--agent` cannot be combined with `--raw`.
+`--agent` (or `/agent on`) lets the model use workspace tools: `glob`,
+`grep`, `str_replace`, git read, pytest, and allowlisted `run_argv`.
+Writes and commands follow `--agent-trust` (`ask` default; `/agent trust`).
+Each turn still prefills the whole chat; session KV is Wave B in
+[`spec/agent.md`](spec/agent.md). Prefer 14B over 3B for tool JSON.
+`--agent` cannot be combined with `--raw`. `web_search` is opt-in
+(`--agent-web`). New users: Brave Search key, see
+[`web-search.md`](web-search.md). Google CSE is a fallback for old Cloud
+projects only.
 
 In-session:
 
@@ -369,7 +374,7 @@ In-session:
 | `/chats` | pick a saved chat |
 | `/copy` | copy the last reply (`/copy all` = whole chat) |
 | `/save [path]` | write the last reply to a file |
-| `/agent on` `/agent off` | toggle workspace tools |
+| `/agent on` `/agent off` `/agent trust` | toggle tools; `ask`/`write`/`workspace` |
 | `/quit` or `/exit` | leave |
 | any other `/foo` | refused, not sent to the model |
 
@@ -536,6 +541,9 @@ deepfold from-ollama qwen2.5:3b --hf Qwen/Qwen2.5-3B-Instruct --yes --dir D:\wei
 | `DEEPFOLD_CHR` | `.chr` file if present and the header matches the model |
 | `DEEPFOLD_MODELS` | root for `pull` trees and the lab |
 | `DEEPFOLD_HOME` | cache (`%LOCALAPPDATA%\deepfold` / `~/.cache/deepfold`); chat JSON in `chats/` |
+| `DEEPFOLD_BRAVE_KEY` | Brave Search API token (preferred for `web_search`). Or `$DEEPFOLD_HOME/cse.env` |
+| `DEEPFOLD_GOOGLE_CSE_KEY` | Custom Search **JSON API** key; new Cloud projects are usually refused. Or `cse.env` |
+| `DEEPFOLD_GOOGLE_CSE_CX` | Programmable Search engine id |
 | `DEEPFOLD_CHR_BIN` | `chr` / `chr.exe` |
 | `DEEPFOLD_RUNS` | lab run dumps |
 | `DEEPFOLD_COPY_JOIN` | `1`/`0` — CPU join H2D (Windows on by default, Linux off) |

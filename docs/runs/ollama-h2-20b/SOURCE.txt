@@ -1,0 +1,9 @@
+Ollama 0.34.0 internlm2.5:20b-q4km created from bartowski Q4_K_M GGUF
+(same file as llama.cpp 20B). stream=True, greedy smoke + 64-token travelogue.
+
+Quote long **11.53 tok/s**, not smoke mean 14.78 (msg 3 was 4-token 323).
+llama.cpp auto-fit long on the same GGUF is 11.87. TokenLoop NF4 long is 4.59.
+cached=4 on smoke (not 24). mean_ttft_ms null.
+
+Live: C:\dev\models\runs\ollama-h2-20b-20260917
+Command: python -m gpu.lab.ollama_h2 --model internlm2.5:20b-q4km --size 20B

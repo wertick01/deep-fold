@@ -20,7 +20,7 @@ loop. ``draft="lookup"`` / ``draft="oracle"`` with ``speculate>=2`` call
 from __future__ import annotations
 
 import time
-from typing import Sequence
+from typing import Any, Sequence
 
 import torch
 
@@ -29,6 +29,8 @@ from gpu.nf4.plan import LIVE_MAX_N
 __all__ = [
     "verify_block",
     "measure_verify",
+    "verify_stats",
+    "format_verify_note",
     "lookup_draft",
     "oracle_draft",
     "accept_greedy",
@@ -123,6 +125,7 @@ def measure_verify(loop, greedy_token_ids, k: int) -> dict:
     pos = int(loop.kv.seq_len)
     device = getattr(loop, "device", ids.device)
     ids = ids.to(device=device, dtype=torch.long)
+    block_widths: list[int] = []
 
     for lo in range(0, n, k):
         hi = min(lo + k, n)
@@ -146,16 +149,69 @@ def measure_verify(loop, greedy_token_ids, k: int) -> dict:
             if int(pred[i]) != int(ids[nxt]):
                 match = False
         pos += kb
+        block_widths.append(kb)
 
     return {
         "k": k,
         "n_tokens": n,
         "n_blocks": len(walls),
+        "block_widths": block_widths,
         "walls": walls,
         "h2d_bytes": h2d_bytes,
         "h2d_copies": h2d_copies,
         "greedy_match": match,
     }
+
+
+def verify_stats(item: dict[str, Any]) -> dict[str, Any]:
+    """ms/token from tokens actually fed, not requested ``k``.
+
+    A last (or only) block is truncated: ``hi = min(lo+k, n)``. Dividing the
+    wall by ``k`` when ``n < k`` reports a fake T_verify(k).
+    """
+    walls = [float(w) for w in (item.get("walls") or [])]
+    n = int(item.get("n_tokens") or 0)
+    k = int(item.get("k") or 0)
+    raw_widths = item.get("block_widths")
+    if raw_widths:
+        widths = [int(w) for w in raw_widths]
+    else:
+        widths = []
+        left = n
+        step = k if k > 0 else max(n, 1)
+        while left > 0:
+            take = min(step, left)
+            widths.append(take)
+            left -= take
+    n_blocks = len(walls)
+    total_s = sum(walls)
+    measured_width = max(widths) if widths else 0
+    return {
+        "k": k,
+        "n_tokens": n,
+        "n_blocks": n_blocks,
+        "block_widths": widths,
+        "avg_block_ms": (1000.0 * total_s / n_blocks) if n_blocks else None,
+        "ms_per_token": (1000.0 * total_s / n) if n else None,
+        "measured_width": measured_width,
+        "full_k": bool(k > 0 and n >= k and measured_width == k),
+    }
+
+
+def format_verify_note(item: dict[str, Any]) -> str:
+    stats = verify_stats(item)
+    k = stats["k"]
+    match = item.get("greedy_match")
+    avg = stats["avg_block_ms"]
+    per = stats["ms_per_token"]
+    if avg is None or per is None:
+        return f"k={k} match={match}"
+    width_bit = ""
+    if not stats["full_k"]:
+        width_bit = f", width={stats['measured_width']} not {k}"
+    return (
+        f"k={k} {avg:.0f}ms/block ({per:.0f}ms/tok{width_bit}) match={match}"
+    )
 
 
 def _pad_k(toks: list[int], k: int) -> list[int]:

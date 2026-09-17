@@ -4,6 +4,7 @@ Same travelogue as ``llamacpp_h2`` / ``ollama_h2``. Does not rerun smoke.
 Merges ``long_decode_tok_s`` into the existing compare.json row.
 
     python -m gpu.lab.deepfold_long --size 3B
+    python -m gpu.lab.deepfold_long --size 20B
     python -m gpu.lab.deepfold_long --size 32B
     python -m gpu.lab.deepfold_long --size 3B --plan-only
 """
@@ -21,23 +22,36 @@ _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
-from gpu.lab.compare import load, upsert
+from gpu.lab.catalog import lab_by_slug
+from gpu.lab.compare import empty_row, load, upsert
 from gpu.lab.h2_metrics import CHR_32B, MODEL_32B
 from gpu.lab.script import CHR_PATH, LONG_PROMPT, MODEL_DIR, RUNS_DIR, chat_text
 
 __all__ = ["PRESETS", "main"]
 
 SCHEMA = "deepfold.long.v1"
+_20B = lab_by_slug("internlm20b")
 PRESETS = {
     "3B": {
         "model": MODEL_DIR,
         "chr": CHR_PATH,
         "compare_id": "deepfold-nf4-3B-resident",
+        "max_seq": 2048,
+        "trust_remote_code": False,
+    },
+    "20B": {
+        "model": _20B.model_dir,
+        "chr": _20B.chr_path,
+        "compare_id": "deepfold-nf4-20B-resident",
+        "max_seq": 1024,
+        "trust_remote_code": True,
     },
     "32B": {
         "model": MODEL_32B,
         "chr": CHR_32B,
         "compare_id": "deepfold-nf4-32B-overflow",
+        "max_seq": 2048,
+        "trust_remote_code": False,
     },
 }
 
@@ -48,7 +62,7 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--model", default="")
     p.add_argument("--chr", dest="chr_path", default="")
     p.add_argument("--out", default="")
-    p.add_argument("--max-seq", type=int, default=2048)
+    p.add_argument("--max-seq", type=int, default=None)
     p.add_argument("--long-n", type=int, default=64)
     p.add_argument("--compare-id", default="")
     p.add_argument("--plan-only", action="store_true")
@@ -74,18 +88,38 @@ def _merge_long(
     source: str,
     predicted_n: int,
     decode_steps: int,
+    eval_tok_s: float | None = None,
+    size: str = "",
+    model: str = "",
+    overflow: bool | None = None,
+    smi_after_load_mib: float | None = None,
 ) -> None:
     payload = load()
     old = next((row for row in (payload.get("rows") or []) if row.get("id") == compare_id), None)
     if old is None:
-        raise KeyError(f"compare.json has no row {compare_id}")
+        quant = "NF4 overflow" if overflow else "NF4 resident"
+        old = empty_row(
+            id=compare_id,
+            stack="deepfold-nf4",
+            engine="TokenLoop CompressedLinear",
+            model=model,
+            size=size,
+            quant=quant,
+            notes="Row inserted by deepfold_long (no prior compare.json id).",
+        )
     merged = dict(old)
     merged["long_decode_tok_s"] = float(tok_s)
+    if eval_tok_s is not None:
+        merged["long_eval_tok_s"] = float(eval_tok_s)
     merged["source"] = source
+    if smi_after_load_mib is not None:
+        merged["smi_after_load_mib"] = float(smi_after_load_mib)
     extra = (
-        f"Long ignore-EOS {predicted_n} tokens / {decode_steps} decode steps. "
-        f"Live {source}."
+        f"Long ignore-EOS {predicted_n} tokens / {decode_steps} decode steps"
     )
+    if eval_tok_s is not None:
+        extra += f" (eval_tok_s={float(eval_tok_s):.3f} = n/decode_ms)"
+    extra += f". Live {source}."
     notes = str(merged.get("notes") or "")
     if "Long ignore_eos plateau not recorded" in notes:
         notes = notes.replace(
@@ -98,25 +132,30 @@ def _merge_long(
     upsert(merged)
 
 
+def _resolve_loop(args: argparse.Namespace, preset: dict[str, object]) -> tuple[int, bool]:
+    max_seq = int(args.max_seq) if args.max_seq is not None else int(preset.get("max_seq", 2048))
+    trust = bool(args.trust_remote_code or preset.get("trust_remote_code"))
+    return max_seq, trust
+
+
 def run_live(args: argparse.Namespace, dest: Path, preset: dict[str, str]) -> dict[str, Any]:
     import torch
-    from transformers import AutoTokenizer
 
     from gpu.host import load_model
     from gpu.lab.h2_metrics import auto_max_resident_bytes
     from gpu.lab.sampler import smi_used_mib
+    from gpu.lab.sessions import _load_tokenizer
     from gpu.loop import TokenLoop
 
     model_dir = str(args.model or preset["model"])
     chr_path = str(args.chr_path or preset["chr"])
-    cap, cap_info = auto_max_resident_bytes(model_dir, chr_path, int(args.max_seq))
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_dir, local_files_only=True, trust_remote_code=args.trust_remote_code
-    )
+    max_seq, trust = _resolve_loop(args, preset)
+    cap, cap_info = auto_max_resident_bytes(model_dir, chr_path, max_seq)
+    tokenizer = _load_tokenizer(model_dir, trust)
     model, report = load_model(
         model_dir,
         chr_path,
-        trust_remote_code=args.trust_remote_code,
+        trust_remote_code=trust,
         strict=True,
         max_resident_bytes=cap,
         residency_policy="D",
@@ -124,7 +163,7 @@ def run_live(args: argparse.Namespace, dest: Path, preset: dict[str, str]) -> di
     torch.cuda.synchronize()
     smi_load = smi_used_mib()
     loop = TokenLoop(
-        model, max_seq=int(args.max_seq), norm="exact", overlap=True, ring_timing=False
+        model, max_seq=max_seq, norm="exact", overlap=True, ring_timing=False
     )
     warm_ms = loop.warmup(prompt=8, tokens=8)
     graph_mode = loop.capture_graphs() if args.graphs else "off"
@@ -151,13 +190,15 @@ def run_live(args: argparse.Namespace, dest: Path, preset: dict[str, str]) -> di
         "decode_ms": run.decode_ms,
         "prefill_ms": run.prefill_ms,
         "decode_tok_s": run.decode_tok_s,
+        "eval_tok_s": run.eval_tok_s,
         "stop_token": run.stop_token,
         "report": str(report),
     }
     print(
-        f"long tok/s={run.decode_tok_s:.3f} n={len(run.tokens)} "
-        f"steps={run.decode_steps} prefill_ms={run.prefill_ms:.0f} "
-        f"overflow={report.overflow} graph={graph_mode}",
+        f"long tok/s={run.decode_tok_s:.3f} eval_tok_s={run.eval_tok_s:.3f} "
+        f"n={len(run.tokens)} steps={run.decode_steps} "
+        f"prefill_ms={run.prefill_ms:.0f} overflow={report.overflow} "
+        f"graph={graph_mode}",
         flush=True,
     )
     try:
@@ -195,13 +236,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"plan-only out={dest} chr_exists={plate['chr_exists']}", flush=True)
     else:
         plate = run_live(args, dest, preset)
-        _merge_long(
-            compare_id,
-            tok_s=float(plate["decode_tok_s"]),
-            source=str(dest),
-            predicted_n=int(plate["n_tokens"]),
-            decode_steps=int(plate["decode_steps"]),
-        )
     (dest / "plate.json").write_text(
         json.dumps(plate, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
@@ -212,6 +246,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"size {args.size}",
                 f"compare_id {compare_id}",
                 f"long_decode_tok_s {plate.get('decode_tok_s')}",
+                f"long_eval_tok_s {plate.get('eval_tok_s')}",
                 f"n_tokens {plate.get('n_tokens')}",
                 f"decode_steps {plate.get('decode_steps')}",
             ]
@@ -220,6 +255,23 @@ def main(argv: list[str] | None = None) -> int:
         encoding="utf-8",
     )
     print(f"wrote {dest}", flush=True)
+    if not args.plan_only:
+        _merge_long(
+            compare_id,
+            tok_s=float(plate["decode_tok_s"]),
+            source=str(dest),
+            predicted_n=int(plate["n_tokens"]),
+            decode_steps=int(plate["decode_steps"]),
+            eval_tok_s=float(plate["eval_tok_s"]) if plate.get("eval_tok_s") is not None else None,
+            size=str(args.size),
+            model=Path(model_dir).name,
+            overflow=bool(plate.get("overflow")),
+            smi_after_load_mib=(
+                float(plate["smi_after_load_mib"])
+                if plate.get("smi_after_load_mib") is not None
+                else None
+            ),
+        )
     return 0
 
 

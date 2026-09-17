@@ -353,10 +353,14 @@ deepfold chat --model D:\weights\Qwen2.5-3B-Instruct --max-seq 1024 --no-warmup
 deepfold chat --model D:\weights\Qwen2.5-14B-Instruct --agent --workspace C:\dev\deep-fold
 ```
 
-`--agent` (или `/agent on`) даёт модели список/чтение/запись файлов в
-`--workspace` (по умолчанию текущий каталог) и pytest по пути внутри него.
-Запись и тесты спрашивают `allow this tool? [y/N]`. Произвольного shell нет.
-Для JSON инструментов лучше 14B, чем 3B. `--agent` не сочетается с `--raw`.
+`--agent` (или `/agent on`) даёт модели инструменты в `--workspace`:
+`glob`, `grep`, `str_replace`, git read, pytest и allowlist `run_argv`.
+Запись и команды — по `--agent-trust` (по умолчанию `ask`; `/agent trust`).
+Каждый ход по-прежнему префиллит весь чат; session KV — волна B в
+[`spec/agent.md`](spec/agent.md). Для JSON инструментов лучше 14B, чем 3B.
+`--agent` не сочетается с `--raw`. `web_search` — opt-in (`--agent-web`).
+Новым пользователям: ключ Brave, пошагово
+[`web-search.ru.md`](web-search.ru.md). Google CSE — только старый Cloud-проект.
 
 Внутри сессии:
 
@@ -372,7 +376,7 @@ deepfold chat --model D:\weights\Qwen2.5-14B-Instruct --agent --workspace C:\dev
 | `/chats` | выбрать сохранённый чат |
 | `/copy` | скопировать последний ответ (`/copy all` — весь чат) |
 | `/save [path]` | записать последний ответ в файл |
-| `/agent on` `/agent off` | инструменты в workspace |
+| `/agent on` `/agent off` `/agent trust` | инструменты; `ask`/`write`/`workspace` |
 | `/quit` или `/exit` | выйти |
 | любая другая `/foo` | отказ, в модель не идёт |
 
@@ -536,6 +540,9 @@ deepfold from-ollama qwen2.5:3b --hf Qwen/Qwen2.5-3B-Instruct --yes --dir D:\wei
 | `DEEPFOLD_CHR` | файл `.chr`, если он есть и заголовок совпадает с моделью |
 | `DEEPFOLD_MODELS` | корень деревьев для `pull` и лаборатории |
 | `DEEPFOLD_HOME` | кэш (`%LOCALAPPDATA%\deepfold` / `~/.cache/deepfold`); чаты в `chats/` |
+| `DEEPFOLD_BRAVE_KEY` | токен Brave Search API (основной для `web_search`). Или `$DEEPFOLD_HOME/cse.env` |
+| `DEEPFOLD_GOOGLE_CSE_KEY` | ключ Custom Search JSON API; новые Cloud-проекты обычно 403. Или `cse.env` |
+| `DEEPFOLD_GOOGLE_CSE_CX` | id Programmable Search |
 | `DEEPFOLD_CHR_BIN` | `chr` / `chr.exe` |
 | `DEEPFOLD_RUNS` | дампы лабораторных прогонов |
 | `DEEPFOLD_COPY_JOIN` | `1`/`0` — CPU join H2D (Windows по умолчанию да, Linux нет) |

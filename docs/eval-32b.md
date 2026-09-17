@@ -4,6 +4,45 @@ Model: `C:\dev\models\Qwen2.5-32B-Instruct`
 CHR: `C:\dev\models\qwen25-32b.nf4.chr`  
 `max_seq=2048`, greedy, isolated process, 12 GB, H2 overflow (NF4, not VQ).
 
+Matched 32B long plateaus on this card (engine grouped; quote **long**, not Ollama smoke 3.18):
+
+<table>
+<thead>
+<tr>
+<th>Engine</th>
+<th>Launch / counter</th>
+<th align="right">32B long</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Ollama 0.34.0</td>
+<td>Q4_K_M <code>qwen2.5:32b</code></td>
+<td align="right"><strong>2.54</strong></td>
+</tr>
+<tr>
+<td rowspan="2">llama.cpp b10964 Q4_K_M</td>
+<td>auto-fit (no <code>-ngl</code>)</td>
+<td align="right"><strong>2.54</strong></td>
+</tr>
+<tr>
+<td><code>-ngl 99</code></td>
+<td align="right">1.52</td>
+</tr>
+<tr>
+<td rowspan="2">deep-fold NF4 TokenLoop</td>
+<td>63 <code>step()</code></td>
+<td align="right"><strong>2.49</strong></td>
+</tr>
+<tr>
+<td>64 generated tokens / same wall</td>
+<td align="right"><strong>2.53</strong></td>
+</tr>
+</tbody>
+</table>
+
+Sheet: [`docs/compare-3080.md`](compare-3080.md).
+
 ## A — smoke (3) — PASS 2026-09-14
 
 The same `gpu.lab.script.MESSAGES` / needles Paris / Berlin / 323.
@@ -27,7 +66,8 @@ Plate: [`docs/img/h2-qwen25-32b.png`](img/h2-qwen25-32b.png)
 
 Mean decode **2.31 tok/s**, mean TTFT **1006 ms**. `gate.txt` = PASS.
 Long ignore-EOS plateau (same travelogue as llama.cpp / Ollama, 64 tokens,
-63 decode steps): **2.49 tok/s**, TTFT **925 ms**. Live
+63 decode steps): **2.49 tok/s**; generated-token counting on the same wall
+(`n_tokens / decode_ms`) is **2.53 tok/s**. TTFT **925 ms**. Live
 `C:\dev\models\runs\deepfold-long-32B-20260916-002552`.
 
 H2 sanity from this run:
@@ -63,10 +103,28 @@ Copy in git: [`docs/runs/llamacpp-h2/`](runs/llamacpp-h2/)
 | nvidia-smi after load | **11520 MiB** |
 | Smoke needles | **3/3** |
 
-H2 NF4 overflow on the same prompts is **2.31 tok/s** (`docs/plan-h2-ring.md`).
-llama.cpp is slower on decode here because 18.5 GiB of Q4_K_M does not fit
-12 GiB even with `-ngl 99`; part of the net stays in RAM. Prefill is the
-other way around (pp512 ~70 tok/s vs H2 TTFT ~1.0 s on ~40-token prompts).
+H2 NF4 overflow on the same prompts is **2.31 tok/s** smoke / **2.49** steps /
+**2.53** eval (`docs/plan-h2-ring.md`). llama.cpp **`-ngl 99`** is slower on
+decode here because it aborted auto-fit. Prefill is the other way around
+(pp512 ~70 tok/s vs H2 TTFT ~1.0 s on ~40-token prompts).
+
+### llama.cpp auto-fit — same smoke, 2026-09-17
+
+Command: `python -m gpu.lab.llamacpp_h2` (default omits `--n-gpu-layers`).  
+Live dump: `C:\dev\models\runs\llamacpp-h2-32b-autofit-20260917`  
+Copy in git: [`docs/runs/llamacpp-h2-autofit/`](runs/llamacpp-h2-autofit/)
+
+| | tok/s |
+|---|---:|
+| Smoke mean (three short replies) | **2.62** |
+| Long decode, 64 tokens, `ignore_eos` | **2.54** |
+| Mean TTFT (smoke) | **1444 ms** |
+| nvidia-smi after load | **11636 MiB** |
+| Smoke needles | **3/3** |
+| `--n-gpu-layers` | omitted |
+
+Same Q4_K_M as the 1.52 row; placement matches Ollama’s 32B long **2.54**.
+Do not replace the ngl-99 plate — it stays [`docs/runs/llamacpp-h2/`](runs/llamacpp-h2/).
 
 Do **not** cite a Korean Ollama blog (~2.9–3.1 tok/s): that run was
 `qwen2.5-coder:32b`, `num_ctx=32768`, temperature 0.2 — not this plate.
@@ -82,12 +140,18 @@ Copy in git: [`docs/runs/ollama-h2-32b/`](runs/ollama-h2-32b/)
 |---|---:|---:|
 | Smoke mean (short EOS) | **189.6** | **3.18** |
 | Long decode, 64 tokens | **187.3** | **2.54** |
-| Mean TTFT (smoke) | **14 ms** | **901 ms** |
+| Mean server `prompt_eval` (smoke) | **14 ms**† | **901 ms**† |
 | nvidia-smi after load | **3837 MiB** | **11559 MiB** |
 | Smoke needles | **3/3** | **3/3** |
 
+† `stream=False`, `prompt_eval_cached_count=24` on every saved reply. Not
+TokenLoop TTFT (KV reset). Decode rows do not depend on this. The Ollama
+runner now uses `stream=True` and records `client_ttft_ms`; re-run to fill
+a comparable first-token cell.
+
 32B smoke mean is 8+8+4 tokens; quote the 64-token plateau (**2.54**) next to
-llama.cpp long **1.52** and H2 long **2.49** (smoke **2.31**). Same card, weights still spill
+llama.cpp auto-fit **2.54**, ngl 99 **1.52**, and H2 **2.49** steps / **2.53**
+generated tokens (smoke **2.31**). Same card, weights still spill
 off 12 GB (`smi` ~11.6 GiB). Matched JSON: [`docs/runs/compare-3080/`](runs/compare-3080/).
 Plate: [`docs/img/compare-3080.png`](img/compare-3080.png). Write-up:
 [`docs/compare-3080.md`](compare-3080.md).
@@ -98,22 +162,32 @@ CUDA0 **9559 MiB** + CUDA_Host **9367 MiB**. Decode `graph splits = 2` at
 batch 1: GPU prefix, CPU Q4_K suffix on the 5950X. Weights stay put.
 
 H2 still computes every layer on the GPU and streams **96** packed matrices
-(**6885 MiB**) each token. The 2.54 vs 2.49 long tie is CPU-suffix time vs
-PCIe copy time, not NF4 matching Q4_K mmvq. 3B (fully GPU) is the kernel
-gap: Ollama **187.3** vs H2 **35.2**. A layer-split hybrid on
+(**6885 MiB**) each token. The 2.54 vs 2.53 eval-count longs are CPU-suffix
+time vs PCIe copy time, not NF4 matching Q4_K mmvq. H2 `decode_tok_s` is
+**63** steps after the first token (**2.49**). 3B (fully GPU) is the whole
+TokenLoop path vs Q4_K CUDA: Ollama **187.3** vs H2 **35.2** / **35.8**. A
+layer-split hybrid on
 `exp/cpu-hybrid-overflow` was **2.091** long and did not ship here.
 
-Standalone llama.cpp **1.52** used `-ngl 99`, which aborted auto-fit. Do not
-read that as “Ollama’s algorithm is newer llama.cpp” (0.34.0 vendors
-**b10760**; our zip is **b10964**).
+Standalone llama.cpp **1.52** used `-ngl 99`, which aborted auto-fit. The
+same zip with `--n-gpu-layers` omitted (2026-09-17) is long **2.54** — same
+place as Ollama. Do not read 1.52 as “Ollama’s algorithm is newer llama.cpp”
+(0.34.0 vendors **b10760**; our zip is **b10964**).
 
-## B — hard 12 — not run
+## B — hard 12 — TokenLoop 32B 12/12; Ollama 32B 11/12
 
-Same as 14B NF4 (10/12). Compare with 14B NF4, not with BF16 32B (will not fit).
-`gpu/lab/data/hard_items.json` → `python -m gpu.lab.hard`. `max_new_tokens=256`.
-
-Do not start without Pavel’s explicit “run it”: 12 items × ~256 tokens at 2.3 tok/s —
-that is already minutes per item, and it is a regression, not WikiText / GSM8K / MMLU.
+Same fixture as 14B NF4 (10/12). Compare with 14B NF4, not with BF16 32B (will
+not fit). `gpu/lab/data/hard_items.json`.
+Ollama 3B (this box, 2026-09-17): `python -m gpu.lab.ollama_hard --model qwen2.5:3b`
+→ **7/12**. Dump: [`docs/runs/ollama-hard-3b/`](runs/ollama-hard-3b/).
+Ollama 32B (this box, 2026-09-17): `python -m gpu.lab.ollama_hard --model qwen2.5:32b`
+→ **11/12**, miss `gsm8k-stickers` (`72` vs `48`).
+Dump: [`docs/runs/ollama-hard-32b/`](runs/ollama-hard-32b/).
+TokenLoop 32B NF4 overflow (conda `torch-gpu`, 2026-09-17):
+`python -m gpu.lab.hard --lab qwen25-32b --codec nf4` → **12/12**, mean
+**2.12 tok/s**, TTFT **1732 ms**, peak smi **11952 MiB**.
+Dump: [`docs/runs/hard-qwen25-32b/`](runs/hard-qwen25-32b/).
+Regression plate, not WikiText / GSM8K / MMLU.
 
 | id | gold |
 |---|---|

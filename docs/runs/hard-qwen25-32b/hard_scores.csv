@@ -1,0 +1,13 @@
+codec,message_id,item_id,kind,gold,extracted,correct,pending_human,notes
+nf4,1,gsm8k-lamps,gsm8k,164,164,true,false,
+nf4,2,gsm8k-money,gsm8k,44,44,true,false,
+nf4,3,gsm8k-tank,gsm8k,90,90,true,false,
+nf4,4,gsm8k-train,gsm8k,240,240,true,false,
+nf4,5,gsm8k-machines,gsm8k,108,108,true,false,
+nf4,6,gsm8k-stickers,gsm8k,48,48,true,false,
+nf4,7,trap-sheep,gsm8k,9,9,true,false,
+nf4,8,logic-yesno,yesno,no,no,true,false,
+nf4,9,code-sum,gsm8k,15,15,true,false,
+nf4,10,code-loop,gsm8k,33,33,true,false,
+nf4,11,trap-batball,gsm8k,0.05,0.05,true,false,
+nf4,12,prefill-warehouse,gsm8k,7429,7429,true,false,

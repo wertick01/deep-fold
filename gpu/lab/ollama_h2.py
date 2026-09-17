@@ -5,6 +5,10 @@ Ollama must already be installed and the model pulled.
 
     python -m gpu.lab.ollama_h2 --plan-only
     python -m gpu.lab.ollama_h2 --model qwen2.5:32b
+
+Chat uses ``stream=True``. ``client_ttft_ms`` is first NDJSON content chunk.
+``mean_ttft_ms`` is that timer only when ``prompt_eval_cached_count=0``.
+Do not quote cached ``prompt_eval_duration`` as TokenLoop TTFT.
 """
 
 from __future__ import annotations
@@ -27,7 +31,7 @@ if str(_REPO) not in sys.path:
 from gpu.lab.compare import upsert
 from gpu.lab.script import MESSAGES, NEEDLES, RUNS_DIR, quality_ok
 
-__all__ = ["main"]
+__all__ = ["main", "_fold_ndjson"]
 
 SCHEMA = "deepfold.ollama_h2.v1"
 DEFAULT_HOST = "127.0.0.1"
@@ -113,11 +117,29 @@ def _tags(base: str) -> list[str]:
     return names
 
 
+def _fold_ndjson(objects: list[dict[str, Any]]) -> dict[str, Any]:
+    """Join streamed Ollama chat chunks. Last ``done`` object keeps server timers."""
+    parts: list[str] = []
+    final: dict[str, Any] = {}
+    for obj in objects:
+        piece = str(((obj.get("message") or {}).get("content")) or "")
+        if piece:
+            parts.append(piece)
+        if obj.get("done"):
+            final = dict(obj)
+    if not final and objects:
+        final = dict(objects[-1])
+    msg = dict(final.get("message") or {})
+    msg["content"] = "".join(parts) or str(msg.get("content") or "")
+    final["message"] = msg
+    return final
+
+
 def _chat(base: str, model: str, prompt: str, n_predict: int, ctx: int) -> dict[str, Any]:
     body = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
-        "stream": False,
+        "stream": True,
         "keep_alive": "10m",
         "options": {
             "temperature": 0,
@@ -127,9 +149,29 @@ def _chat(base: str, model: str, prompt: str, n_predict: int, ctx: int) -> dict[
             "num_predict": int(n_predict),
         },
     }
+    data = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(
+        f"{base}/api/chat",
+        data=data,
+        method="POST",
+        headers={"Content-Type": "application/json", "Accept": "application/x-ndjson"},
+    )
     t0 = time.perf_counter()
-    payload = _http_json(f"{base}/api/chat", body, timeout=1200)
+    first_ms: float | None = None
+    objects: list[dict[str, Any]] = []
+    with urllib.request.urlopen(req, timeout=1200) as resp:
+        for raw in resp:
+            line = raw.decode("utf-8").strip()
+            if not line:
+                continue
+            obj = json.loads(line)
+            objects.append(obj)
+            piece = str(((obj.get("message") or {}).get("content")) or "")
+            if piece and first_ms is None:
+                first_ms = (time.perf_counter() - t0) * 1000.0
+    payload = _fold_ndjson(objects)
     payload["_wall_ms"] = (time.perf_counter() - t0) * 1000.0
+    payload["_client_ttft_ms"] = first_ms
     return payload
 
 
@@ -143,16 +185,21 @@ def _timings(payload: dict[str, Any]) -> dict[str, Any]:
     prompt_ns = float(payload.get("prompt_eval_duration") or 0.0)
     pred_n = int(payload.get("eval_count") or 0)
     pred_ns = float(payload.get("eval_duration") or 0.0)
+    cached = int(payload.get("prompt_eval_cached_count") or 0)
     prompt_ms = prompt_ns / 1e6
     pred_ms = pred_ns / 1e6
     tok_s = (pred_n / (pred_ns / 1e9)) if pred_ns > 0 and pred_n > 0 else 0.0
+    client = payload.get("_client_ttft_ms")
     return {
         "prompt_n": prompt_n,
+        "prompt_cached_n": cached,
         "prompt_ms": prompt_ms,
         "predicted_n": pred_n,
         "predicted_ms": pred_ms,
         "decode_tok_s": tok_s,
         "wall_ms": float(payload.get("_wall_ms") or 0.0),
+        "client_ttft_ms": None if client is None else float(client),
+        "ttft_comparable": cached == 0,
     }
 
 
@@ -193,6 +240,8 @@ def run_live(args: argparse.Namespace, dest: Path) -> dict[str, Any]:
         )
     tok_s: list[float] = []
     ttft: list[float] = []
+    client_ttft: list[float] = []
+    server_prompt: list[float] = []
     smoke: list[bool] = []
     for index, prompt in enumerate(MESSAGES, start=1):
         payload = _chat(base, args.model, prompt, int(args.n_predict), int(args.ctx))
@@ -214,12 +263,18 @@ def run_live(args: argparse.Namespace, dest: Path) -> dict[str, Any]:
         plate["messages"].append(row)
         if times["decode_tok_s"] > 0:
             tok_s.append(times["decode_tok_s"])
-        if times["prompt_ms"] > 0:
-            ttft.append(times["prompt_ms"])
+        ct = times.get("client_ttft_ms")
+        if ct:
+            client_ttft.append(float(ct))
+            if times.get("ttft_comparable"):
+                ttft.append(float(ct))
+        server_prompt.append(float(times["prompt_ms"]))
         smoke.append(bool(needle))
         print(
             f"msg {index} tok/s={times['decode_tok_s']:.3f} "
-            f"ttft_ms={times['prompt_ms']:.0f} smoke={needle} "
+            f"client_ttft_ms={ct if ct else 'n/a'} "
+            f"server_prompt_ms={times['prompt_ms']:.0f} "
+            f"cached={times.get('prompt_cached_n', 0)} smoke={needle} "
             f"reply={text[:80]!r}",
             flush=True,
         )
@@ -240,7 +295,18 @@ def run_live(args: argparse.Namespace, dest: Path) -> dict[str, Any]:
             flush=True,
         )
     plate["mean_decode_tok_s"] = sum(tok_s) / len(tok_s) if tok_s else None
+    plate["mean_server_prompt_ms"] = (
+        sum(server_prompt) / len(server_prompt) if server_prompt else None
+    )
+    plate["mean_client_ttft_ms"] = (
+        sum(client_ttft) / len(client_ttft) if client_ttft else None
+    )
     plate["mean_ttft_ms"] = sum(ttft) / len(ttft) if ttft else None
+    plate["ttft_note"] = (
+        "stream=True. client_ttft_ms is first NDJSON content chunk. "
+        "mean_ttft_ms is that timer only when prompt_eval_cached_count=0. "
+        "TokenLoop resets KV each prompt; cached prompt_eval_duration is not TTFT."
+    )
     plate["smoke_ok"] = all(smoke) if smoke else False
     plate["smi_after_generate_mib"] = _smi_used_mib()
     return plate
@@ -259,6 +325,7 @@ def main(argv: list[str] | None = None) -> int:
             "server_ok": bool(tags) or True,
             "tags": tags,
             "ctx": int(args.ctx),
+            "stream": True,
         }
         print(f"plan-only out={dest} tags={tags}", flush=True)
     else:
@@ -281,6 +348,8 @@ def main(argv: list[str] | None = None) -> int:
                 "mean_decode_tok_s": plate.get("mean_decode_tok_s"),
                 "long_decode_tok_s": long.get("decode_tok_s"),
                 "mean_ttft_ms": plate.get("mean_ttft_ms"),
+                "mean_client_ttft_ms": plate.get("mean_client_ttft_ms"),
+                "mean_server_prompt_ms": plate.get("mean_server_prompt_ms"),
                 "smi_after_load_mib": plate.get("smi_after_load_mib")
                 or plate.get("smi_after_generate_mib"),
                 "smoke_ok": plate.get("smoke_ok"),
@@ -298,6 +367,8 @@ def main(argv: list[str] | None = None) -> int:
                 f"model {args.model}",
                 f"mean_decode_tok_s {plate.get('mean_decode_tok_s')}",
                 f"long_decode_tok_s {(plate.get('long') or {}).get('decode_tok_s')}",
+                f"mean_server_prompt_ms {plate.get('mean_server_prompt_ms')}",
+                f"mean_client_ttft_ms {plate.get('mean_client_ttft_ms')}",
                 f"mean_ttft_ms {plate.get('mean_ttft_ms')}",
                 f"smoke_ok {plate.get('smoke_ok')}",
             ]

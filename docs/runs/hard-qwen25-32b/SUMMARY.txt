@@ -1,0 +1,9 @@
+schema deepfold.hard.v1
+lab qwen25-32b
+codec nf4
+n_correct 12
+n_scored 12
+accuracy 1.0
+mean_decode_tok_s 2.11698
+mean_ttft_ms 1731.95
+vram_peak_smi_mib 11952

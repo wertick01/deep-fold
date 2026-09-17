@@ -305,11 +305,19 @@ def gate_deepfold_hard_override() -> None:
 
 
 def gate_catalog() -> None:
-    check("three catalog labs", [lab.slug for lab in LABS] == ["qwen25-3b", "qwen25-14b", "internlm20b"], "")
+    check(
+        "four catalog labs",
+        [lab.slug for lab in LABS]
+        == ["qwen25-3b", "qwen25-14b", "internlm20b", "qwen25-32b"],
+        "",
+    )
     three = lab_by_slug("qwen25-3b")
     check("3B slug", three.slug == "qwen25-3b" and three.nf4_driver == "qwen2", three.notebook)
     intern = lab_by_slug("internlm20b")
     check("20B max_seq is tighter", hard_max_seq(intern) < hard_max_seq(three), str(hard_max_seq(intern)))
+    thirtytwo = lab_by_slug("qwen25-32b")
+    check("32B is qwen2 overflow", thirtytwo.nf4_driver == "qwen2" and thirtytwo.nf4_fits is False, thirtytwo.note[:40])
+    check("32B size label", size_label(thirtytwo) == "32B", size_label(thirtytwo))
     try:
         lab_by_slug("nope")
         check("unknown slug raises", False, "no raise")
@@ -399,7 +407,7 @@ def gate_run_order() -> None:
 def gate_size_and_weights() -> None:
     check("3B size label", size_label(lab_by_slug("qwen25-3b")) == "3B", size_label(lab_by_slug("qwen25-3b")))
     check("14B size label", size_label(lab_by_slug("qwen25-14b")) == "14B", size_label(lab_by_slug("qwen25-14b")))
-    check("20B size label", size_label(lab_by_slug("internlm20b")) == "20B", size_label(lab_by_slug("internlm20b")))
+    check("32B size label", size_label(lab_by_slug("qwen25-32b")) == "32B", size_label(lab_by_slug("qwen25-32b")))
     three = expected_weight_mib("qwen25-3b")
     fourteen = expected_weight_mib("qwen25-14b")
     check("expected weights have both codecs", set(three) == {"bf16", "nf4"}, str(sorted(three)))

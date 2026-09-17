@@ -32,6 +32,7 @@ from gpu.lab.h2_accel import (  # noqa: E402
     parse_variants,
     plan_variant,
     variant_config,
+    verify_token_budget,
     write_summary,
 )
 from gpu.lab.h2_place import QWEN_32B  # noqa: E402
@@ -100,6 +101,9 @@ def test_parse_k_and_variant_config() -> None:
     check("profile timing", variant_config("profile")["ring_timing"] is True, "")
     spec = variant_config("spec-lookup")
     check("spec-lookup k=4", spec["speculate"] == 4 and spec["draft"] == "lookup", str(spec))
+    check("verify budget covers k=8", verify_token_budget([2, 4, 8]) >= 16, "")
+    check("verify budget default 32", verify_token_budget(None) == 32, str(verify_token_budget(None)))
+    check("verify budget never < max k", verify_token_budget([8]) >= 8, "")
 
 
 def test_parser_plan_only_flags() -> None:

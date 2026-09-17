@@ -3,3 +3,6 @@ llama.cpp / Ollama. Smoke numbers stay in compare.json from the 3B lab worker.
 
 Live: C:\dev\models\runs\deepfold-long-3B-20260916-002528
 Command: python -m gpu.lab.deepfold_long --size 3B
+
+decode_tok_s=35.2 is 63 steps / decode_ms. eval_tok_s=35.8 is 64 tokens /
+the same wall. No new GPU run.

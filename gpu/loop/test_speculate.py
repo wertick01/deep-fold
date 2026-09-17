@@ -18,13 +18,15 @@ _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
-from gpu.loop.generate import TokenLoop  # noqa: E402
+from gpu.loop.generate import Generation, TokenLoop, generated_tok_s  # noqa: E402
 from gpu.loop.speculate import (  # noqa: E402
     accept_greedy,
+    format_verify_note,
     lookup_draft,
     measure_verify,
     oracle_draft,
     verify_block,
+    verify_stats,
 )
 
 CHECKS: list[tuple[str, bool, str]] = []
@@ -294,7 +296,27 @@ def test_measure_verify_match_and_h2d() -> None:
     assert all(w >= 0.0 for w in out["walls"])
     assert out["h2d_bytes"] == [200, 200, 100], out["h2d_bytes"]
     assert out["h2d_copies"] == [1, 1, 1]
+    assert out["block_widths"] == [2, 2, 1], out["block_widths"]
     assert all(flag for _, _, flag in loop.forwards)
+
+
+def test_verify_stats_uses_actual_width_not_requested_k() -> None:
+    item = {
+        "k": 8,
+        "n_tokens": 4,
+        "n_blocks": 1,
+        "block_widths": [4],
+        "walls": [3.097880100016482],
+        "greedy_match": True,
+    }
+    stats = verify_stats(item)
+    assert stats["full_k"] is False
+    assert stats["measured_width"] == 4
+    assert abs(stats["ms_per_token"] - 774.4700250041205) < 1e-6
+    note = format_verify_note(item)
+    assert "387" not in note
+    assert "width=4 not 8" in note
+    assert "774" in note or "775" in note
 
 
 def test_measure_verify_no_ring() -> None:
@@ -514,6 +536,20 @@ def test_generate_cpu_full_accept() -> None:
         assert any(flag for _, _, flag in loop.forwards), loop.forwards
     finally:
         torch.cuda.synchronize = orig
+
+
+def test_eval_tok_s_uses_token_count_not_steps() -> None:
+    decode_ms = 25319.382500019856
+    g = Generation(
+        prompt_len=10,
+        tokens=list(range(64)),
+        decode_ms=decode_ms,
+        decode_steps=63,
+    )
+    assert abs(g.decode_tok_s - 63 / (decode_ms / 1000.0)) < 1e-12
+    assert abs(g.eval_tok_s - 64 / (decode_ms / 1000.0)) < 1e-12
+    assert generated_tok_s(0, decode_ms) == 0.0
+    assert generated_tok_s(64, 0.0) == 0.0
 
 
 # --------------------------------------------------------------------------- #

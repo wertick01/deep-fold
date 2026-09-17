@@ -1,0 +1,163 @@
+{
+  "schema": "deepfold.llamacpp_h2.v1",
+  "plan_only": false,
+  "cmd": [
+    "C:\\dev\\models\\llama.cpp\\llama-server.exe",
+    "--model",
+    "C:\\dev\\models\\gguf\\Qwen2.5-32B-Instruct-Q4_K_M.gguf",
+    "--ctx-size",
+    "2048",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "8765",
+    "--parallel",
+    "1",
+    "--jinja",
+    "--no-webui",
+    "--perf",
+    "-lv",
+    "1"
+  ],
+  "gguf_note": "C:\\dev\\models\\gguf\\Qwen2.5-32B-Instruct-Q4_K_M.gguf size=19851336576 bartowski Q4_K_M",
+  "ctx": 2048,
+  "n_predict": 64,
+  "ngl": -1,
+  "ngl_omitted": true,
+  "parallel": 1,
+  "long_n": 64,
+  "quant": "Q4_K_M",
+  "model": "Qwen2.5-32B-Instruct",
+  "source": "bartowski/Qwen2.5-32B-Instruct-GGUF",
+  "llama_cpp": "ggml-org/llama.cpp b10964 win-cuda-12.4",
+  "smi_before_mib": 1440.0,
+  "messages": [
+    {
+      "id": 1,
+      "prompt": "Reply with one short sentence. What is the capital of France?",
+      "reply": "The capital of France is Paris.",
+      "needles": [
+        "paris",
+        "париж"
+      ],
+      "quality_ok": true,
+      "prompt_n": 42,
+      "prompt_ms": 1385.642,
+      "predicted_n": 8,
+      "predicted_ms": 2584.02,
+      "decode_tok_s": 2.7089573610111377,
+      "wall_ms": 3997.405500000241,
+      "raw": {
+        "cache_n": 0,
+        "prompt_n": 42,
+        "prompt_ms": 1385.642,
+        "prompt_per_token_ms": 32.99147619047619,
+        "prompt_per_second": 30.310859514939647,
+        "predicted_n": 8,
+        "predicted_ms": 2584.02,
+        "predicted_per_token_ms": 369.1457142857143,
+        "predicted_per_second": 2.7089573610111377
+      }
+    },
+    {
+      "id": 2,
+      "prompt": "And the capital of Germany?",
+      "reply": "The capital of Germany is Berlin.",
+      "needles": [
+        "berlin",
+        "берлин"
+      ],
+      "quality_ok": true,
+      "prompt_n": 35,
+      "prompt_ms": 1385.643,
+      "predicted_n": 8,
+      "predicted_ms": 2531.359,
+      "decode_tok_s": 2.7653130196072544,
+      "wall_ms": 3929.4573000001947,
+      "raw": {
+        "cache_n": 0,
+        "prompt_n": 35,
+        "prompt_ms": 1385.643,
+        "prompt_per_token_ms": 39.589800000000004,
+        "prompt_per_second": 25.25903136666515,
+        "predicted_n": 8,
+        "predicted_ms": 2531.359,
+        "predicted_per_token_ms": 361.62271428571427,
+        "predicted_per_second": 2.7653130196072544
+      }
+    },
+    {
+      "id": 3,
+      "prompt": "What is 17 times 19? Reply with the number only.",
+      "reply": "323",
+      "needles": [
+        "323"
+      ],
+      "quality_ok": true,
+      "prompt_n": 45,
+      "prompt_ms": 1561.016,
+      "predicted_n": 4,
+      "predicted_ms": 1253.172,
+      "decode_tok_s": 2.3939251754747155,
+      "wall_ms": 2836.592600000131,
+      "raw": {
+        "cache_n": 0,
+        "prompt_n": 45,
+        "prompt_ms": 1561.016,
+        "prompt_per_token_ms": 34.68924444444445,
+        "prompt_per_second": 28.827379091566005,
+        "predicted_n": 4,
+        "predicted_ms": 1253.172,
+        "predicted_per_token_ms": 417.724,
+        "predicted_per_second": 2.3939251754747155
+      }
+    }
+  ],
+  "smi_after_load_mib": 11636.0,
+  "warmup": {
+    "reply": "Hello! How can I assist you today",
+    "prompt_n": 31,
+    "prompt_ms": 1467.168,
+    "predicted_n": 8,
+    "predicted_ms": 2833.756,
+    "decode_tok_s": 2.4702197366322296,
+    "wall_ms": 4309.567199999947,
+    "raw": {
+      "cache_n": 0,
+      "prompt_n": 31,
+      "prompt_ms": 1467.168,
+      "prompt_per_token_ms": 47.327999999999996,
+      "prompt_per_second": 21.129141311697094,
+      "predicted_n": 8,
+      "predicted_ms": 2833.756,
+      "predicted_per_token_ms": 404.82228571428567,
+      "predicted_per_second": 2.4702197366322296
+    }
+  },
+  "long": {
+    "prompt": "Write a long travelogue about rivers, forests, and cities. Keep going with more sentences.",
+    "reply": "Embarking on a journey through the heart of nature and the bustling life of cities, one cannot help but marvel at the intricate tapestry of rivers, forests, and urban landscapes that weave together to form the rich fabric of our world. This travelogue invites you to explore the serene beauty of rivers, the lush embrace of",
+    "ignore_eos": true,
+    "prompt_n": 48,
+    "prompt_ms": 1399.844,
+    "predicted_n": 64,
+    "predicted_ms": 24785.237,
+    "decode_tok_s": 2.5418356903345325,
+    "wall_ms": 26206.982300000163,
+    "raw": {
+      "cache_n": 0,
+      "prompt_n": 48,
+      "prompt_ms": 1399.844,
+      "prompt_per_token_ms": 29.163416666666667,
+      "prompt_per_second": 34.289535119627615,
+      "predicted_n": 64,
+      "predicted_ms": 24785.237,
+      "predicted_per_token_ms": 393.41646031746035,
+      "predicted_per_second": 2.5418356903345325
+    }
+  },
+  "mean_decode_tok_s": 2.622731852031036,
+  "mean_ttft_ms": 1444.1003333333335,
+  "smoke_ok": true,
+  "smi_after_generate_mib": 11565.0
+}

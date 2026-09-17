@@ -1,0 +1,30 @@
+{
+  "schema": "deepfold.long.v1",
+  "size": "20B",
+  "model": "C:\\dev\\models\\internlm2_5-20b-chat",
+  "chr": "C:\\dev\\models\\internlm2_5-20b.nf4.chr",
+  "overflow": false,
+  "device_mib": 10063.27734375,
+  "cap": {
+    "vram_mib": 12288,
+    "max_seq": 1024,
+    "overflow": false,
+    "cap_bytes": null,
+    "cap_mib": null,
+    "codec": "nf4",
+    "reason": "NF4 fits this card; keeping 4.25-bit (better quality, measured path)"
+  },
+  "smi_after_load_mib": 11543.0,
+  "warmup_ms": 1731.1855999996624,
+  "graph": "linears",
+  "prompt": "Write a long travelogue about rivers, forests, and cities. Keep going with more sentences.",
+  "reply": "Embarking on a journey that weaves through the sinuous threads of nature's own artistry, one finds themselves captivated by the symphony of rivers, the verdant whispers of forests, and the pulsating heartbeats of cities. This travelogue unfurls along the banks of the mighty Amazon",
+  "n_tokens": 64,
+  "decode_steps": 63,
+  "decode_ms": 13718.9257,
+  "prefill_ms": 259.02440000027127,
+  "decode_tok_s": 4.59219631169808,
+  "eval_tok_s": 4.665088316645669,
+  "stop_token": null,
+  "report": "241 nf4 linears (9774.1 MiB), 97 bf16 tensors (1.14 MiB), embed=nf4-rows (288.1 MiB), tied_lm_head=False, total=10063.3 MiB, 5.7s"
+}

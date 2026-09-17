@@ -24,6 +24,7 @@
   "decode_ms": 1788.5315000021365,
   "prefill_ms": 87.82809998956509,
   "decode_tok_s": 35.2244285325278,
+  "eval_tok_s": 35.78354644574253,
   "stop_token": null,
   "report": "252 nf4 linears (1405.7 MiB), 181 bf16 tensors (0.46 MiB), embed=nf4-rows (157.6 MiB), tied_lm_head=True, total=1563.8 MiB, 1.3s"
 }

@@ -9,4 +9,6 @@ Command:
 
 Library tag qwen2.5:32b (~19 GB). ctx 2048, n_predict 64, temperature 0.
 Smoke mean is short EOS (8/8/4 tokens). Quote long 64-token plateau for decode.
+prompt_eval_duration is not matched TTFT: stream=False and
+prompt_eval_cached_count=24 on every saved JSON.
 Not a GGUF import into .chr. Do not paste the Korean qwen2.5-coder:32b blog.

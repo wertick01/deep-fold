@@ -1,0 +1,6 @@
+Ollama 0.34.0 qwen2.5:32b independent hard-12 (same fixture as TokenLoop).
+11/12. Only miss: gsm8k-stickers extracted 72, gold 48.
+Keep-alive from the stream plate; not a TokenLoop NF4 result.
+
+Live: C:\dev\models\runs\ollama-hard-32b-20260917
+Command: python -m gpu.lab.ollama_hard --model qwen2.5:32b

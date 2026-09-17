@@ -54,6 +54,7 @@ __all__ = [
     "plan_variant",
     "run_h2_accel",
     "variant_config",
+    "verify_token_budget",
     "write_summary",
 ]
 
@@ -135,6 +136,16 @@ def parse_k(text: str) -> list[int]:
     if not out:
         raise argparse.ArgumentTypeError("empty --k")
     return out
+
+
+def verify_token_budget(k_values: Sequence[int] | None) -> int:
+    """Ignore-EOS tokens so the last block of ``max(k)`` is full width.
+
+    The 2026-09-15 plate replayed a 4-token smoke reply, then divided the k=8
+    wall by 8. That is not T_verify(8).
+    """
+    need = max(int(k) for k in (k_values or [8]))
+    return max(need * 2, 32)
 
 
 def variant_config(vid: str) -> dict[str, Any]:
@@ -545,8 +556,6 @@ def _run_live_variant(
         h2d_f = 0
         copy_ms = 0.0
         prompt_len = None
-        last_ids = None
-        last_tokens: list[int] = []
         for index, prompt in enumerate(MESSAGES, start=1):
             packed = chat_text(tokenizer, prompt)
             ids = tokenizer(packed, return_tensors="pt", add_special_tokens=False).input_ids[0]
@@ -567,29 +576,36 @@ def _run_live_variant(
                 match_ok.append(list(run.tokens) == list(baseline_tokens[index]))
             if baseline_tokens is not None and vid == "baseline":
                 baseline_tokens[index] = list(run.tokens)
-            last_ids, last_tokens = ids, list(run.tokens)
-        if vid == "verify-k" and last_ids is not None:
+        if vid == "verify-k":
             try:
-                from gpu.loop.speculate import measure_verify
+                from gpu.lab.script import LONG_PROMPT
+                from gpu.loop.speculate import (
+                    format_verify_note,
+                    measure_verify,
+                    verify_stats,
+                )
 
+                n_verify = verify_token_budget(parse_k(args.k))
+                packed = chat_text(tokenizer, LONG_PROMPT)
+                ids = tokenizer(
+                    packed, return_tensors="pt", add_special_tokens=False
+                ).input_ids[0]
+                long_run = loop.generate(ids, n_verify, stop=(), **generate_kw)
+                verify_tokens = list(long_run.tokens)
                 verifies = []
                 for k in parse_k(args.k):
                     loop.reset()
-                    loop.prefill(last_ids)
-                    verifies.append(measure_verify(loop, last_tokens, k))
+                    loop.prefill(ids)
+                    item = measure_verify(loop, verify_tokens, k)
+                    stats = verify_stats(item)
+                    item["ms_per_token"] = stats["ms_per_token"]
+                    item["avg_block_ms"] = stats["avg_block_ms"]
+                    item["measured_width"] = stats["measured_width"]
+                    item["full_k"] = stats["full_k"]
+                    verifies.append(item)
                 row["verify"] = verifies
-                bits = []
-                for item in verifies:
-                    walls = item.get("walls") or []
-                    k = item.get("k")
-                    if not walls:
-                        continue
-                    avg_ms = 1000.0 * sum(walls) / len(walls)
-                    per_tok = avg_ms / max(int(k or 1), 1)
-                    bits.append(
-                        f"k={k} {avg_ms:.0f}ms/block ({per_tok:.0f}ms/tok) "
-                        f"match={item.get('greedy_match')}"
-                    )
+                row["verify_n_tokens"] = len(verify_tokens)
+                bits = [format_verify_note(item) for item in verifies]
                 if bits:
                     extra = "; ".join(bits)
                     row["notes"] = (

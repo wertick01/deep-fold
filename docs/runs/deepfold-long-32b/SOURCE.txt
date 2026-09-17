@@ -3,3 +3,7 @@ as llama.cpp / Ollama. Smoke 2.31 tok/s stays the H2-6 product plate.
 
 Live: C:\dev\models\runs\deepfold-long-32B-20260916-002552
 Command: python -m gpu.lab.deepfold_long --size 32B
+
+decode_tok_s=2.49 is 63 step() calls / decode_ms. eval_tok_s=2.53 is
+64 generated tokens / the same decode_ms (Ollama eval_count counting).
+No new GPU run: both from plate.json n_tokens, decode_steps, decode_ms.

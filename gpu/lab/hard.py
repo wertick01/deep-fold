@@ -17,7 +17,7 @@ sessions. Isolated workers, same as smoke: this process must not hold the
 weights.
 
     python -m gpu.lab.hard --list
-    python -m gpu.lab.hard --lab qwen25-3b
+    python -m gpu.lab.hard --lab qwen25-32b --codec nf4
     python -m gpu.lab.test_hard
 """
 
@@ -1125,7 +1125,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--lab",
         default="",
-        help="catalog slug: qwen25-3b, qwen25-14b, internlm20b",
+        help="catalog slug: qwen25-3b, qwen25-14b, internlm20b, qwen25-32b",
     )
     parser.add_argument(
         "--out",

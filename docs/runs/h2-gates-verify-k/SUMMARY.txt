@@ -1,0 +1,5 @@
+schema deepfold.h2_gates.v1  graphs=linears n_host=90
+generate tok/s=0.476 greedy_n=32
+T_step mean_rest=7238.9 ms
+T_8/T_1=0.09  spec_gate=pass
+CPU GEMV L0.down 213.90 ms  gpu=10.138312500032498  floor=2.89  gate=blocked

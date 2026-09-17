@@ -172,8 +172,9 @@ def build_parser() -> argparse.ArgumentParser:
             "Same load path as run, then a prompt_toolkit session. "
             "Enter sends, Ctrl+J newline, Ctrl+C stops a reply. "
             "Each turn prefills the whole chat from saved JSON. "
-            "--agent adds workspace tools (list/read/write/pytest); "
-            "writes and tests ask first. Needs a TTY; scripts use run --prompt."
+            "--agent adds workspace tools (grep/patch/pytest/allowlisted argv); "
+            "writes and tests ask first unless --agent-trust. "
+            "Needs a TTY; scripts use run --prompt."
         ),
     )
     _add_runtime_flags(talk, with_prompt=False, max_new_tokens=256, max_seq=2048)
@@ -186,7 +187,7 @@ def build_parser() -> argparse.ArgumentParser:
     talk.add_argument(
         "--agent",
         action="store_true",
-        help="enable workspace tools (list_dir, read_file, write_file, run_tests)",
+        help="enable workspace tools (grep, patch, pytest, allowlisted argv)",
     )
     talk.add_argument(
         "--workspace",
@@ -194,10 +195,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="sandbox root for --agent (default: current directory)",
     )
     talk.add_argument(
+        "--agent-trust",
+        choices=("ask", "write", "workspace"),
+        default="ask",
+        help="ask (default): confirm edits and commands; write: auto-edit; "
+        "workspace: auto-edit and allowlisted commands (git writes still ask)",
+    )
+    talk.add_argument(
         "--max-tool-rounds",
         type=int,
-        default=8,
-        help="max generate+tool cycles per user turn in --agent (default: 8)",
+        default=24,
+        help="max generate+tool cycles per user turn in --agent (default: 24)",
+    )
+    talk.add_argument(
+        "--agent-web",
+        action="store_true",
+        help="opt in web_search (Brave Search, or Google CSE). Off by default. "
+        "Needs DEEPFOLD_BRAVE_KEY (see docs/web-search.md). Google CSE keys "
+        "still work on an old Cloud project",
     )
     talk.set_defaults(func=chat_mod.chat)
 

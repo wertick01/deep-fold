@@ -85,8 +85,10 @@ CHAT_HELP = (
     "Slash: /help /quit /exit /clear /stats /new /chats /copy /save /agent. "
     "History is JSON on disk; each turn prefills it (KV is not reused). "
     "Ctrl+C does not copy; use /copy or the terminal's copy (Ctrl+Shift+C). "
-    "Agent mode (--agent or /agent on) can list/read/write the workspace and "
-    "run pytest; writes and tests ask first. There is no general shell."
+    "Agent mode (--agent or /agent on) can search, read, patch, and run "
+    "allowlisted commands in the workspace. Writes/tests ask first "
+    "(--agent-trust). web_search is off unless --agent-web. No general shell. "
+    "/agent trust ask|write|workspace."
 )
 
 #: Kept for the doctor / catalog copy. It is *not* the generate authority any

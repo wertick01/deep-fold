@@ -5,7 +5,7 @@ descs=chr chr=C:\dev\models\qwen25-32b.nf4.chr
 variant        status    pol          n_host  res_MiB    h2d/fwd  copies floor_ms   tok/s  prefill smoke  notes
 baseline       ok        D                90    10144     6454.7    2070      260    0.08    26077 3/3    
 profile        ok        D                90    10144     6454.7    2070      260    1.05     1999 3/3    
-verify-k       ok        D                90    10144     6454.7    2070      260    1.73     1174 3/3    k=2 18304ms/block (9152ms/tok) match=True; k=4 3368ms/block (842ms/tok) match=True; k=8 3098ms/block (387ms/tok) match=True
+verify-k       ok        D                90    10144     6454.7    2070      260    1.73     1174 3/3    k=2 18304ms/block (9152ms/tok) match=True; k=4 3368ms/block (842ms/tok) match=True; k=8 3098ms/block (774ms/tok, width=4 not 8) match=True
 spec-lookup    ok        D                90    10144     6454.7    1980      260    0.01    57026 3/3    
 prefill-hold   ok        D                90    10144     6454.7    1800      260    2.33     3791 3/3    
 pairs-stride   ok        pairs_stride     90    10144     6454.7    2070      260    2.14     4050 3/3    

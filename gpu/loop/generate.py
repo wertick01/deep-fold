@@ -39,6 +39,7 @@ from gpu.nf4.plan import LIVE_MAX_N
 __all__ = [
     "TokenLoop",
     "Generation",
+    "generated_tok_s",
     "PACKERS",
     "PREFILL_HOLD_SUPERCHUNK",
     "rms_norm_exact",
@@ -243,6 +244,13 @@ def _sdpa_has_gqa() -> bool:
 # --------------------------------------------------------------------------- #
 
 
+def generated_tok_s(n_tokens: int, decode_ms: float) -> float:
+    """``n_tokens / (decode_ms / 1000)``. Zero if either side is empty."""
+    if float(decode_ms) <= 0.0 or int(n_tokens) <= 0:
+        return 0.0
+    return int(n_tokens) / (float(decode_ms) / 1000.0)
+
+
 @dataclass
 class Generation:
     """One greedy request. Times are kept apart on purpose (token-loop.md §6.2)."""
@@ -268,6 +276,16 @@ class Generation:
     @property
     def decode_tok_s(self) -> float:
         return self.decode_steps / (self.decode_ms / 1000.0) if self.decode_ms > 0 else 0.0
+
+    @property
+    def eval_tok_s(self) -> float:
+        """Generated tokens / decode wall. Matches llama.cpp ``eval_count`` / ``eval_duration``.
+
+        ``decode_tok_s`` stays steps *after* the first token (first sits in
+        ``prefill_ms``). A 64-token ignore-EOS plateau is 63 steps; this uses
+        ``len(tokens)`` over the same ``decode_ms``.
+        """
+        return generated_tok_s(len(self.tokens), self.decode_ms)
 
     @property
     def ms_per_token(self) -> float:

@@ -1,0 +1,7 @@
+Ollama 0.34.0 internlm2.5:20b-q4km independent hard-12 (same fixture).
+9/12. Misses: gsm8k-money 5 vs 44, trap-sheep 8 vs 9, code-sum 10 vs 15.
+Same bartowski Q4_K_M GGUF as llama.cpp 20B. TokenLoop InternLM NF4 was 8/12
+(2026-09-14): train, machines, sheep, bat-and-ball.
+
+Live: C:\dev\models\runs\ollama-hard-20b-20260917
+Command: python -m gpu.lab.ollama_hard --model internlm2.5:20b-q4km

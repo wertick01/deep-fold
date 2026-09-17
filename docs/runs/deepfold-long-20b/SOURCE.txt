@@ -1,0 +1,11 @@
+InternLM2.5-20B-chat NF4 TokenLoop, resident (overflow=False), max_seq=1024.
+Same ignore-EOS travelogue as 3B/32B. conda torch-gpu, slow SentencePiece tokenizer.
+
+Saved plate: 4.59 tok/s (63 steps) / 4.67 eval, smi 11543, weights 10063 MiB.
+An earlier pass the same day printed 6.98 / 7.09 but crashed before dump
+(missing compare.json row). Quote the saved files, not the lost stdout.
+
+Smoke 5.01 tok/s was max_seq=512, three short prompts — not this plateau.
+
+Live: C:\dev\models\runs\deepfold-long-20B-20260917
+Command: python -m gpu.lab.deepfold_long --size 20B

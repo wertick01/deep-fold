@@ -1,0 +1,8 @@
+schema deepfold.ollama_h2.v1
+model qwen2.5:32b
+mean_decode_tok_s 3.094116733076636
+long_decode_tok_s 2.6768079767539303
+mean_server_prompt_ms 905.8389999999999
+mean_client_ttft_ms 919.3317333332137
+mean_ttft_ms None
+smoke_ok True

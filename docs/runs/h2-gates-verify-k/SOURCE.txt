@@ -1,0 +1,16 @@
+T_verify re-measure, ignore-EOS 32 tokens, full k=8 width.
+Author RTX 3080 12 GB (WDDM). Live dump:
+
+  C:\dev\models\runs\h2-gates-verify-k-20260917
+
+Command:
+
+  python -m gpu.lab.h2_gates --verify-tokens 32 --k 1,2,4,8 --max-seq 512
+
+This is not the 2026-09-15 h2-accel verify-k row (that replayed a 4-token
+smoke reply and is not T_verify(8)).
+
+generate tok/s=0.476 on this session — cold vs warm D 2.35 tok/s
+(`h2-accel-32b-warm-baseline`). T_step mean_rest=7239 ms is this session,
+not the product ~425 ms/tok. spec_gate=pass is T_8 rest / that T_step.
+CPU GEMV L0.down 214 ms vs GPU 10 ms; gate_cpu=blocked.

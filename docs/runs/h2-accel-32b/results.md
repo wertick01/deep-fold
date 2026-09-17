@@ -23,9 +23,10 @@ not 96 / 6885. Copy floor **260 ms**, not 277. Decode is still copy-bound.
 | smi | 12013 MiB |
 | Graph | captured (N=1) |
 
-Matches the older H2 smoke (2.31 tok/s at max_seq=2048). Ceiling with this
-tape is still ~3.6 tok/s if copy were fully hidden. 10 tok/s is not in reach
-without fewer bytes per forward or more than one accepted token per tape.
+Matches the older H2 smoke (2.31 tok/s at max_seq=2048). On **this CopyRing
+tape** the serial copy floor is ~3.6 tok/s if copy were fully hidden. That is
+not a bound on the 3080. 10 tok/s is not in reach on this tape without fewer
+bytes per forward or more than one accepted token per copy.
 
 The matrix's first `baseline` row is a **cold** load (0.08 tok/s, prefill
 26 s). Ignore it for tok/s / TTFT.
@@ -39,7 +40,7 @@ below warm T_1 because the 16 GB `.chr` and clocks were still coming up.
 |---|---|---|---|---|---|---|
 | baseline (cold) | 0.08 | 26 s | 2070 | 90 | 11963 | ignore |
 | profile | 1.05 | 2.0 s | 2070 | 90 | 11894 | `copy_ms` 8415 / 23 fwd ≈ **366 ms** vs floor 260. Timing join extra. Keep as lab. |
-| verify-k | 1.73 (`step()`) | 1.17 s | 2070 | 90 | 11939 | greedy match. k=8 **3098 ms/block** (387 ms/tok). T_verify(8)/T_step ≈ **7.3** |
+| verify-k | 1.73 (`step()`) | 1.17 s | 2070 | 90 | 11939 | greedy match. k=8 was a **4-token** truncated block (last smoke reply), **3098 ms/block, 774 ms/tok**. Not T_verify(8). Real width-8 measure: [`h2-gates-verify-k`](../h2-gates-verify-k/) (2026-09-17). |
 | spec-lookup | **0.008** | 57 s | 1980 | 90 | 11951 | tokens = baseline; n-gram pays verify. **Product default stays `draft="none"`** |
 | prefill-hold | 2.33 | **3.8 s** | **1800** | 90 | 11926 | copies −270 (= three extra chunk tapes). Decode unchanged. Short-prompt TTFT **worse** |
 | pairs-stride | 2.14 | 4.0 s | 2070 | 90 | 11859 | same tape bytes as D. No tok/s win |
@@ -47,6 +48,24 @@ below warm T_1 because the 16 GB `.chr` and clocks were still coming up.
 
 3B `--force-overflow` canary (`docs/runs/h2-accel-3b-canary/`): hold copies
 2300→2000, prefill 235→181 ms, ~10 tok/s, verify k=4 = 121 ms/block match.
+
+## T_verify re-measure (2026-09-17)
+
+Ignore-EOS 32 tokens, `max_seq=512`, `--k 1,2,4,8`. Live
+`C:\dev\models\runs\h2-gates-verify-k-20260917`; git copy
+[`docs/runs/h2-gates-verify-k/`](../h2-gates-verify-k/).
+
+| k | n | full_k | first block | rest mean / block | ms/tok | copies/block |
+|---|---:|---|---:|---:|---:|---:|
+| 1 | 32 | yes | 7001 ms | 2627 ms | 2763 | 90 |
+| 2 | 32 | yes | 414 ms | 1452 ms | 694 | 90 |
+| 4 | 32 | yes | 611 ms | 548 ms | 139 | 90 |
+| 8 | 32 | yes | 1614 ms | **667 ms** | **113** | 90 |
+
+`spec_gate=pass` is **667 / 7239 ≈ 0.09** against **this session’s** T_step
+(generate **0.48 tok/s**). Warm D is still **2.35 tok/s / ~425 ms**. Do not
+write “T_verify(8) is 9% of product decode”. CPU GEMV L0.down **214 ms** vs
+GPU **10 ms** (`gate_cpu=blocked`).
 
 ## Merge / is this code needed?
 

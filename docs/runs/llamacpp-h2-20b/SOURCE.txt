@@ -1,0 +1,11 @@
+llama.cpp b10964 llama-server, bartowski InternLM2.5-20B-chat Q4_K_M,
+--n-gpu-layers omitted (auto-fit). Same greedy smoke + ignore-EOS 64-token
+travelogue. ctx 2048.
+
+Long **11.87 tok/s** (n=64). Smoke mean 11.04. TTFT ~196 ms. smi 11394 MiB.
+TokenLoop NF4 long on the same Instruct is the saved 4.59 plate (resident).
+Do not rank 11.87 vs 4.59 as a kernel bake-off: Q4_K_M fused CUDA vs NF4
+TokenLoop internlm_gqa.
+
+Live: C:\dev\models\runs\llamacpp-h2-20b-20260917
+Command: python -m gpu.lab.llamacpp_h2 --gguf C:\dev\models\gguf\internlm2_5-20b-chat-Q4_K_M.gguf

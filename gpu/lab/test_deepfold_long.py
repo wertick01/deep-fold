@@ -33,7 +33,19 @@ def test_parser() -> None:
     check("plan_only", args.plan_only is True, "")
     check("long_n 64", args.long_n == 64, str(args.long_n))
     check("3B compare id", PRESETS["3B"]["compare_id"] == "deepfold-nf4-3B-resident", "")
-    check("32B compare id", PRESETS["32B"]["compare_id"] == "deepfold-nf4-32B-overflow", "")
+    check("20B compare id", PRESETS["20B"]["compare_id"] == "deepfold-nf4-20B-resident", "")
+    check("20B max_seq is tighter", int(PRESETS["20B"]["max_seq"]) == 1024, str(PRESETS["20B"]["max_seq"]))
+    check("20B needs remote code", bool(PRESETS["20B"]["trust_remote_code"]), "")
+    import inspect
+    from gpu.lab import deepfold_long as _mod
+
+    src = inspect.getsource(_mod.main)
+    check("plate dump is written before compare merge", src.find("plate.json") < src.find("_merge_long"), "")
+    check(
+        "20B tokenizer uses internlm slow class",
+        "_load_tokenizer" in inspect.getsource(_mod.run_live),
+        "",
+    )
     check("prompt matches llama.cpp", LONG_PROMPT == LLAMA_LONG, "")
 
 

@@ -291,7 +291,7 @@
       "resident_mib": 10144.21875,
       "smoke": "3/3",
       "greedy_match_baseline": true,
-      "notes": "k=2 18304ms/block (9152ms/tok) match=True; k=4 3368ms/block (842ms/tok) match=True; k=8 3098ms/block (387ms/tok) match=True",
+      "notes": "k=2 18304ms/block (9152ms/tok) match=True; k=4 3368ms/block (842ms/tok) match=True; k=8 3098ms/block (774ms/tok, width=4 not 8) match=True",
       "streamed_bytes": 6768230400,
       "host_layers": {
         "down": [
@@ -396,6 +396,7 @@
           "k": 2,
           "n_tokens": 4,
           "n_blocks": 2,
+          "block_widths": [2, 2],
           "walls": [
             22.49668609999935,
             14.111150600016117
@@ -408,12 +409,17 @@
             90,
             90
           ],
-          "greedy_match": true
+          "greedy_match": true,
+          "ms_per_token": 9151.959175003867,
+          "avg_block_ms": 18303.918350007735,
+          "measured_width": 2,
+          "full_k": true
         },
         {
           "k": 4,
           "n_tokens": 4,
           "n_blocks": 1,
+          "block_widths": [4],
           "walls": [
             3.368086999980733
           ],
@@ -423,12 +429,17 @@
           "h2d_copies": [
             90
           ],
-          "greedy_match": true
+          "greedy_match": true,
+          "ms_per_token": 842.0217499951833,
+          "avg_block_ms": 3368.086999980733,
+          "measured_width": 4,
+          "full_k": true
         },
         {
           "k": 8,
           "n_tokens": 4,
           "n_blocks": 1,
+          "block_widths": [4],
           "walls": [
             3.097880100016482
           ],
@@ -438,7 +449,11 @@
           "h2d_copies": [
             90
           ],
-          "greedy_match": true
+          "greedy_match": true,
+          "ms_per_token": 774.4700250041205,
+          "avg_block_ms": 3097.880100016482,
+          "measured_width": 4,
+          "full_k": false
         }
       ],
       "cpu": [],

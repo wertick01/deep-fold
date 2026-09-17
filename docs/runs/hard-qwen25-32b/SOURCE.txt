@@ -1,0 +1,7 @@
+TokenLoop NF4 overflow, internlm not involved.
+Qwen2.5-32B-Instruct + qwen25-32b.nf4.chr, independent hard-12.
+12/12. Mean decode 2.12 tok/s, mean TTFT 1732 ms, peak smi 11952 MiB.
+max_seq=2048, graph=linears, policy D CopyRing. conda torch-gpu.
+
+Live: C:\dev\models\runs\hard-qwen25-32b-20260917
+Command: python -m gpu.lab.hard --lab qwen25-32b --codec nf4

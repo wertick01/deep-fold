@@ -32,13 +32,10 @@
 
 Измерено на одной RTX 3080 12 ГБ: Qwen2.5-14B-Instruct (~28 ГиБ 16-битных
 весов) выдаёт около 6,6 токена в секунду; internlm2.5-20B (~38 ГиБ) — около 5,0.
-Та же 14B в шестнадцати битах, с выносом за карту, — 0,92. У Qwen2.5-32B
-упакованный NF4 всё ещё ~16,6 ГиБ и на карту не влезает; overflow-путь везёт
-pinned-хвост с хоста и выдаёт 2,31 ток/с дыма, **2,49** на плато 64 токена.
-Тот же ПК, тот же Instruct, жадный decode, ctx 2048: Ollama 0.34.0 Q4_K_M
-даёт **2,54 ток/с** на том же плато (33/65 слоёв на GPU, хвост на 5950X).
-llama.cpp с `-ngl 99` — **1,52**, потому что auto-fit оборвался. На 3B
-ничьей нет: Ollama **187,3**, наш резидентный NF4 **35,2**. Протокол:
+У Qwen2.5-32B overflow даёт **2,49 ток/с** (63 шага) / **2,53** по всем 64
+сгенерированным токенам. Ollama и llama.cpp auto-fit Q4_K_M на той же карте —
+оба **2,54**; llama.cpp `-ngl 99` — **1,52**. На 3B, где обе сети влезают,
+Q4_K примерно в **5 раз** быстрее. Это не рейтинг ядер. Протокол:
 [docs/eval-32b.md](docs/eval-32b.md),
 [docs/compare-3080.md](docs/compare-3080.md).
 Когда влезают оба
@@ -385,9 +382,51 @@ transformers 5 больше не передаёт `cache_position`, и моде�
 
 ![Сопоставленный decode на одной RTX 3080: Ollama Q4_K_M против H2 NF4 против llama.cpp](docs/img/compare-3080.png)
 
-*Рисунок. Плато 64 токена на 32B: Ollama **2,54**, H2 **2,49**, llama.cpp
-**1,52** (`-ngl 99`). 3B — разрыв ядра (~187 против 35). SKIP так и SKIP.
+*Рисунок. Плато 64 токена на 32B: Ollama **2,54**, llama.cpp auto-fit **2,54**,
+H2 **2,49** шагов / **2,53** сгенерированных токенов; `-ngl 99` был **1,52**.
+На 3B обе сети влезают: ~187 против TokenLoop 35,2 / 35,8 — весь путь
+генерации, не изолированный NF4 GEMM. SKIP так и SKIP.
 Перерисовать: `python -m gpu.lab.compare_plate --redraw`.*
+
+<table>
+<thead>
+<tr>
+<th>Движок</th>
+<th>Запуск / счётчик</th>
+<th align="right">3B long</th>
+<th align="right">32B long</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Ollama 0.34.0</td>
+<td>Q4_K_M</td>
+<td align="right"><strong>187,3</strong></td>
+<td align="right"><strong>2,54</strong></td>
+</tr>
+<tr>
+<td rowspan="2">llama.cpp b10964 Q4_K_M</td>
+<td>auto-fit (без <code>-ngl</code>)</td>
+<td align="right" rowspan="2"><strong>187,0</strong></td>
+<td align="right"><strong>2,54</strong></td>
+</tr>
+<tr>
+<td><code>-ngl 99</code></td>
+<td align="right"><strong>1,52</strong></td>
+</tr>
+<tr>
+<td rowspan="2">deep-fold NF4 TokenLoop</td>
+<td>63 шага после первого токена</td>
+<td align="right"><strong>35,2</strong></td>
+<td align="right"><strong>2,49</strong></td>
+</tr>
+<tr>
+<td>64 токена / та же стена</td>
+<td align="right"><strong>35,8</strong></td>
+<td align="right"><strong>2,53</strong></td>
+</tr>
+</tbody>
+</table>
 
 | | BF16 (HF `generate`) | NF4 overflow (`CopyRing` + `TokenLoop`) |
 |---|---:|---:|
@@ -404,11 +443,13 @@ transformers 5 больше не передаёт `cache_position`, и моде�
 
 На той же карте Ollama 0.34.0 Q4_K_M (жадный, ctx 2048): плато 64 токена
 **2,54 ток/с**, дым 3,18 не цитировать (короткий EOS). llama.cpp b10964 с
-`-ngl 99`: **1,52 ток/с** decode, TTFT **1010 мс**, `nvidia-smi` **11 520 МиБ**
-— auto-fit оборвался, это не «Ollama новее». H2 long **2,49** против Ollama
-**2,54** — два разных потолка (PCIe 6885 МиБ/ток против CPU-хвоста), не победа
-ядра. Слойный гибрид пробовали на `exp/cpu-hybrid-overflow` (long **2,091**);
-Ollama не обогнали, в `main` этот код не сливали. На 3B ядро Q4_K ~187 ток/с, наш NF4 35,2. Пластина:
+`-ngl 99`: **1,52 ток/с**. Без `--n-gpu-layers` (2026-09-17): **2,54 ток/с**,
+TTFT **1444 мс**, `nvidia-smi` **11 636 МиБ** — тот же класс, что Ollama.
+H2 **2,49** шагов / **2,53** сгенерированных токенов против **2,54** — два
+разных потолка (PCIe 6885 МиБ/ток против CPU-хвоста), не победа ядра.
+Слойный гибрид пробовали на `exp/cpu-hybrid-overflow` (long **2,091**);
+Ollama не обогнали, в `main` этот код не сливали. На 3B Q4_K ~187 ток/с, наш
+NF4 TokenLoop 35,2 / 35,8 (весь тракт, не одно ядро). Пластина:
 [`docs/img/compare-3080.png`](docs/img/compare-3080.png). Протокол:
 [`docs/eval-32b.md`](docs/eval-32b.md),
 [`docs/compare-3080.md`](docs/compare-3080.md).
@@ -502,11 +543,14 @@ What is 17 times 19? Reply with the number only.
 - **На 32B упакованный NF4 всё ещё не влезает.** Продуктовый путь — overflow,
   не «все 16 599 МиБ в HBM». Резидентные веса 9 716 МиБ; 6 885 МиБ едут из
   pinned-RAM хоста. Пик `nvidia-smi` 11 933 включает рабочий стол. Выдача
-  **2,31 ток/с** — это CopyRing + TokenLoop + `chr_nf4_gemm`; long **2,49**.
-  Ollama 0.34.0 на том же Instruct — **2,54** long (33/65 слоёв GPU). llama.cpp
-  с `-ngl 99` — **1,52**, fit abort ([docs/eval-32b.md](docs/eval-32b.md),
+  **2,31 ток/с** — это CopyRing + TokenLoop + `chr_nf4_gemm`; long **2,49**
+  шагов / **2,53** сгенерированных токенов. Ollama 0.34.0 на том же Instruct —
+  **2,54** long (33/65 слоёв GPU). llama.cpp auto-fit тоже **2,54**; `-ngl 99` —
+  **1,52**, fit abort
+  ([docs/eval-32b.md](docs/eval-32b.md),
   [docs/compare-3080.md](docs/compare-3080.md)). Дым 3/3 — не качество;
-  hard-12 не стартовали. Не цитировать pageable ~0,8 как дизайн H2.
+  Ollama hard-12 на 32B — 11/12 (промах gsm8k-stickers); TokenLoop 32B NF4 —
+  12/12. Не цитировать pageable ~0,8 как дизайн H2.
   Последовательная копия 277 мс — не измеренные 432 мс стены. `--codec auto`
   никогда не берёт VQ.
 - **Скорость выдачи сравнивает два разных стека:** с одной стороны
@@ -522,9 +566,10 @@ What is 17 times 19? Reply with the number only.
   На 32B NF4 overflow даёт 2,31 ток/с; generate у BF16 нет и нет
   полностью резидентного NF4.
   **Не пишите, что deep-fold быстрее существующих 4-битных движков вообще.**
-  Сопоставленные ряды на этой карте: Ollama 32B long **2,54** против H2 **2,49**
-  (ничья потолков, не ядра); llama.cpp `-ngl 99` **1,52**; 3B Ollama **187,3**
-  против H2 **35,2** ([docs/compare-3080.md](docs/compare-3080.md)). Живой
+  Сопоставленные ряды на этой карте: Ollama 32B long **2,54** против H2 **2,53**
+  по счёту сгенерированных токенов (**2,49** шагов; ничья потолков, не ядра);
+  llama.cpp auto-fit **2,54** (`-ngl 99` был **1,52**); 3B Ollama **187,3** против H2 **35,2** / **35,8**
+  ([docs/compare-3080.md](docs/compare-3080.md)). Живой
   дымовой прогон bitsandbytes NF4 в JSON сравнения — 22,2 ток/с / 60 мс; наш
   парный NF4 — 28,7 ток/с / 92 мс. Это разные стеки
   (`Linear4bit` против `CompressedLinear` + `TokenLoop`), не сравнение ядер.
@@ -689,8 +734,10 @@ python -m gpu.lab.h2_trace --no-timing
 | Сопоставленный decode Ollama / H2 / llama.cpp | [docs/img/compare-3080.png](docs/img/compare-3080.png) |
 | Методика лаборатории и чтение картинки | [docs/lab.md](docs/lab.md) |
 | CLI (`doctor` / `run`) | [docs/ux.md](docs/ux.md) |
+| Агентный режим (инструменты в CLI; KV — волна B, спека EN) | [docs/spec/agent.md](docs/spec/agent.md) |
+| Веб-поиск агента (ключ Brave, пошагово) | [docs/web-search.ru.md](docs/web-search.ru.md) |
 | Трудный eval (вопросы, ответы, время 3B/14B) | [docs/eval-hard-qwen25.md](docs/eval-hard-qwen25.md) |
-| Дым 32B, hard-12 не гнали; Ollama long 2,54 / H2 2,49 / llama.cpp 1,52 | [docs/eval-32b.md](docs/eval-32b.md), [docs/compare-3080.md](docs/compare-3080.md) |
+| Дым 32B; Ollama / llama.cpp auto-fit 2,54; H2 2,49 шагов / 2,53 eval; `-ngl 99` = 1,52; hard-12 Ollama 3B = 7/12, 32B = 11/12; TokenLoop 32B = 12/12 | [docs/eval-32b.md](docs/eval-32b.md), [docs/compare-3080.md](docs/compare-3080.md) |
 | Кольцо overflow H2 | [docs/plan-h2-ring.md](docs/plan-h2-ring.md) |
 | Счётчики Nsight GEMM (не tok/s) | [docs/runs/ncu/](docs/runs/ncu/) |
 | Матрица 4-битных конкурентов (3B SKIP кроме bnb; 32B Ollama/llama.cpp сняты) | [docs/runs/competitor-qwen25-3b/](docs/runs/competitor-qwen25-3b/), [docs/runs/compare-3080/](docs/runs/compare-3080/) |

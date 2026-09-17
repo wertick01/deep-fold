@@ -1,3 +1,4 @@
+cse.env
 agent-tools/
 .DS_Store
 *.pyc

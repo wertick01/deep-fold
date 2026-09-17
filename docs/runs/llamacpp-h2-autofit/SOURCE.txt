@@ -1,0 +1,9 @@
+llama.cpp b10964 llama-server, bartowski Q4_K_M 32B, --n-gpu-layers omitted
+(auto-fit). Same greedy smoke + ignore-EOS 64-token travelogue as H2 / Ollama.
+
+Long **2.542 tok/s** (n=64). Smoke mean 2.62 (short EOS — quote long).
+TTFT ~1444 ms. smi after load 11636 MiB. argv has no --n-gpu-layers.
+Does not replace the ngl 99 plate (1.52).
+
+Live: C:\dev\models\runs\llamacpp-h2-32b-autofit-20260917
+Command: python -m gpu.lab.llamacpp_h2

@@ -1,0 +1,11 @@
+schema deepfold.llamacpp_h2.v1
+quant Q4_K_M  model internlm2_5-20b-chat-Q4_K_M.gguf
+ctx 2048 n_predict 64 ngl -1 parallel 1
+gguf C:\dev\models\gguf\internlm2_5-20b-chat-Q4_K_M.gguf size=11984469792 (not the bartowski Q4_K_M length 19851336576)
+mean_decode_tok_s 11.044088197693178
+long_decode_tok_s 11.868481401430286 n=64
+mean_ttft_ms 196.10066666666668
+smoke_ok True
+smi_after_load_mib 11394.0
+bench_pp512_tok_s None
+bench_tg_tok_s None

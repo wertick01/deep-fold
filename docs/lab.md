@@ -35,7 +35,10 @@ not a win.
 
 Decode tok/s is a different stack on each side (HuggingFace `generate` + dense
 GEMM vs our fused NF4 loop). Report both. Do not rank them as a kernel
-benchmark.
+benchmark. Matched Ollama / llama.cpp / H2 numbers live in
+[`compare-3080.md`](compare-3080.md): the left column is the engine, with
+launches (`-ngl 99` vs auto-fit) and TokenLoop counters (63 steps vs 64
+generated tokens) grouped under it.
 
 ## Method
 

@@ -110,7 +110,7 @@ chr verify --orig D:\weights\Qwen2.5-3B-Instruct --chr D:\weights\qwen25-3b.nf4.
 deepfold chat --model D:\weights\Qwen2.5-3B-Instruct
 ```
 
-Enter — отправить, Ctrl+J — новая строка. Ctrl+C останавливает ответ. `/help` `/quit` `/clear` `/stats` `/new` `/chats` `/copy` `/save` `/agent`. Ответы рисуют markdown (жирный, списки, ограды) и переводят LaTeX `$...$` / `$$` в Unicode. По желанию: `--agent --workspace .` — инструменты в каталоге (запись и pytest спрашивают сначала).
+Enter — отправить, Ctrl+J — новая строка. Ctrl+C останавливает ответ. `/help` `/quit` `/clear` `/stats` `/new` `/chats` `/copy` `/save` `/agent`. Ответы рисуют markdown (жирный, списки, ограды) и переводят LaTeX `$...$` / `$$` в Unicode. По желанию: `--agent --workspace .` — grep/патч/pytest (запись спрашивает; `--agent-trust`). KV между ходами ещё полный prefill; спека: [`spec/agent.md`](spec/agent.md).
 У `chat` по умолчанию 256 новых токенов (не дымовой лимит 64).
 
 Скрипт / пайп:

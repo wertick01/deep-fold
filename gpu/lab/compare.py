@@ -46,7 +46,9 @@ def empty_row(**fields: Any) -> dict[str, Any]:
         "protocol": "smoke-greedy-ctx2048-n64",
         "mean_decode_tok_s": None,
         "long_decode_tok_s": None,
+        "long_eval_tok_s": None,
         "mean_ttft_ms": None,
+        "mean_client_ttft_ms": None,
         "smi_after_load_mib": None,
         "smoke_ok": None,
         "bench_pp512_tok_s": None,
@@ -119,11 +121,16 @@ def seed_known() -> Path:
             "quant": "NF4 overflow",
             "mean_decode_tok_s": 2.3128940562710195,
             "long_decode_tok_s": 2.488212340879585,
+            "long_eval_tok_s": 2.5277077748618004,
             "mean_ttft_ms": 1006.0023333353456,
             "smi_after_load_mib": 11926.0,
             "smoke_ok": True,
             "source": "docs/runs/h2-qwen25-32b/",
-            "notes": "Product H2 smoke 2026-09-14. Long ignore-EOS 64 tokens / 63 decode steps.",
+            "notes": (
+                "Product H2 smoke 2026-09-14. Long ignore-EOS 64 tokens / 63 decode "
+                "steps (decode_tok_s=2.49). eval_tok_s=2.53 is n_tokens/decode_ms, "
+                "same counting as Ollama eval_count."
+            ),
             "recorded_at": "2026-09-14T16:40:48Z",
         }
     )
@@ -143,8 +150,30 @@ def seed_known() -> Path:
             "bench_pp512_tok_s": 69.77799,
             "bench_tg_tok_s": 1.47332,
             "source": "docs/runs/llamacpp-h2/SUMMARY.txt",
-            "notes": "parallel 1, ngl 99, ignore_eos 64. Live C:\\dev\\models\\runs\\llamacpp-h2-20260915-224614",
+            "notes": "parallel 1, ngl 99 (fit abort), ignore_eos 64. Live C:\\dev\\models\\runs\\llamacpp-h2-20260915-224614. Runner default now omits --n-gpu-layers.",
             "recorded_at": "2026-09-15T15:46:14Z",
+        }
+    )
+    upsert(
+        {
+            "id": "llamacpp-q4-32B-Q4_K_M-autofit",
+            "stack": "llamacpp-q4",
+            "engine": "llama.cpp b10964 llama-server CUDA 12.4",
+            "model": "Qwen2.5-32B-Instruct",
+            "size": "32B",
+            "quant": "Q4_K_M auto-fit",
+            "mean_decode_tok_s": 2.622731852031036,
+            "long_decode_tok_s": 2.5418356903345325,
+            "mean_ttft_ms": 1444.1003333333335,
+            "smi_after_load_mib": 11636.0,
+            "smoke_ok": True,
+            "source": "docs/runs/llamacpp-h2-autofit/",
+            "notes": (
+                "ngl omitted (llama-server auto-fit), parallel 1, ignore_eos 64. "
+                "Long 2.54 matches Ollama 2.54. Live C:\\dev\\models\\runs\\llamacpp-h2-32b-autofit-20260917. "
+                "ngl 99 row stays llamacpp-q4-32B-Q4_K_M (1.52)."
+            ),
+            "recorded_at": "2026-09-17T04:05:28Z",
         }
     )
     upsert(
@@ -157,11 +186,16 @@ def seed_known() -> Path:
             "quant": "qwen2.5:3b",
             "mean_decode_tok_s": 189.58064823274708,
             "long_decode_tok_s": 187.2724931821108,
-            "mean_ttft_ms": 14.163000000000002,
+            "mean_ttft_ms": None,
             "smi_after_load_mib": 3837.0,
             "smoke_ok": True,
             "source": "docs/runs/ollama-h2-3b/",
-            "notes": "Library tag qwen2.5:3b, greedy, ctx 2048, n_predict 64. Long = 64-token travelogue.",
+            "notes": (
+                "Library tag qwen2.5:3b, greedy, ctx 2048, n_predict 64. "
+                "Long = 64-token travelogue. Historical mean_ttft_ms null: "
+                "prompt_eval_cached_count=24, stream=False. Runner now stream=True "
+                "and records client_ttft_ms."
+            ),
             "recorded_at": "2026-09-15T17:06:46Z",
         }
     )
@@ -175,14 +209,16 @@ def seed_known() -> Path:
             "quant": "qwen2.5:32b",
             "mean_decode_tok_s": 3.178478727957889,
             "long_decode_tok_s": 2.543018637028632,
-            "mean_ttft_ms": 900.8166666666666,
+            "mean_ttft_ms": None,
             "smi_after_load_mib": 11559.0,
             "smoke_ok": True,
             "source": "docs/runs/ollama-h2-32b/",
             "notes": (
                 "Library tag qwen2.5:32b (~19 GB), greedy, ctx 2048. "
                 "Smoke mean is short EOS (8/8/4 tokens); quote long 64-token plateau for decode. "
-                "llama-server auto-fit 33/65 layers; --load-mode none --flash-attn auto."
+                "llama-server auto-fit 33/65 layers; --load-mode none --flash-attn auto. "
+                "Historical mean_ttft_ms null: prompt_eval_cached_count=24, stream=False "
+                "(server prompt_eval ~901 ms is not TokenLoop TTFT). Runner now stream=True."
             ),
             "recorded_at": "2026-09-15T17:07:55Z",
         }
@@ -197,11 +233,12 @@ def seed_known() -> Path:
             "quant": "NF4 resident",
             "mean_decode_tok_s": 29.5427,
             "long_decode_tok_s": 35.2244285325278,
+            "long_eval_tok_s": 35.78354644574253,
             "mean_ttft_ms": 93.9284,
             "smi_after_load_mib": 3444.0,
             "smoke_ok": True,
             "source": "docs/runs/deepfold-long-3b/",
-            "notes": "Isolated lab worker, graph=linears, max_seq=2048. Long ignore-EOS 64 tokens.",
+            "notes": "Isolated lab worker, graph=linears, max_seq=2048. Long ignore-EOS 64 tokens / 63 steps (decode_tok_s=35.2); eval_tok_s=35.8 is n/decode_ms.",
             "recorded_at": "2026-09-15T16:29:46Z",
         }
     )

@@ -160,6 +160,11 @@ Ada generate is a fatbinary, not a second plate.
 - OpenAI-compatible HTTP server
 - Ollama plugin or runner for existing blobs
 
+Coding-agent tools (search, patch, allowlisted argv) live in
+`deepfold chat --agent`. Session KV is still a full prefill; the rest of
+the design is [`spec/agent.md`](spec/agent.md). It is not an HTTP server
+and not an Ollama plugin.
+
 The machine of record for numbers remains one RTX 3080 12 GB. Packed
 weights stay packed in VRAM for the whole run (that residency is prior art;
 the claim is the stack). NF4 is 4.25 bits/weight. That part does not change

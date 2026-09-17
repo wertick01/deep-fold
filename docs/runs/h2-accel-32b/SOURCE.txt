@@ -15,6 +15,17 @@ Do not use it as T_1. Warm D after the matrix:
   python -m gpu.lab.h2_accel --variant baseline --max-seq 512 --max-new-tokens 64
   → 2.35 tok/s, prefill 990 ms, copies 2070, smi 12013
 
+verify-k notes originally divided block wall by requested k. The k=8 block
+was 4 tokens (last smoke reply). Recalculated 774 ms/tok (not 387).
+That row is **not** T_verify(8).
+
+Re-measure 2026-09-17 (ignore-EOS 32 tokens, width 8):
+  docs/runs/h2-gates-verify-k/
+  C:\dev\models\runs\h2-gates-verify-k-20260917
+  python -m gpu.lab.h2_gates --verify-tokens 32 --k 1,2,4,8 --max-seq 512
+  k=8 rest_mean **667 ms/block**, **113 ms/tok**, full_k=true, match=true.
+  Session T_step was 7.2 s (generate 0.48 tok/s); do not ratio against warm 425 ms.
+
 3B overflow canary (supporting, not the 32B tape):
   docs/runs/h2-accel-3b-canary/
   C:\dev\models\runs\h2-accel-3b-canary-20260915-190205

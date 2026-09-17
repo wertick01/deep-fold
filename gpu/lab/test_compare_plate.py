@@ -57,6 +57,7 @@ def gate_tokens() -> None:
         H2_STREAM_MATRICES,
         H2_STREAM_MIB,
         LLAMA_32B_LONG,
+        LLAMA_32B_NGL99,
         OLLAMA_32B_LONG,
         OLLAMA_3B_LONG,
         OLLAMA_GPU_LAYERS,
@@ -66,7 +67,8 @@ def gate_tokens() -> None:
 
     check("Ollama 32B long is 2.54", OLLAMA_32B_LONG == 2.54, str(OLLAMA_32B_LONG))
     check("H2 32B long is 2.49", H2_32B_LONG == 2.49, str(H2_32B_LONG))
-    check("llama.cpp 32B long is 1.52", LLAMA_32B_LONG == 1.52, str(LLAMA_32B_LONG))
+    check("llama.cpp 32B auto-fit is 2.54", LLAMA_32B_LONG == 2.54, str(LLAMA_32B_LONG))
+    check("llama.cpp ngl 99 freeze is 1.52", LLAMA_32B_NGL99 == 1.52, str(LLAMA_32B_NGL99))
     check("Ollama 3B long is 187.3", OLLAMA_3B_LONG == 187.3, str(OLLAMA_3B_LONG))
     check("H2 3B long is 35.2", H2_3B_LONG == 35.2, str(H2_3B_LONG))
     check("33/65 layers", (OLLAMA_GPU_LAYERS, OLLAMA_TOTAL_LAYERS) == (33, 65), "")

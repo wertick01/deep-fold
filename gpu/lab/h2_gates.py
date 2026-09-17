@@ -25,7 +25,7 @@ import torch
 from gpu.host.embedding import GROUP_SIZE, NF4_LEVELS, dequant_nf4_rows
 from gpu.host.host_image import unpack_arena
 from gpu.lab.h2_metrics import CHR_32B, MODEL_32B, dump_json, h2d_ms
-from gpu.lab.script import MESSAGES, RUNS_DIR, chat_text, stop_token_ids
+from gpu.lab.script import MESSAGES, RUNS_DIR, chat_text
 from gpu.nf4.plan import LIVE_MAX_N
 
 __all__ = [
@@ -213,7 +213,7 @@ def _pick_host_down(loop):
 
 
 def measure_tk(loop, prompt_ids: torch.Tensor, greedy: list[int], ks: list[int]) -> dict[str, Any]:
-    from gpu.loop.speculate import measure_verify, verify_block
+    from gpu.loop.speculate import measure_verify, verify_block, verify_stats
 
     out: dict[str, Any] = {"step": None, "forward_n1": None, "k": []}
     loop.reset()
@@ -272,12 +272,18 @@ def measure_tk(loop, prompt_ids: torch.Tensor, greedy: list[int], ks: list[int])
         rest = walls_ms[1:] if len(walls_ms) > 1 else walls_ms
         copies = measured.get("h2d_copies")
         nbytes = measured.get("h2d_bytes")
+        stats = verify_stats(measured)
         row = {
             "k": k,
+            "n_tokens": measured["n_tokens"],
             "n_blocks": measured["n_blocks"],
+            "block_widths": measured.get("block_widths"),
             "walls_ms": walls_ms,
             "first_ms": walls_ms[0] if walls_ms else None,
             "mean_rest_ms": _mean(rest),
+            "ms_per_token": stats["ms_per_token"],
+            "measured_width": stats["measured_width"],
+            "full_k": stats["full_k"],
             "h2d_copies": copies,
             "h2d_bytes": nbytes,
             "copies_per_block_rest": _mean([float(c) for c in copies[1:]])
@@ -288,7 +294,9 @@ def measure_tk(loop, prompt_ids: torch.Tensor, greedy: list[int], ks: list[int])
         out["k"].append(row)
         print(
             f"  k={k} first={row['first_ms']:.0f}ms rest_mean={row['mean_rest_ms']:.0f}ms "
-            f"copies/block={row['copies_per_block_rest']} match={row['greedy_match']}",
+            f"copies/block={row['copies_per_block_rest']} "
+            f"ms/tok={row['ms_per_token']:.0f} full_k={row['full_k']} "
+            f"match={row['greedy_match']}",
             flush=True,
         )
     return out
@@ -328,9 +336,8 @@ def run_live(args: argparse.Namespace, out: Path) -> dict[str, Any]:
 
     packed = chat_text(tokenizer, MESSAGES[0])
     prompt_ids = tokenizer(packed, return_tensors="pt", add_special_tokens=False).input_ids[0]
-    stop = stop_token_ids(tokenizer)
-    print("generate greedy prefix...", flush=True)
-    gen = loop.generate(prompt_ids, int(args.verify_tokens), stop=stop)
+    print("generate greedy prefix (ignore EOS so k=8 is actually width 8)...", flush=True)
+    gen = loop.generate(prompt_ids, int(args.verify_tokens), stop=())
     greedy = list(gen.tokens)
     print(
         f"greedy n={len(greedy)} prefill_ms={gen.prefill_ms:.0f} "
@@ -356,7 +363,15 @@ def run_live(args: argparse.Namespace, out: Path) -> dict[str, Any]:
         )
 
     t1 = (tk.get("step") or {}).get("mean_ms")
-    t8 = next((r.get("mean_rest_ms") for r in tk.get("k") or [] if r.get("k") == 8), None)
+    t8_row = next(
+        (
+            r
+            for r in tk.get("k") or []
+            if r.get("k") == 8 and r.get("full_k")
+        ),
+        None,
+    )
+    t8 = t8_row.get("mean_rest_ms") if t8_row else None
     ratio = (t8 / t1) if t1 and t8 else None
     cpu_ms = cpu_row.get("cpu_ms") if isinstance(cpu_row, dict) else None
     gate_spec = "blocked" if (ratio is None or ratio > 1.5) else "pass"

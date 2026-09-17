@@ -30,6 +30,7 @@ from .generate import (
     PACKERS,
     Generation,
     TokenLoop,
+    generated_tok_s,
     rms_norm_exact,
     split_concat_qkv,
     split_internlm_wqkv,
@@ -43,6 +44,7 @@ from .stop import stop_token_ids
 __all__ = [
     "TokenLoop",
     "Generation",
+    "generated_tok_s",
     "KVCache",
     "Gemm",
     "GemmGroup",

@@ -146,6 +146,8 @@ def toolbar_text(
     out,
     title: str = "",
     agent: bool = False,
+    trust: str = "",
+    todos: int = 0,
 ) -> str:
     """Bottom bar while the prompt is open. ``out`` is the last turn or None."""
     used = 0
@@ -163,7 +165,13 @@ def toolbar_text(
     label = title or leaf
     if len(label) > 28:
         label = label[:27] + "…"
-    extra = "  agent" if agent else ""
+    extra = ""
+    if agent:
+        extra = "  agent"
+        if trust:
+            extra += f" {trust}"
+        if todos:
+            extra += f" todo {todos}"
     return f" {label}  {sm}  {codec}  {rate}  seq {used}/{max_seq}{stop}{extra} "
 
 
@@ -278,7 +286,11 @@ def chat(args: Namespace) -> int:
     if (agent_on or ws_arg is not None) and not workspace.is_dir():
         _err(f"chat: --workspace {workspace} is not a directory")
         return 1
-    max_rounds = max(1, int(getattr(args, "max_tool_rounds", 8) or 8))
+    max_rounds = max(1, int(getattr(args, "max_tool_rounds", 24) or 24))
+    agent_state = agent_mod.AgentSession(
+        trust=str(getattr(args, "agent_trust", None) or "ask"),
+        web=bool(getattr(args, "agent_web", False)),
+    )
 
     code, ctx = run_mod.prepare_run(args)
     if ctx is None:
@@ -321,10 +333,25 @@ def chat(args: Namespace) -> int:
     if agent_on:
         _err(
             _dim(
-                f"agent on  workspace {workspace}  write/pytest ask first",
+                f"agent on  trust={agent_state.trust}  workspace {workspace}  "
+                "writes/tests follow --agent-trust"
+                + ("  web_search on" if agent_state.web else ""),
                 color=color,
             )
         )
+        try:
+            from .codec import load_config
+
+            cfg = load_config(model)
+        except (OSError, TypeError, ValueError):
+            cfg = {}
+        if agent_mod.looks_like_small_agent_model(cfg):
+            _err(
+                _dim(
+                    "agent: 3B-class model; tool JSON is unreliable. 14B is the plate.",
+                    color=color,
+                )
+            )
     if not bool(getattr(args, "warmup", True)):
         _err(_dim("warmup skipped: the first reply can stall; omit --no-warmup", color=color))
 
@@ -378,6 +405,8 @@ def chat(args: Namespace) -> int:
             out=last_out,
             title=current.title or leaf,
             agent=agent_on,
+            trust=agent_state.trust,
+            todos=len(agent_state.todos),
         ),
     )
 
@@ -407,7 +436,7 @@ def chat(args: Namespace) -> int:
 
     history: list[dict[str, Any]] = list(current.messages)
     if agent_on:
-        agent_mod.ensure_agent_system(history, workspace)
+        agent_mod.ensure_agent_system(history, workspace, web=agent_state.web)
     user_turns = sum(1 for m in history if m.get("role") == "user")
     if user_turns:
         _err(f"resumed {current.id}  {current.title}  {user_turns} turns")
@@ -432,10 +461,11 @@ def chat(args: Namespace) -> int:
             line += f"  (KV filled --max-seq {max_seq}; /clear or raise the flag)"
         _err(_dim(line, color=color))
 
-    def _run_turn(ids) -> tuple[object | None, list[str], bool]:
-        abort = {"on": False}
+    def _run_turn(ids, *, hide_tools: bool) -> tuple[object | None, list[str], bool]:
+        abort = {"on": False, "why": ""}
         parts: list[str] = []
-        stream = md.MarkdownStream(sys.stdout.write, color=color)
+        markdown = md.MarkdownStream(sys.stdout.write, color=color)
+        emitted = {"n": 0}
 
         def want_stop() -> bool:
             return abort["on"]
@@ -444,18 +474,32 @@ def chat(args: Namespace) -> int:
             if tid in stop_set:
                 return
             piece = tok.decode([tid], skip_special_tokens=True)
-            if piece:
-                parts.append(piece)
-                stream.feed(piece)
-                sys.stdout.flush()
-                window = "".join(parts)[-48:]
-                if window.endswith("!" * 12) or window.count("!") >= 20:
-                    abort["on"] = True
+            if not piece:
+                return
+            parts.append(piece)
+            raw = "".join(parts)
+            if hide_tools:
+                vis = agent_mod.visible_stream_text(raw)
+                if len(vis) > emitted["n"]:
+                    markdown.feed(vis[emitted["n"] :])
+                    emitted["n"] = len(vis)
+            else:
+                markdown.feed(piece)
+            sys.stdout.flush()
+            window = raw[-48:]
+            if window.endswith("!" * 12) or window.count("!") >= 20:
+                abort["on"] = True
+                abort["why"] = "junk"
+                return
+            if hide_tools and agent_mod.tool_call_closed(raw):
+                abort["on"] = True
+                abort["why"] = "tool"
 
         def on_sigint(signum, frame) -> None:
-            if abort["on"]:
+            if abort["on"] and abort["why"] == "user":
                 raise KeyboardInterrupt
             abort["on"] = True
+            abort["why"] = "user"
 
         prev = signal.getsignal(signal.SIGINT)
         signal.signal(signal.SIGINT, on_sigint)
@@ -471,11 +515,16 @@ def chat(args: Namespace) -> int:
             )
         except KeyboardInterrupt:
             interrupted = True
+            abort["why"] = "user"
         finally:
             signal.signal(signal.SIGINT, prev)
-            stream.close()
+            markdown.close()
             sys.stdout.flush()
-        if out is not None and out.interrupted:
+        if out is not None and abort["why"] == "tool":
+            out.interrupted = False
+        if out is not None and out.interrupted and abort["why"] != "tool":
+            interrupted = True
+        if abort["why"] == "user":
             interrupted = True
         return out, parts, interrupted
 
@@ -518,7 +567,7 @@ def chat(args: Namespace) -> int:
         if kind == "clear":
             history.clear()
             if agent_on:
-                agent_mod.ensure_agent_system(history, workspace)
+                agent_mod.ensure_agent_system(history, workspace, web=agent_state.web)
             loop.reset()
             last_out = None
             current.title = ""
@@ -531,7 +580,7 @@ def chat(args: Namespace) -> int:
             current = store.new_transcript(str(model))
             history = []
             if agent_on:
-                agent_mod.ensure_agent_system(history, workspace)
+                agent_mod.ensure_agent_system(history, workspace, web=agent_state.web)
             loop.reset()
             last_out = None
             _err(f"new chat {current.id}")
@@ -568,7 +617,7 @@ def chat(args: Namespace) -> int:
                 current = store.new_transcript(str(model))
                 history = []
                 if agent_on:
-                    agent_mod.ensure_agent_system(history, workspace)
+                    agent_mod.ensure_agent_system(history, workspace, web=agent_state.web)
                 loop.reset()
                 last_out = None
                 queued = str(picked[1])
@@ -578,7 +627,7 @@ def chat(args: Namespace) -> int:
                 current = store.new_transcript(str(model))
                 history = []
                 if agent_on:
-                    agent_mod.ensure_agent_system(history, workspace)
+                    agent_mod.ensure_agent_system(history, workspace, web=agent_state.web)
                 loop.reset()
                 last_out = None
                 _err(f"new chat {current.id}")
@@ -587,7 +636,7 @@ def chat(args: Namespace) -> int:
                 current = picked
                 history = list(current.messages)
                 if agent_on:
-                    agent_mod.ensure_agent_system(history, workspace)
+                    agent_mod.ensure_agent_system(history, workspace, web=agent_state.web)
                 loop.reset()
                 last_out = None
                 _err(f"resumed {current.id}  {current.title}")
@@ -638,30 +687,71 @@ def chat(args: Namespace) -> int:
             _err(f"wrote {dest}")
             continue
         if kind == "agent":
-            arg = text.split()[1].lower() if len(text.split()) > 1 else ""
+            bits = text.split()
+            arg = bits[1].lower() if len(bits) > 1 else ""
             if bool(getattr(args, "raw", False)):
                 _err("agent: cannot enable while --raw")
+                continue
+            if arg == "trust":
+                level = bits[2].lower() if len(bits) > 2 else ""
+                if level not in agent_mod.TRUST_LEVELS:
+                    _err("usage: /agent trust ask|write|workspace")
+                    continue
+                agent_state.trust = level
+                if not agent_on:
+                    _err(f"agent trust {level} (tools still off; /agent on)")
+                else:
+                    _err(f"agent trust {level}")
+                continue
+            if arg == "web":
+                flag = bits[2].lower() if len(bits) > 2 else ""
+                if flag in ("on", "1", "true"):
+                    agent_state.web = True
+                elif flag in ("off", "0", "false"):
+                    agent_state.web = False
+                else:
+                    _err("usage: /agent web on|off")
+                    continue
+                if agent_on:
+                    agent_mod.ensure_agent_system(
+                        history, workspace, web=agent_state.web
+                    )
+                    _persist()
+                _err(
+                    f"agent web_search {'on' if agent_state.web else 'off'}"
+                    + (
+                        ""
+                        if agent_on
+                        else " (tools still off; /agent on)"
+                    )
+                )
                 continue
             if arg in ("on", "1", "true"):
                 if not workspace.is_dir():
                     _err(f"agent: workspace {workspace} is not a directory")
                     continue
                 agent_on = True
-                agent_mod.ensure_agent_system(history, workspace)
+                agent_mod.ensure_agent_system(history, workspace, web=agent_state.web)
                 _persist()
-                _err(f"agent on  workspace {workspace}")
+                extra = "  web_search on" if agent_state.web else ""
+                _err(f"agent on  trust={agent_state.trust}  workspace {workspace}{extra}")
             elif arg in ("off", "0", "false"):
                 agent_on = False
                 agent_mod.drop_agent_system(history)
                 _persist()
                 _err("agent off")
             elif arg == "":
+                plan = f"  todo {len(agent_state.todos)}" if agent_state.todos else ""
+                web = "  web on" if agent_state.web else ""
                 _err(
-                    f"agent {'on' if agent_on else 'off'}  workspace {workspace}  "
-                    "/agent on|off"
+                    f"agent {'on' if agent_on else 'off'}  trust={agent_state.trust}  "
+                    f"workspace {workspace}{plan}{web}  /agent on|off|trust|web"
                 )
             else:
-                _err("usage: /agent on | /agent off")
+                _err(
+                    "usage: /agent on | /agent off | /agent trust ask|write|workspace "
+                    "| /agent web on|off"
+                )
             continue
         if kind == "unknown":
             _err(f"unknown slash {text.split()[0]!r}. /help lists commands.")
@@ -669,8 +759,10 @@ def chat(args: Namespace) -> int:
 
         history.append({"role": "user", "content": text})
         if agent_on:
-            agent_mod.ensure_agent_system(history, workspace)
-        tools = agent_mod.SCHEMAS if agent_on else None
+            agent_mod.ensure_agent_system(history, workspace, web=agent_state.web)
+        tools = (
+            agent_mod.tool_schemas(web=agent_state.web) if agent_on else None
+        )
         raw = bool(getattr(args, "raw", False))
         steps = 0
         stalled_retries = 0
@@ -686,7 +778,7 @@ def chat(args: Namespace) -> int:
                 )
                 break
             print(_dim("assistant", color=color), flush=True)
-            out, parts, interrupted = _run_turn(ids)
+            out, parts, interrupted = _run_turn(ids, hide_tools=agent_on)
             print(flush=True)
             reply = "".join(parts).strip()
             if not reply and out is not None:
@@ -704,6 +796,21 @@ def chat(args: Namespace) -> int:
                     continue
                 _err("model stalled on a tool call; send the request again")
                 break
+            if agent_on and reply and agent_mod.truncated_tool_call(reply):
+                _print_status(out)
+                if stalled_retries < 1:
+                    stalled_retries += 1
+                    history.append({"role": "assistant", "content": reply})
+                    history.append(
+                        {
+                            "role": "user",
+                            "content": "continue the tool call JSON and close </tool_call>",
+                        }
+                    )
+                    _err("model truncated a tool call; retrying")
+                    continue
+                _err("model truncated a tool call; send the request again")
+                break
             calls = (
                 agent_mod.parse_tool_calls(reply)
                 if agent_on and not interrupted
@@ -718,29 +825,33 @@ def chat(args: Namespace) -> int:
             _print_status(out)
             if interrupted or not calls:
                 break
-            for call in calls:
-                name = str(call.get("name") or "")
-                arguments = (
-                    call.get("arguments")
-                    if isinstance(call.get("arguments"), dict)
-                    else {}
-                )
+
+            def _confirm(name: str, arguments: dict[str, Any]) -> bool:
+                if not agent_mod.needs_confirm(
+                    name, arguments, trust=agent_state.trust
+                ):
+                    return True
+                diff = agent_mod.edit_preview(name, arguments, workspace)
+                if diff:
+                    _err(_dim(diff[:2000], color=color))
+                try:
+                    ans = session.prompt(
+                        f"allow {agent_mod.format_call(name, arguments)}? [y/N] "
+                    )
+                except (KeyboardInterrupt, EOFError):
+                    ans = "n"
+                ok = agent_mod.confirm_accepted(ans)
+                if not ok:
+                    _err(_dim("denied", color=color))
+                return ok
+
+            for name, arguments, clipped in agent_mod.execute_calls(
+                calls,
+                workspace,
+                session=agent_state,
+                confirm=_confirm,
+            ):
                 _err(_dim(f"tool {agent_mod.format_call(name, arguments)}", color=color))
-                allowed = True
-                if agent_mod.needs_confirm(name):
-                    try:
-                        ans = session.prompt("allow this tool? [y/N] ")
-                    except (KeyboardInterrupt, EOFError):
-                        ans = "n"
-                    allowed = agent_mod.confirm_accepted(ans)
-                    if not allowed:
-                        _err(_dim("denied", color=color))
-                result = (
-                    agent_mod.execute(name, arguments, workspace)
-                    if allowed
-                    else "denied by user"
-                )
-                clipped = agent_mod.clip_result(result)
                 history.append({"role": "tool", "name": name, "content": clipped})
                 _err(_dim(f"→ {agent_mod.preview(clipped)}", color=color))
             _persist()

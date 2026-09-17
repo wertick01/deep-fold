@@ -1,13 +1,14 @@
 schema deepfold.compare.v1
-rows 11
+rows 12
 awq-3B SKIP No AutoAWQ GPU row on this box yet.
 bitsandbytes-nf4-3B decode=22.204636335182755 long=None ttft_ms=60.45566666095207 smoke=True
-deepfold-nf4-32B-overflow decode=2.3128940562710194 long=2.488212340879585 ttft_ms=1006.0023333353456 smoke=True
-deepfold-nf4-3B-resident decode=29.5427 long=35.2244285325278 ttft_ms=93.9284 smoke=True
+deepfold-nf4-32B-overflow decode=2.3128940562710194 long=2.488212340879585 eval=2.5277077748618004 ttft_ms=1006.0023333353456 smoke=True
+deepfold-nf4-3B-resident decode=29.5427 long=35.2244285325278 eval=35.78354644574253 ttft_ms=93.9284 smoke=True
 exllamav2-exl2-3B SKIP No EXL2 dump and no CUDA exllamav2 wheel in the isolated venv (torch cu124 install failed). SKIP, not a borrowed tok/s.
 gptq-marlin-3B SKIP No Windows cu124 Marlin wheel; SKIP not a borrowed tok/s.
 llamacpp-q4-32B-Q4_K_M decode=1.5536354958047693 long=1.5240900577557557 ttft_ms=1010.0813333333332 smoke=True
+llamacpp-q4-32B-Q4_K_M-autofit decode=2.622731852031036 long=2.5418356903345325 ttft_ms=1444.1003333333335 smoke=True
 llamacpp-q4-3B-Q4_K_M decode=148.89397123579184 long=186.99466916784405 ttft_ms=17.023333333333337 smoke=True
-ollama-32B-qwen2.5-32b decode=3.178478727957889 long=2.543018637028632 ttft_ms=900.8166666666666 smoke=True
-ollama-3B-qwen2.5-3b decode=189.58064823274708 long=187.2724931821108 ttft_ms=14.163000000000002 smoke=True
+ollama-32B-qwen2.5-32b decode=3.178478727957889 long=2.543018637028632 ttft_ms=None smoke=True
+ollama-3B-qwen2.5-3b decode=189.58064823274708 long=187.2724931821108 ttft_ms=None smoke=True
 vllm-3B SKIP vLLM wheels are typically Linux CUDA; Windows SKIP.

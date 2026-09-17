@@ -2,5 +2,7 @@ schema deepfold.ollama_h2.v1
 model qwen2.5:3b
 mean_decode_tok_s 189.58064823274708
 long_decode_tok_s 187.2724931821108
-mean_ttft_ms 14.163000000000002
+mean_server_prompt_ms 14.163000000000002
+mean_ttft_ms null
+# prompt_eval_cached_count=24, stream=False; not TokenLoop TTFT
 smoke_ok True

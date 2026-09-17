@@ -1,0 +1,6 @@
+schema deepfold.ollama_hard.v1
+model internlm2.5:20b-q4km
+n_items 12
+n_correct 9
+n_scored 12
+accuracy 0.75

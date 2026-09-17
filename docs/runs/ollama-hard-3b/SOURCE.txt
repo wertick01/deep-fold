@@ -1,0 +1,6 @@
+Ollama 0.34.0 qwen2.5:3b independent hard-12 (same fixture as TokenLoop).
+7/12. Failures: money, tank, train, machines, code-loop.
+Not a 32B result and not 14B NF4 10/12.
+
+Live: C:\dev\models\runs\ollama-hard-3b-20260917
+Command: python -m gpu.lab.ollama_hard --model qwen2.5:3b

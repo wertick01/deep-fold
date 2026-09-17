@@ -111,7 +111,7 @@ A real terminal window (not a pipe):
 deepfold chat --model D:\weights\Qwen2.5-3B-Instruct
 ```
 
-Enter sends, Ctrl+J newline. Ctrl+C stops a reply. `/help` `/quit` `/clear` `/stats` `/new` `/chats` `/copy` `/save` `/agent`. Replies render markdown (bold, lists, fences) and turn `$...$` / `$$` LaTeX into Unicode. Optional: `--agent --workspace .` for workspace tools (writes and pytest ask first).
+Enter sends, Ctrl+J newline. Ctrl+C stops a reply. `/help` `/quit` `/clear` `/stats` `/new` `/chats` `/copy` `/save` `/agent`. Replies render markdown (bold, lists, fences) and turn `$...$` / `$$` LaTeX into Unicode. Optional: `--agent --workspace .` for grep/patch/pytest (writes ask first; `--agent-trust`). Session KV is still a full prefill; spec: [`spec/agent.md`](spec/agent.md).
 Chat default is 256 new tokens (not the smoke cap of 64).
 
 Scripts / pipes:

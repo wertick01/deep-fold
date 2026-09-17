@@ -88,6 +88,26 @@ LABS: tuple[LabModel, ...] = (
             "--out <models>/internlm2_5-20b.nf4.chr --codec nf4 --quiet"
         ),
     ),
+    LabModel(
+        slug="qwen25-32b",
+        notebook="",
+        title="Qwen2.5-32B-Instruct",
+        model_dir=_under_models("Qwen2.5-32B-Instruct"),
+        chr_path=_under_models("qwen25-32b.nf4.chr"),
+        bf16_fits=False,
+        nf4_fits=False,
+        nf4_driver="qwen2",
+        trust_remote_code=False,
+        note=(
+            "Packed NF4 ~16.6 GiB does not fit 12 GB resident. Product path is "
+            "H2 overflow (CopyRing), not BF16. hard-12 is NF4-only; do not pair "
+            "with a BF16 32B generate."
+        ),
+        compress_cmd=(
+            "chr compress --in <models>/Qwen2.5-32B-Instruct "
+            "--out <models>/qwen25-32b.nf4.chr --codec nf4 --quiet"
+        ),
+    ),
 )
 
 

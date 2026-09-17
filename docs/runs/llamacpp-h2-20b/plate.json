@@ -1,0 +1,163 @@
+{
+  "schema": "deepfold.llamacpp_h2.v1",
+  "plan_only": false,
+  "cmd": [
+    "C:\\dev\\models\\llama.cpp\\llama-server.exe",
+    "--model",
+    "C:\\dev\\models\\gguf\\internlm2_5-20b-chat-Q4_K_M.gguf",
+    "--ctx-size",
+    "2048",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "8765",
+    "--parallel",
+    "1",
+    "--jinja",
+    "--no-webui",
+    "--perf",
+    "-lv",
+    "1"
+  ],
+  "gguf_note": "C:\\dev\\models\\gguf\\internlm2_5-20b-chat-Q4_K_M.gguf size=11984469792 (not the bartowski Q4_K_M length 19851336576)",
+  "ctx": 2048,
+  "n_predict": 64,
+  "ngl": -1,
+  "ngl_omitted": true,
+  "parallel": 1,
+  "long_n": 64,
+  "quant": "Q4_K_M",
+  "model": "Qwen2.5-32B-Instruct",
+  "source": "bartowski/Qwen2.5-32B-Instruct-GGUF",
+  "llama_cpp": "ggml-org/llama.cpp b10964 win-cuda-12.4",
+  "smi_before_mib": 1265.0,
+  "messages": [
+    {
+      "id": 1,
+      "prompt": "Reply with one short sentence. What is the capital of France?",
+      "reply": "Paris is the capital of France.",
+      "needles": [
+        "paris",
+        "париж"
+      ],
+      "quality_ok": true,
+      "prompt_n": 23,
+      "prompt_ms": 204.055,
+      "predicted_n": 8,
+      "predicted_ms": 652.654,
+      "decode_tok_s": 10.725437980920978,
+      "wall_ms": 863.2520000001023,
+      "raw": {
+        "cache_n": 0,
+        "prompt_n": 23,
+        "prompt_ms": 204.055,
+        "prompt_per_token_ms": 8.871956521739131,
+        "prompt_per_second": 112.71470926955966,
+        "predicted_n": 8,
+        "predicted_ms": 652.654,
+        "predicted_per_token_ms": 93.23628571428571,
+        "predicted_per_second": 10.725437980920978
+      }
+    },
+    {
+      "id": 2,
+      "prompt": "And the capital of Germany?",
+      "reply": "The capital of Germany is Berlin. It is not only the political and administrative center but also a major cultural, scientific, and media hub. Berlin has a rich history and is known for its diverse architecture, vibrant arts scene, and numerous museums and galleries. The city is also famous for its historical landmarks such as the Brand",
+      "needles": [
+        "berlin",
+        "берлин"
+      ],
+      "quality_ok": true,
+      "prompt_n": 16,
+      "prompt_ms": 169.565,
+      "predicted_n": 64,
+      "predicted_ms": 5689.611,
+      "decode_tok_s": 11.072813238022775,
+      "wall_ms": 5891.192500000216,
+      "raw": {
+        "cache_n": 0,
+        "prompt_n": 16,
+        "prompt_ms": 169.565,
+        "prompt_per_token_ms": 10.5978125,
+        "prompt_per_second": 94.35909533217351,
+        "predicted_n": 64,
+        "predicted_ms": 5689.611,
+        "predicted_per_token_ms": 90.31128571428572,
+        "predicted_per_second": 11.072813238022775
+      }
+    },
+    {
+      "id": 3,
+      "prompt": "What is 17 times 19? Reply with the number only.",
+      "reply": "323",
+      "needles": [
+        "323"
+      ],
+      "quality_ok": true,
+      "prompt_n": 24,
+      "prompt_ms": 214.682,
+      "predicted_n": 2,
+      "predicted_ms": 88.23,
+      "decode_tok_s": 11.33401337413578,
+      "wall_ms": 314.25359999957436,
+      "raw": {
+        "cache_n": 0,
+        "prompt_n": 24,
+        "prompt_ms": 214.682,
+        "prompt_per_token_ms": 8.945083333333333,
+        "prompt_per_second": 111.79325700338175,
+        "predicted_n": 2,
+        "predicted_ms": 88.23,
+        "predicted_per_token_ms": 88.23,
+        "predicted_per_second": 11.33401337413578
+      }
+    }
+  ],
+  "smi_after_load_mib": 11394.0,
+  "warmup": {
+    "reply": "Hello! How can I assist you today",
+    "prompt_n": 12,
+    "prompt_ms": 203.886,
+    "predicted_n": 8,
+    "predicted_ms": 571.606,
+    "decode_tok_s": 12.246197555658968,
+    "wall_ms": 792.3825999996552,
+    "raw": {
+      "cache_n": 0,
+      "prompt_n": 12,
+      "prompt_ms": 203.886,
+      "prompt_per_token_ms": 16.9905,
+      "prompt_per_second": 58.856419763985755,
+      "predicted_n": 8,
+      "predicted_ms": 571.606,
+      "predicted_per_token_ms": 81.658,
+      "predicted_per_second": 12.246197555658968
+    }
+  },
+  "long": {
+    "prompt": "Write a long travelogue about rivers, forests, and cities. Keep going with more sentences.",
+    "reply": "Embarking on a journey that weaves through the sinuous threads of rivers, the verdant tapestries of forests, and the pulsating heartbeats of cities, I found myself captivated by the symphony of nature and civilization. The adventure began at the river's edge, where the water, a",
+    "ignore_eos": true,
+    "prompt_n": 29,
+    "prompt_ms": 239.767,
+    "predicted_n": 64,
+    "predicted_ms": 5308.177,
+    "decode_tok_s": 11.868481401430286,
+    "wall_ms": 5555.734100000336,
+    "raw": {
+      "cache_n": 0,
+      "prompt_n": 29,
+      "prompt_ms": 239.767,
+      "prompt_per_token_ms": 8.267827586206897,
+      "prompt_per_second": 120.95075635929881,
+      "predicted_n": 64,
+      "predicted_ms": 5308.177,
+      "predicted_per_token_ms": 84.25677777777777,
+      "predicted_per_second": 11.868481401430286
+    }
+  },
+  "mean_decode_tok_s": 11.044088197693178,
+  "mean_ttft_ms": 196.10066666666668,
+  "smoke_ok": true,
+  "smi_after_generate_mib": 11410.0
+}

@@ -45,7 +45,9 @@ from .hard_plate import INK, INK_SOFT, LIMIT, RULE, write_plate
 __all__ = [
     "OLLAMA_32B_LONG",
     "H2_32B_LONG",
+    "H2_32B_EVAL",
     "LLAMA_32B_LONG",
+    "LLAMA_32B_NGL99",
     "compare_plate",
     "default_png",
     "redraw",
@@ -56,7 +58,9 @@ _REPO = Path(__file__).resolve().parents[2]
 # WAVE freeze — docs/runs/compare-3080/compare.json. Long = ignore-EOS 64.
 OLLAMA_32B_LONG = 2.54
 H2_32B_LONG = 2.49
-LLAMA_32B_LONG = 1.52
+H2_32B_EVAL = 2.53
+LLAMA_32B_LONG = 2.54
+LLAMA_32B_NGL99 = 1.52
 OLLAMA_32B_SMOKE = 3.18
 H2_32B_SMOKE = 2.31
 OLLAMA_3B_LONG = 187.3
@@ -114,7 +118,7 @@ def _header(s: _Sheet, y: float) -> float:
         y + 0.42,
         "Greedy  ·  ctx 2048  ·  Qwen2.5 Instruct  ·  quote the 64-token ignore-EOS plateau on 32B\n"
         "Ollama 0.34.0 is llama-server (Q4_K_M, --flash-attn auto, --load-mode none). "
-        "H2 is NF4 CopyRing. llama.cpp b10964 used -ngl 99 (fit abort).",
+        "H2 is NF4 CopyRing. llama.cpp b10964 auto-fit matches Ollama; -ngl 99 was 1.52.",
         fs=T_SUB,
         color=INK_SOFT,
         spacing=1.28,
@@ -130,7 +134,7 @@ def _stats(s: _Sheet, y: float) -> float:
     cells = (
         (f"{OLLAMA_32B_LONG:.2f}", "Ollama 32B long, tok/s", OLLAMA, "33/65 layers on GPU; CPU suffix"),
         (f"{H2_32B_LONG:.2f}", "H2 NF4 32B long, tok/s", NF4, f"{H2_STREAM_MATRICES} matrices / {H2_STREAM_MIB} MiB H2D"),
-        (f"{LLAMA_32B_LONG:.2f}", "llama.cpp 32B long, tok/s", LLAMA, "-ngl 99 aborted auto-fit"),
+        (f"{LLAMA_32B_LONG:.2f}", "llama.cpp 32B long, tok/s", LLAMA, "ngl omitted; auto-fit (ngl 99 was 1.52)"),
     )
     for i, (value, label, color, note) in enumerate(cells):
         x = x0 + i * (w + gap)
@@ -201,14 +205,14 @@ def _bars(s: _Sheet, y: float) -> float:
     s.text(
         x1 + 0.12,
         y + 0.30,
-        "Do not quote Ollama smoke 3.18 (short EOS). llama.cpp 1.52 is -ngl 99.",
+        "Do not quote Ollama smoke 3.18 (short EOS). ngl 99 was 1.52 (fit abort).",
         fs=T_TINY,
         color=INK_SOFT,
     )
     rows_32 = (
         (OLLAMA, "Ollama", "Q4_K_M  ·  33/65 GPU + CPU suffix", OLLAMA_32B_LONG),
+        (LLAMA, "llama.cpp", "Q4_K_M  ·  ngl omitted auto-fit", LLAMA_32B_LONG),
         (NF4, "H2 NF4", "CopyRing  ·  96 HOST matrices", H2_32B_LONG),
-        (LLAMA, "llama.cpp", "Q4_K_M  ·  ngl 99 fit abort", LLAMA_32B_LONG),
     )
     for i, (color, name, cap, val) in enumerate(rows_32):
         _hbar(s, x1 + 0.12, y + 0.52 + i * 0.48, col_w - 0.20, 0.42, val, 3.0, color, name, cap)
@@ -330,7 +334,7 @@ def _footer(s: _Sheet, y: float) -> float:
         x0 + 0.12,
         y + 0.30,
         "Not a ranking of Marlin / AWQ / ExLlamaV2 / vLLM: those rows are SKIP, not borrowed tok/s.\n"
-        "32B Ollama smoke 3.18 tok/s is 8+8+4 tokens; the comparable number is long 2.54 vs H2 long 2.49 vs llama.cpp long 1.52.\n"
+        "32B Ollama smoke 3.18 tok/s is 8+8+4 tokens; quote long 2.54 vs H2 2.49 steps / 2.53 eval vs llama.cpp auto-fit 2.54 (ngl 99 was 1.52).\n"
         "The 32B tie is not a better GPU kernel. Ollama leaves 32 layers on the 5950X; we copy 6885 MiB over PCIe every token.\n"
         "3B (fully GPU) is the kernel gap: Q4_K mmvq ~187 tok/s vs NF4 TokenLoop 35.2. H2 smoke 2.31 stays the product overflow plate.\n"
         "Redraw: python -m gpu.lab.compare_plate --redraw   ·   JSON: docs/runs/compare-3080/   ·   why: docs/compare-3080.md",

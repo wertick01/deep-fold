@@ -129,7 +129,6 @@ def _install_cuda() -> int:
     for extra in (
         ["--id", "Nvidia.CUDA", "--version", "12.4.1", "--exact"],
         ["--id", "Nvidia.CUDA", "--version", "12.4", "--exact"],
-        ["--id", "Nvidia.CUDA", "--exact"],
     ):
         last = _winget_install(extra)
         from gpu.cuda_env import inject_cuda_env
@@ -194,9 +193,10 @@ def _ensure_windows_tools(*, install: bool) -> None:
         nvcc = _find_nvcc()
         if nvcc is None:
             raise KernelBuildError(
-                "nvcc still missing after CUDA Toolkit install "
-                f"(winget exit {code}). Check CUDA_HOME / CUDA_PATH, or install "
-                "CUDA 12.4 from NVIDIA (matches torch cu124)."
+                "nvcc still missing after CUDA Toolkit 12.4 install "
+                f"(winget exit {code}). This setup does not install an unpinned "
+                "Nvidia.CUDA (that can be 12.6/13.x while torch is cu124). "
+                "Install CUDA 12.4 from NVIDIA, or set CUDA_HOME / CUDA_PATH."
             )
     else:
         print(f"nvcc: {nvcc}", flush=True)

@@ -1,0 +1,10 @@
+Ollama 0.34.0 qwen2.5:3b, stream=True protocol check. Same greedy smoke +
+64-token travelogue as the matched 187.3 plate. Do not replace that number:
+this session was ~225 tok/s long after a cold warmup (load in warmup TTFT).
+
+client_ttft_ms ~31 ms on smoke, but prompt_eval_cached_count=24 so
+mean_ttft_ms stays null. Warmup Hello had cached=0 and ~40 s first chunk
+(model load), not a TokenLoop TTFT.
+
+Live: C:\dev\models\runs\ollama-h2-3b-stream-20260917
+Command: python -m gpu.lab.ollama_h2 --model qwen2.5:3b --size 3B

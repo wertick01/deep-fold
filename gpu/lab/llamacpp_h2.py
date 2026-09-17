@@ -11,7 +11,9 @@ Uses the official Windows CUDA ``llama-server`` binary, not ``llama-cpp-python``
     Default artifact: bartowski ``Qwen2.5-32B-Instruct-Q4_K_M.gguf`` (~18.5 GiB).
     Live default is one server slot (not llama-server's auto 4) plus an
     ``ignore_eos`` decode plateau so tok/s is not a 4-token EOS sample.
-    Product default generate is unchanged.
+    Product default generate is unchanged. ``--ngl`` default is ``-1`` (omit
+    ``--n-gpu-layers``, llama-server auto-fit). ``--ngl 99`` reproduces the
+    old fill-card launch that aborted auto-fit (32B long **1.52**).
 """
 
 from __future__ import annotations
@@ -53,7 +55,7 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--out", default="")
     p.add_argument("--ctx", type=int, default=2048, help="match H2 32B smoke max_seq")
     p.add_argument("--n-predict", type=int, default=64)
-    p.add_argument("--ngl", type=int, default=99, help="GPU layers; 99 = fill the card")
+    p.add_argument("--ngl", type=int, default=-1, help="-1 omit --n-gpu-layers (auto-fit); 99 = old fill-card launch")
     p.add_argument("--parallel", type=int, default=1, help="llama-server slots; 1 = one KV")
     p.add_argument("--long-n", type=int, default=64, help="ignore_eos plateau tokens; 0 disables")
     p.add_argument("--port", type=int, default=8765)
@@ -109,6 +111,27 @@ def _out_dir(explicit: str) -> Path:
     return dest
 
 
+def _size_and_model(gguf_name: str) -> tuple[str, str]:
+    """Label from the filename. Check 32B before 3B: '32B' contains '3B'."""
+    name = gguf_name.upper().replace("_", "-")
+    if "32B" in name:
+        return "32B", "Qwen2.5-32B-Instruct"
+    if "20B" in name:
+        return "20B", "internlm2_5-20b-chat"
+    if "3B" in name:
+        return "3B", "Qwen2.5-3B-Instruct"
+    return "unknown", Path(gguf_name).stem
+
+
+def _compare_id(size: str, ngl: int) -> str:
+    """Keep the ngl-99 row id stable; auto-fit is a separate compare.json line."""
+    if int(ngl) < 0:
+        return f"llamacpp-q4-{size}-Q4_K_M-autofit"
+    if int(ngl) == 99:
+        return f"llamacpp-q4-{size}-Q4_K_M"
+    return f"llamacpp-q4-{size}-Q4_K_M-ngl{int(ngl)}"
+
+
 def _plan(args: argparse.Namespace) -> dict[str, Any]:
     gguf = Path(args.gguf)
     server = Path(args.server)
@@ -124,6 +147,7 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
         "ctx": int(args.ctx),
         "n_predict": int(args.n_predict),
         "ngl": int(args.ngl),
+        "ngl_omitted": int(args.ngl) < 0,
         "parallel": int(args.parallel),
         "long_n": int(args.long_n),
         "bench": bool(args.bench),
@@ -146,6 +170,40 @@ def _http_json(url: str, payload: dict[str, Any] | None = None, timeout: float =
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         raw = resp.read().decode("utf-8")
     return json.loads(raw) if raw else {}
+
+
+def _server_cmd(
+    server: str | Path,
+    gguf: str | Path,
+    *,
+    ctx: int,
+    ngl: int,
+    host: str,
+    port: int,
+    parallel: int,
+) -> list[str]:
+    """llama-server argv. Negative ``ngl`` omits ``--n-gpu-layers`` (Ollama-style auto-fit)."""
+    cmd = [
+        str(server),
+        "--model",
+        str(gguf),
+        "--ctx-size",
+        str(int(ctx)),
+        "--host",
+        str(host),
+        "--port",
+        str(int(port)),
+        "--parallel",
+        str(int(parallel)),
+        "--jinja",
+        "--no-webui",
+        "--perf",
+        "-lv",
+        "1",
+    ]
+    if int(ngl) >= 0:
+        cmd.extend(["--n-gpu-layers", str(int(ngl))])
+    return cmd
 
 
 def _wait_health(base: str, timeout_s: int) -> None:
@@ -231,26 +289,15 @@ def run_live(args: argparse.Namespace, dest: Path) -> dict[str, Any]:
         raise FileNotFoundError(note)
 
     base = f"http://{args.host}:{int(args.port)}"
-    cmd = [
-        str(server),
-        "--model",
-        str(gguf),
-        "--ctx-size",
-        str(int(args.ctx)),
-        "--n-gpu-layers",
-        str(int(args.ngl)),
-        "--host",
-        str(args.host),
-        "--port",
-        str(int(args.port)),
-        "--parallel",
-        str(int(args.parallel)),
-        "--jinja",
-        "--no-webui",
-        "--perf",
-        "-lv",
-        "1",
-    ]
+    cmd = _server_cmd(
+        server,
+        gguf,
+        ctx=int(args.ctx),
+        ngl=int(args.ngl),
+        host=str(args.host),
+        port=int(args.port),
+        parallel=int(args.parallel),
+    )
     log_path = dest / "server.log"
     print("spawn:", " ".join(cmd), flush=True)
     log_f = log_path.open("w", encoding="utf-8")
@@ -269,6 +316,7 @@ def run_live(args: argparse.Namespace, dest: Path) -> dict[str, Any]:
         "ctx": int(args.ctx),
         "n_predict": int(args.n_predict),
         "ngl": int(args.ngl),
+        "ngl_omitted": int(args.ngl) < 0,
         "parallel": int(args.parallel),
         "long_n": int(args.long_n),
         "quant": "Q4_K_M",
@@ -363,18 +411,22 @@ def run_bench(args: argparse.Namespace, dest: Path) -> dict[str, Any]:
         str(bench),
         "-m",
         str(Path(args.gguf)),
-        "-ngl",
-        str(int(args.ngl)),
-        "-p",
-        "512",
-        "-n",
-        str(int(args.n_predict)),
-        "-r",
-        str(int(args.bench_reps)),
-        "-o",
-        "json",
-        "--progress",
     ]
+    if int(args.ngl) >= 0:
+        cmd.extend(["-ngl", str(int(args.ngl))])
+    cmd.extend(
+        [
+            "-p",
+            "512",
+            "-n",
+            str(int(args.n_predict)),
+            "-r",
+            str(int(args.bench_reps)),
+            "-o",
+            "json",
+            "--progress",
+        ]
+    )
     print("bench:", " ".join(cmd), flush=True)
     proc = subprocess.run(
         cmd,
@@ -437,12 +489,16 @@ def main(argv: list[str] | None = None) -> int:
         if args.bench:
             plate["bench"] = run_bench(args, dest)
         gguf_name = Path(args.gguf).name
-        size = "3B" if "3B" in gguf_name else "32B" if "32B" in gguf_name else "unknown"
-        model = "Qwen2.5-3B-Instruct" if size == "3B" else "Qwen2.5-32B-Instruct"
+        size, model = _size_and_model(gguf_name)
         bench = plate.get("bench") or {}
+        ngl_note = (
+            "ngl omitted (llama-server auto-fit)"
+            if int(args.ngl) < 0
+            else f"ngl {int(args.ngl)}"
+        )
         upsert(
             {
-                "id": f"llamacpp-q4-{size}-Q4_K_M",
+                "id": _compare_id(size, int(args.ngl)),
                 "stack": "llamacpp-q4",
                 "engine": "llama.cpp b10964 llama-server CUDA 12.4",
                 "model": model,
@@ -456,6 +512,7 @@ def main(argv: list[str] | None = None) -> int:
                 "bench_pp512_tok_s": bench.get("pp512_tok_s"),
                 "bench_tg_tok_s": bench.get("tg_tok_s"),
                 "source": str(dest),
+                "notes": ngl_note,
             }
         )
     (dest / "plate.json").write_text(

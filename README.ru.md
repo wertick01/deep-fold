@@ -407,10 +407,15 @@ H2 **2,49** шагов / **2,53** сгенерированных токенов;
 *Рисунок. Decode V2 GEMV + префилл MMA-32. V2 (`max_seq=2048`): 3B **197**, 14B **57,5**, 20B **40**.
 Exclusive Q4_K long (ctx 2048): 14B llama.cpp **69,9** / Ollama **58,9**; 20B Ollama **11,53** / llama.cpp **11,87**.
 V2 смотрит на весь буфер. Пересекающийся 14B 5,95 и 20B 25,6 / 20,7 — не decode.
-Hard-12: 3B **8/12**, 14B **11/12**, 20B **9/12** (35,2 ток/с, не 40).
+Hard-12: 3B V2 **8/12 · 190,9** / Ollama **7/12 · 197,2**; 14B V2 **11/12 · 54,8**; 20B оба **9/12**, V2 **35,2** / Ollama **13,2**.
 **Скоро будет выполнено:** Ollama 14B hard-12, llama.cpp hard-12, Nsight 70–85%.
 **Дорабатываются:** TTY / агентный layout.
 Перерисовать: `python -m gpu.lab.decodev2_plate --redraw`.*
+
+![Hard-12 Decode V2 против Ollama: правильность и средние ток/с](docs/img/hard-v2-ollama.png)
+
+*Рисунок. Та же 12-пунктовая фикстура. 3B V2 **190,9** не быстрее Ollama **197,2**. 14B Ollama и llama.cpp hard-12 — **скоро будет выполнено**.
+Перерисовать: `python -m gpu.lab.hard_v2_plate --redraw`.*
 
 <table>
 <thead>
@@ -768,6 +773,7 @@ python -m gpu.lab.h2_trace --no-timing
 | Пластина overflow 32B | [docs/img/h2-qwen25-32b.png](docs/img/h2-qwen25-32b.png) |
 | Сопоставленный decode Ollama / H2 / llama.cpp / Decode V2 | [docs/img/compare-3080.png](docs/img/compare-3080.png) |
 | Decode V2 3B/14B/20B | [docs/img/decodev2-3080.png](docs/img/decodev2-3080.png) |
+| Hard-12 Decode V2 vs Ollama | [docs/img/hard-v2-ollama.png](docs/img/hard-v2-ollama.png) |
 | Exclusive Q4_K long 14B (Ollama 58,9 / llama.cpp 69,9) | [docs/runs/ollama-h2-14b/](docs/runs/ollama-h2-14b/), [docs/runs/llamacpp-h2-14b/](docs/runs/llamacpp-h2-14b/) |
 | Контракт Decode V2 (цели, non-goals) | [docs/decode-v2.md](docs/decode-v2.md) |
 | Методика лаборатории и чтение картинки | [docs/lab.md](docs/lab.md) |

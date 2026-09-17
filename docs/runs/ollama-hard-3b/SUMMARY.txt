@@ -4,3 +4,5 @@ n_items 12
 n_correct 7
 n_scored 12
 accuracy 0.5833333333333334
+mean_decode_tok_s 197.2
+median_decode_tok_s 184.5

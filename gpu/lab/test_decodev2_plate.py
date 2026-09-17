@@ -59,6 +59,8 @@ def gate_tokens() -> None:
         OLLAMA_14B_LONG,
         OLLAMA_20B_LONG,
         OLLAMA_3B,
+        OLLAMA_3B_HARD_TOK,
+        OLLAMA_20B_HARD_TOK,
         TL_14B,
         TL_20B,
         TL_20B_LONG,
@@ -92,7 +94,8 @@ def gate_tokens() -> None:
     check("14B V2 is not faster than exclusive llama.cpp", V2_14B_HOST < LLAMA_14B_LONG, "")
     check("20B second-pass 25.6 is labeled, not the bar", V2_20B_DEVICE_SECOND == 25.6, "")
     check("does not treat 25.6 as faster than 40", V2_20B_DEVICE_SECOND < V2_20B_HOST, "")
-    check("Coming soon label is frozen", COMING_SOON == "Coming soon", COMING_SOON)
+    check("Ollama 3B hard tok/s is 197.2", OLLAMA_3B_HARD_TOK == 197.2, str(OLLAMA_3B_HARD_TOK))
+    check("Ollama 20B hard tok/s is 13.2", OLLAMA_20B_HARD_TOK == 13.2, str(OLLAMA_20B_HARD_TOK))
 
 
 def gate_honesty() -> None:
@@ -122,6 +125,7 @@ def gate_honesty() -> None:
     check("hard-12 3B is 8/12", "8/12" in text, "")
     check("hard-12 14B is 11/12", "11/12" in text, "")
     check("hard-12 20B is 9/12", "9/12" in text, "")
+    check("quotes Ollama hard 197.2 and 13.2", "197.2" in text and "13.2" in text, "")
     check("20B hard mean is 35.2", "35.2" in text, "")
     check("Ollama 14B hard is Coming soon", "Coming soon" in text and "Ollama 14B hard-12" in text, "")
     check("llama.cpp hard-12 is Coming soon", "llama.cpp hard-12" in text and "Coming soon" in text, "")

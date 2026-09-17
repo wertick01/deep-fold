@@ -11,10 +11,12 @@ Greedy ids match TokenLoop on sequential N=1. Ignore-EOS 64 at `max_seq=2048`
 resident NF4 (3B/14B/20B); overflow 32B stays TokenLoop. 14B **57.5 / 58.1** vs
 exclusive Q4_K long Ollama **58.9** / llama.cpp **69.9**. 20B exclusive **40**
 host vs Q4_K **11.53 / 11.87** (do not quote 25.6 or 20.7). Do not say faster
-than Ollama. Overlapping Ollama 14B 5.95 is not a number. Hard-12: 3B **8/12**
-@ **191** tok/s, 14B **11/12** @ **54.8**, 20B **9/12** @ **35.2** (not the 40
-plateau). **Coming soon:** Ollama 14B hard-12, llama.cpp hard-12, 3B Nsight
-70–85%. Figure: [`docs/img/decodev2-3080.png`](img/decodev2-3080.png).
+than Ollama. Overlapping Ollama 14B 5.95 is not a number. Hard-12: 3B V2
+**8/12** @ **190.9** vs Ollama **7/12** @ **197.2**; 14B V2 **11/12** @ **54.8**
+(Ollama Coming soon); 20B both **9/12**, V2 **35.2** vs Ollama **13.2** (not the
+40 plateau). **Coming soon:** Ollama 14B hard-12, llama.cpp hard-12, 3B Nsight
+70–85%. Figures: [`decodev2-3080.png`](img/decodev2-3080.png),
+[`hard-v2-ollama.png`](img/hard-v2-ollama.png).
 
 The ~50 GB/s GEMV wall was a `__constant__` NF4 LUT: every lane hits a
 different nibble, so constant memory serializes. The live kernel copies the

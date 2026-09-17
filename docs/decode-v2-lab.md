@@ -337,15 +337,15 @@ Independent turns, `max_new=256`, `max_seq=2048`, same fixture as
 
 | Model | Decode V2 | Ollama Q4_K | llama.cpp |
 |---|---|---|---|
-| 3B | **8/12** · **190.9** tok/s · TTFT **175** ms | **7/12** | Coming soon |
+| 3B | **8/12** · **190.9** tok/s · TTFT **175** ms | **7/12** · **197.2** tok/s | Coming soon |
 | 14B | **11/12** · **54.8** tok/s · TTFT **693** ms | Coming soon | Coming soon |
-| 20B | **9/12** · **35.2** tok/s | **9/12** | Coming soon |
+| 20B | **9/12** · **35.2** tok/s | **9/12** · **13.2** tok/s | Coming soon |
 
-20B hard-12 dropped harness `nvidia-smi` polling (`--interval 0`) and the HF
-tree after `from_model`. Item 1 TTFT is still ~5 min WDDM. Mean **35.2** is
-not ignore-EOS **40**. Evidence: [`docs/runs/hard-decodev2-3b/`](runs/hard-decodev2-3b/),
+Ollama tok/s is the mean of 12 `decode_tok_s` in `plate.json` (3B median **184.5**, 20B median **11.6**). 20B V2 **35.2** is not ignore-EOS **40**. Table: [`docs/img/hard-v2-ollama.png`](img/hard-v2-ollama.png). Evidence: [`docs/runs/hard-decodev2-3b/`](runs/hard-decodev2-3b/),
 [`docs/runs/hard-decodev2-14b/`](runs/hard-decodev2-14b/),
-[`docs/runs/hard-decodev2-20b/`](runs/hard-decodev2-20b/).
+[`docs/runs/hard-decodev2-20b/`](runs/hard-decodev2-20b/),
+[`docs/runs/ollama-hard-3b/`](runs/ollama-hard-3b/),
+[`docs/runs/ollama-hard-20b/`](runs/ollama-hard-20b/).
 
 ### Coming soon
 

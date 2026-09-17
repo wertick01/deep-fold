@@ -1,5 +1,6 @@
 Ollama 0.34.0 qwen2.5:3b independent hard-12 (same fixture as TokenLoop).
-7/12. Failures: money, tank, train, machines, code-loop.
+7/12. Mean decode 197.2 tok/s (median 184.5). logic-yesno is 2 tokens at 330
+and pulls the mean up. Failures: money, tank, train, machines, code-loop.
 Not a 32B result and not 14B NF4 10/12.
 
 Live: C:\dev\models\runs\ollama-hard-3b-20260917

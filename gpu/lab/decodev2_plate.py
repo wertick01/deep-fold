@@ -46,6 +46,8 @@ __all__ = [
     "LLAMA_14B_LONG",
     "OLLAMA_20B_LONG",
     "LLAMA_20B_LONG",
+    "OLLAMA_3B_HARD_TOK",
+    "OLLAMA_20B_HARD_TOK",
     "COMING_SOON",
     "decodev2_plate",
     "default_png",
@@ -96,8 +98,25 @@ V2_14B_HARD = "11/12"
 V2_14B_HARD_TOK = 54.8
 V2_20B_HARD = "9/12"
 V2_20B_HARD_TOK = 35.2
+# Ollama hard-12 mean decode_tok_s over the same 12 items (plate.json).
+# 3B mean 197.2 vs median 184.5 (logic-yesno is 2 tokens at 330).
 OLLAMA_3B_HARD = "7/12"
+OLLAMA_3B_HARD_TOK = 197.2
+OLLAMA_3B_HARD_MEDIAN = 184.5
 OLLAMA_20B_HARD = "9/12"
+OLLAMA_20B_HARD_TOK = 13.2
+OLLAMA_20B_HARD_MEDIAN = 11.6
+OLLAMA_32B_HARD = "11/12"
+OLLAMA_32B_HARD_TOK = 3.1
+# TokenLoop MMA hard-12 (old resident path / 32B CopyRing). Not Decode V2.
+TL_3B_HARD = "8/12"
+TL_3B_HARD_TOK = 16.9
+TL_14B_HARD = "10/12"
+TL_14B_HARD_TOK = 6.59
+TL_20B_HARD = "8/12"
+TL_20B_HARD_TOK = 4.4
+TL_32B_HARD = "12/12"
+TL_32B_HARD_TOK = 2.12
 
 COMING_SOON = "Coming soon"
 
@@ -129,7 +148,7 @@ def _fig_h() -> float:
         + 0.10
         + 1.72
         + 0.10
-        + 1.78
+        + 1.95
         + _M_BOTTOM
     )
 
@@ -236,7 +255,7 @@ def _hard(s: _Sheet, y: float) -> float:
         (
             "3B",
             f"Decode V2  {V2_3B_HARD}  ·  {V2_3B_HARD_TOK:.1f} tok/s",
-            f"Ollama     {OLLAMA_3B_HARD}",
+            f"Ollama     {OLLAMA_3B_HARD}  ·  {OLLAMA_3B_HARD_TOK:.1f} tok/s",
             f"llama.cpp  {COMING_SOON}",
         ),
         (
@@ -248,7 +267,7 @@ def _hard(s: _Sheet, y: float) -> float:
         (
             "20B",
             f"Decode V2  {V2_20B_HARD}  ·  {V2_20B_HARD_TOK:.1f} tok/s",
-            f"Ollama     {OLLAMA_20B_HARD}",
+            f"Ollama     {OLLAMA_20B_HARD}  ·  {OLLAMA_20B_HARD_TOK:.1f} tok/s",
             f"llama.cpp  {COMING_SOON}",
         ),
     )
@@ -295,7 +314,7 @@ def _prefill(s: _Sheet, y: float) -> float:
 def _footer(s: _Sheet, y: float) -> float:
     x0 = _M_LEFT
     w = FIG_W - _M_LEFT - _M_RIGHT
-    h = 1.78
+    h = 1.95
     s.rect(x0, y, w, h, fc=BAND, ec=RULE, lw=0.6)
     s.text(x0 + 0.12, y + 0.08, "Honesty  ·  this sheet", fs=T_CLAIM, weight="bold")
     s.text(
@@ -304,6 +323,7 @@ def _footer(s: _Sheet, y: float) -> float:
         "Ignore-EOS 64, V2 max_seq=2048 vs Q4_K ctx 2048. V2 still attends the full buffer; Q4_K attends live length.\n"
         f"3B {V2_3B_HOST:.0f} vs Q4_K ~187 is the same capacity class. 14B: llama.cpp 69.9 / Ollama 58.9 / V2 57.5. Overlapping 5.95 is not a number.\n"
         f"20B Q4_K: Ollama 11.53 / llama.cpp 11.87. Ignore-EOS host {V2_20B_HOST:.1f} (not 25.6 / 20.7). Hard-12 20B mean 35.2 is 12×256 at the VRAM cap, not the 41/40 plateau.\n"
+        f"Hard-12 Ollama tok/s is the same 12-item mean: 3B {OLLAMA_3B_HARD_TOK:.1f} (median {OLLAMA_3B_HARD_MEDIAN:.1f}) / 20B {OLLAMA_20B_HARD_TOK:.1f}. Table: docs/img/hard-v2-ollama.png.\n"
         f"2026-09-17 max_seq=512 was {V2_3B_HOST_512:.0f} / {V2_14B_HOST_512:.1f} / {V2_20B_HOST_512:.1f}. 32B stays CopyRing 2.49 / 2.53 vs Ollama 2.54.\n"
         f"{COMING_SOON}: Ollama 14B hard-12, llama.cpp hard-12, 3B Nsight 70–85%. CLI TTY / agent chrome: in progress.\n"
         "Overlapping 20B jobs (7–10 tok/s) are WDDM paging. CLI: --executor auto. Redraw: python -m gpu.lab.decodev2_plate --redraw",

@@ -242,7 +242,7 @@ this Windows box, not an isolated kernel bake-off.
 
 **20B.** BF16 load was recorded. Generation failed: the model’s remote generate code did not match the installed Transformers. No BF16 tokens/s. That is an environment miss, not proof a BF16 baseline is impossible. TokenLoop NF4: **5.01 tok/s**, **605 ms**. Decode V2 exclusive ignore-EOS: **40 tok/s** host, **220 ms** prefill (`max_seq=2048`). Do not quote the 25.6 / 20.7 device-windows (second 64-token pass at VRAM cap) or overlapping 20B jobs. Hard-12 on the same weights is **9/12** at **35.2 tok/s**, not the 40 plateau.
 
-**32B overflow.** All three smoke replies passed. Serial copy of the host tail calibrates at about **277 ms/token** (~**3.6 tokens/s** if the wall were copy-only). Measured generation is about **432 ms/token**. The copy figure is a transfer reference, not model throughput. No BF16 32B baseline. TokenLoop 32B NF4 hard-12 is **12/12** (mean **2.12 tok/s**). Ollama 32B on the same fixture is **11/12** (miss `gsm8k-stickers`); Ollama 3B is **7/12**.
+**32B overflow.** All three smoke replies passed. Serial copy of the host tail calibrates at about **277 ms/token** (~**3.6 tokens/s** if the wall were copy-only). Measured generation is about **432 ms/token**. The copy figure is a transfer reference, not model throughput. No BF16 32B baseline. TokenLoop 32B NF4 hard-12 is **12/12** (mean **2.12 tok/s**). Ollama 32B on the same fixture is **11/12** (mean **3.1 tok/s**, miss `gsm8k-stickers`); Ollama 3B is **7/12** at **197.2** tok/s.
 
 H2 long decode is 63 steps after the first token (**2.49**); `eval_tok_s`
 counts all 64 generated tokens on the same wall (**2.53**). Ollama
@@ -255,7 +255,7 @@ timer. Not enough to rank them.
 
 ![Decode V2 resident 3B/14B/20B on one RTX 3080](docs/img/decodev2-3080.png)
 
-*Figure 4. Decode V2 GEMV graph + MMA prefill-32. Headline V2 (`max_seq=2048`): 3B **197**, 14B **57.5**, 20B **40**. Exclusive Q4_K long (ctx 2048): 14B llama.cpp **69.9** / Ollama **58.9**; 20B Ollama **11.53** / llama.cpp **11.87**. V2 still attends the full axis. Overlapping 14B 5.95 and 20B 25.6 / 20.7 are not decode. Hard-12 is the second panel. Redraw: `python -m gpu.lab.decodev2_plate --redraw`.*
+*Figure 4. Decode V2 GEMV graph + MMA prefill-32. Headline V2 (`max_seq=2048`): 3B **197**, 14B **57.5**, 20B **40**. Exclusive Q4_K long (ctx 2048): 14B llama.cpp **69.9** / Ollama **58.9**; 20B Ollama **11.53** / llama.cpp **11.87**. V2 still attends the full axis. Overlapping 14B 5.95 and 20B 25.6 / 20.7 are not decode. Hard-12 panel now includes Ollama 3B **197.2** / 20B **13.2** tok/s. Redraw: `python -m gpu.lab.decodev2_plate --redraw`.*
 
 ### 3.3 Decode V2 (2026-09-18, `max_seq=2048`)
 
@@ -273,11 +273,15 @@ Hard-12 (independent turns, 256 new tokens, same fixture as Ollama):
 
 | Model | Decode V2 | Ollama Q4_K | llama.cpp Q4_K |
 |---|---|---|---|
-| Qwen2.5-3B | **8/12** · **190.9** tok/s | **7/12** | Coming soon |
+| Qwen2.5-3B | **8/12** · **190.9** tok/s | **7/12** · **197.2** tok/s | Coming soon |
 | Qwen2.5-14B | **11/12** · **54.8** tok/s | Coming soon | Coming soon |
-| InternLM2.5-20B | **9/12** · **35.2** tok/s | **9/12** | Coming soon |
+| InternLM2.5-20B | **9/12** · **35.2** tok/s | **9/12** · **13.2** tok/s | Coming soon |
 
-20B hard-12 **35.2** is not the ignore-EOS **40**. Evidence: [3B](docs/runs/hard-decodev2-3b/), [14B](docs/runs/hard-decodev2-14b/), [20B](docs/runs/hard-decodev2-20b/), [Ollama 3B](docs/runs/ollama-hard-3b/), [Ollama 20B](docs/runs/ollama-hard-20b/).
+Ollama tok/s is the mean of the 12 `decode_tok_s` already in `plate.json`. 3B mean **197.2** vs median **184.5** (`logic-yesno` is 2 tokens). 20B hard-12 **35.2** is not the ignore-EOS **40**. Evidence: [3B](docs/runs/hard-decodev2-3b/), [14B](docs/runs/hard-decodev2-14b/), [20B](docs/runs/hard-decodev2-20b/), [Ollama 3B](docs/runs/ollama-hard-3b/), [Ollama 20B](docs/runs/ollama-hard-20b/). Table: [`docs/img/hard-v2-ollama.png`](docs/img/hard-v2-ollama.png).
+
+![Hard-12 Decode V2 vs Ollama: correct answers and mean tok/s](docs/img/hard-v2-ollama.png)
+
+*Figure 5. Same 12-item fixture. Decode V2 vs Ollama quality and mean decode tok/s. 14B Ollama and llama.cpp hard-12 are Coming soon. 3B V2 **190.9** is not faster than Ollama **197.2**. Redraw: `python -m gpu.lab.hard_v2_plate --redraw`.*
 
 **Coming soon:** Ollama 14B hard-12; llama.cpp hard-12 (3B / 14B / 20B); 3B Nsight CUDA 70–85%. **In progress:** CLI TTY chrome / agent layout.
 
@@ -519,7 +523,7 @@ Kernel checks: [`gpu/nf4/verify.py`](gpu/nf4/verify.py), [`gpu/nf4/numerics.py`]
 | Quality checks | [Hard-12](docs/eval-hard-qwen25.md), [local evaluation](docs/eval-local.md) |
 | Kernel profiling | [Nsight records](docs/runs/ncu/) |
 | 32B vs Ollama / llama.cpp Q4_K_M (same 3080) | [32B evaluation](docs/eval-32b.md), [compare sheet](docs/compare-3080.md) |
-| Decode V2 (resident GEMV; CLI `--executor auto`) | [Lab log](docs/decode-v2-lab.md), [contract](docs/decode-v2.md), [figure](docs/img/decodev2-3080.png) |
+| Decode V2 (resident GEMV; CLI `--executor auto`) | [Lab log](docs/decode-v2-lab.md), [contract](docs/decode-v2.md), [figure](docs/img/decodev2-3080.png), [hard-12 vs Ollama](docs/img/hard-v2-ollama.png) |
 | Other competitor stacks (AWQ / Marlin / ExLlama / vLLM still SKIP) | [Competitor environments](docs/competitor-venvs.md) |
 
 Useful PRs: complete run artifacts, Windows/Linux install tests, stronger checkpoint identity, broader quality eval, matched 4-bit engine comparisons. Perf changes should come with both numerical checks and generate-path timings.

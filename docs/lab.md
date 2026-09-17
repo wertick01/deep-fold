@@ -35,10 +35,14 @@ not a win.
 
 Decode tok/s is a different stack on each side (HuggingFace `generate` + dense
 GEMM vs our fused NF4 loop). Report both. Do not rank them as a kernel
-benchmark. Matched Ollama / llama.cpp / H2 numbers live in
-[`compare-3080.md`](compare-3080.md): the left column is the engine, with
-launches (`-ngl 99` vs auto-fit) and TokenLoop counters (63 steps vs 64
-generated tokens) grouped under it.
+benchmark. The committed CSVs below are **TokenLoop MMA**. Resident CLI decode
+is Decode V2 (`--executor auto`): 3B **197**, 14B **57.5**, 20B **40** at
+`max_seq=2048` — [`decode-v2-lab.md`](decode-v2-lab.md),
+[`img/decodev2-3080.png`](img/decodev2-3080.png). Matched Ollama / llama.cpp /
+H2 numbers live in [`compare-3080.md`](compare-3080.md): the left column is
+the engine, with launches (`-ngl 99` vs auto-fit) and TokenLoop counters
+(63 steps vs 64 generated tokens) grouped under it. 3B Q4_K ~187 is ctx 2048;
+V2 still attends the full buffer. Do not merge that timer with Decode V2 197.
 
 ## Method
 
@@ -217,8 +221,12 @@ English headers, comma, UTF-8. One directory per lab:
   small `M` was the old 3B decode floor (16 / 2 CTAs vs 70 SMs); that launch
   is landed as a 64-row tile plus split-K. Prefill (TTFT) is the next 3B floor.
   On 20B BF16 generate failed; those tok/s cells stay blank.
-- TTFT is prefill. BF16 uses the HF prefill; NF4 uses `N≤16` chunks.
+- TTFT is prefill. BF16 uses the HF prefill; NF4 TokenLoop uses `N≤16` chunks
+  in the committed CSVs. Decode V2 prefill is MMA chunks of 32 (3B **127 ms**
+  vs same-process TokenLoop 86 ms).
 - Display VRAM is inside `nvidia-smi`. It is real. Do not subtract it away.
+- Decode V2 20B **25.6** is a second 64-token pass at VRAM cap, not decode.
+  Overlapping 20B jobs are WDDM paging.
 
 Notebooks `01_bf16_gpu_baseline.ipynb` and `02_nf4_gpu_driver.ipynb` are
 archives (rotated SVG labels, two separate stories). Use `03_codec_lab.ipynb`.
@@ -263,6 +271,12 @@ live run. Do not commit model weights or `.chr` files.
 
 Tests (fixture only, never loads the 3B): `python -m gpu.lab.test_lab`.
 Hard-eval scoring (no GPU): `python -m gpu.lab.test_hard`. See [`eval.md`](eval.md).
+Matched-engine and Decode V2 sheets (matplotlib, no GPU):
+
+```powershell
+python -m gpu.lab.compare_plate --redraw
+python -m gpu.lab.decodev2_plate --redraw
+```
 
 Notebook 05 (internlm2.5-20B) needs `einops` and **`sentencepiece==0.1.99`** in
 `torch-gpu` (`0.2.2` rejects InternLM's `<0x00>` pieces). Transformers 5 always

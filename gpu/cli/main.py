@@ -34,7 +34,7 @@ def _add_runtime_flags(
     *,
     with_prompt: bool,
     max_new_tokens: int = 64,
-    max_seq: int = 512,
+    max_seq: int | None = 512,
 ) -> None:
     p.add_argument("--model", help="HuggingFace directory (or $DEEPFOLD_MODEL)")
     p.add_argument("--chr", help="packed weights (or $DEEPFOLD_CHR, or a sibling)")
@@ -57,7 +57,11 @@ def _add_runtime_flags(
         "--max-seq",
         type=int,
         default=max_seq,
-        help=f"preallocated KV length (default: {max_seq})",
+        help=(
+            f"preallocated KV length (default: {max_seq})"
+            if max_seq is not None
+            else "preallocated KV length (default: 2048; 4096 with --agent on 12 GB)"
+        ),
     )
     p.add_argument(
         "--max-resident-mib",
@@ -91,6 +95,16 @@ def _add_runtime_flags(
         "--residency",
         default="D",
         help="overflow residency policy (default D)",
+    )
+    p.add_argument(
+        "--executor",
+        choices=("auto", "tokenloop", "decodev2"),
+        default="auto",
+        help=(
+            "decode engine. auto (default): Decode V2 on resident NF4 "
+            "(3B/14B/20B), TokenLoop on overflow/VQ. tokenloop: MMA, CopyRing "
+            "on 32B. decodev2: refuse unless resident NF4"
+        ),
     )
 
 
@@ -171,13 +185,14 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Same load path as run, then a prompt_toolkit session. "
             "Enter sends, Ctrl+J newline, Ctrl+C stops a reply. "
-            "Each turn prefills the whole chat from saved JSON. "
-            "--agent adds workspace tools (grep/patch/pytest/allowlisted argv); "
-            "writes and tests ask first unless --agent-trust. "
+            "Later turns prefill only the new suffix when the template prefix "
+            "matches. --agent adds workspace tools and web_search (free Tavily) "
+            "unless --no-agent-web. Persist with /agent default or DEEPFOLD_AGENT. "
+            "Writes and tests ask first unless --agent-trust. "
             "Needs a TTY; scripts use run --prompt."
         ),
     )
-    _add_runtime_flags(talk, with_prompt=False, max_new_tokens=256, max_seq=2048)
+    _add_runtime_flags(talk, with_prompt=False, max_new_tokens=256, max_seq=None)
     talk.add_argument(
         "--new",
         action="store_true",
@@ -186,8 +201,11 @@ def build_parser() -> argparse.ArgumentParser:
     talk.add_argument("--session", help="resume this saved chat id from $DEEPFOLD_HOME/chats")
     talk.add_argument(
         "--agent",
-        action="store_true",
-        help="enable workspace tools (grep, patch, pytest, allowlisted argv)",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="enable workspace tools (grep, patch, pytest, allowlisted argv). "
+        "Also turns on web_search unless --no-agent-web. "
+        "Default: DEEPFOLD_AGENT or $DEEPFOLD_HOME/prefs.env, else off",
     )
     talk.add_argument(
         "--workspace",
@@ -209,10 +227,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     talk.add_argument(
         "--agent-web",
-        action="store_true",
-        help="opt in web_search (Brave Search, or Google CSE). Off by default. "
-        "Needs DEEPFOLD_BRAVE_KEY (see docs/web-search.md). Google CSE keys "
-        "still work on an old Cloud project",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="web_search on/off (free Tavily; no key). Default: on when --agent "
+        "or DEEPFOLD_AGENT is on, unless DEEPFOLD_AGENT_WEB=0. "
+        "See docs/web-search.md",
     )
     talk.set_defaults(func=chat_mod.chat)
 

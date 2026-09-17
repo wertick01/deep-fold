@@ -1,0 +1,6 @@
+Exclusive Decode V2, max_seq=2048, match Q4_K ctx 2048.
+RTX 3080 12 GB. backend=gemv. No TokenLoop in-process.
+Greedy ids from decodev2-qwen25-14b-gemv-prefill-20260917 (max_seq=512); first 8 still match.
+Host 57.495 / device-window 58.113 / prefill 322 ms / graph=True.
+VRAM after load 9419 / reserved 10034 / peak 9688 MiB.
+Do not quote overlapping Ollama 5.95. Compare to exclusive Q4_K long Ollama 58.9 / llama.cpp 69.9 (ctx 2048).

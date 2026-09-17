@@ -105,8 +105,10 @@ class Sampler:
     ) -> None:
         if codec not in CODECS:
             raise ValueError(f"codec={codec!r}; expected one of {CODECS}")
-        if interval_s > 0.15:
-            raise ValueError(f"interval_s={interval_s}; the freeze says <= 0.15 s")
+        if interval_s < 0 or interval_s > 0.15:
+            raise ValueError(
+                f"interval_s={interval_s}; 0 disables the smi thread, else freeze says <= 0.15 s"
+            )
         self.codec = codec
         self.interval_s = float(interval_s)
         self.gpu_index = int(gpu_index)
@@ -215,6 +217,8 @@ class Sampler:
             self.rows.append(self._poll())
         self.mark("start", detail=f"codec={self.codec}, interval={self.interval_s:.2f}s")
         self._stop.clear()
+        if self.interval_s <= 0:
+            return
         self._thread = threading.Thread(
             target=self._run, name=f"lab-sampler-{self.codec}", daemon=True
         )

@@ -1,0 +1,5 @@
+Exclusive Decode V2 hard-12, independent turns, max_seq=2048, max_new=256.
+Qwen2.5-3B NF4 GEMV graph. GPU idle before start.
+Accuracy 8/12 (67%). Mean decode 190.9 tok/s. Mean TTFT 175 ms.
+Same fixture as Ollama qwen2.5:3b 7/12 and TokenLoop NF4 8/12 / 16.9 tok/s.
+Do not merge ignore-EOS long 197 tok/s with this 256-token hard plate.

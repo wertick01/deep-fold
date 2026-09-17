@@ -65,6 +65,12 @@ def _parser() -> argparse.ArgumentParser:
         default="D",
         help="NF4 overflow residency policy (default D)",
     )
+    parser.add_argument(
+        "--executor",
+        choices=("auto", "tokenloop", "decodev2"),
+        default="tokenloop",
+        help="NF4 decode engine (default tokenloop; Decode V2 hard-12 uses decodev2)",
+    )
     return parser
 
 
@@ -115,6 +121,7 @@ def main(argv: list[str] | None = None) -> int:
             chr_path=args.chr_path,
             graphs=args.graphs,
             residency_policy=getattr(args, "residency", "D"),
+            executor=getattr(args, "executor", "tokenloop"),
             **common,
         )
     return 0

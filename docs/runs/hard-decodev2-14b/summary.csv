@@ -1,0 +1,2 @@
+codec,load_s,vram_before_mib,vram_after_load_smi_mib,vram_after_load_torch_mib,vram_peak_smi_mib,weight_mib,kv_mib,mean_ttft_ms,mean_decode_tok_s,n_messages,quality_all_ok,notes
+nf4,11.9401,508,8333,7539.01,11056,8574.81,384,693.348,54.8064,12,false,"gpu.host.load_model + DecodeV2Loop, executor=decodev2, graph=decodev2, max_seq=2048, prefill_chunk=32; independent turns: KV reset between messages, each prompt is a clean prefill; ttft = prefill of the whole prompt; no from_pretrained, no transformers.generate"

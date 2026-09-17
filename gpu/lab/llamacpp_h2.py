@@ -112,12 +112,14 @@ def _out_dir(explicit: str) -> Path:
 
 
 def _size_and_model(gguf_name: str) -> tuple[str, str]:
-    """Label from the filename. Check 32B before 3B: '32B' contains '3B'."""
+    """Label from the filename. 32B/14B before 3B: those strings contain '3B'."""
     name = gguf_name.upper().replace("_", "-")
     if "32B" in name:
         return "32B", "Qwen2.5-32B-Instruct"
     if "20B" in name:
         return "20B", "internlm2_5-20b-chat"
+    if "14B" in name:
+        return "14B", "Qwen2.5-14B-Instruct"
     if "3B" in name:
         return "3B", "Qwen2.5-3B-Instruct"
     return "unknown", Path(gguf_name).stem

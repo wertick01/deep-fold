@@ -63,6 +63,14 @@ counters, not different products.
 <td align="right"><strong>2.53</strong></td>
 </tr>
 <tr>
+<td>deep-fold Decode V2</td>
+<td>NF4 GEMV graph, <code>max_seq=2048</code></td>
+<td align="right"><strong>197</strong></td>
+<td align="right">—</td>
+<td align="right">—</td>
+<td align="right">—</td>
+</tr>
+<tr>
 <td>bitsandbytes</td>
 <td>NF4 <code>Linear4bit</code></td>
 <td align="right">22.2 <em>smoke</em></td>
@@ -237,15 +245,36 @@ llama.cpp auto-fit **2.54**, and H2 `eval_tok_s` **2.53**. H2 step rate is
 versus 6885 MiB over PCIe. It is **not** evidence that NF4 decode matches
 Q4_K mmvq. `-ngl 99` **1.52** is a worse placement of the same GGUF.
 
-## Why 3B is not a tie
+## Why 3B is not a TokenLoop tie
 
 Both 3B nets fit. Ollama/llama.cpp Q4_K fused CUDA (mmvq, graphs, FA) is
-~187 tok/s. Our resident NF4 TokenLoop is 35.2 (63 steps) / 35.8 (64 tokens).
-`LIVE_MAX_N=32`; decode N=1 does not feed the prefill tile. That is the
-**whole generate path** (GEMM, attention, Python, launches), not an isolated
-NF4 kernel bake-off, and it is not overflow. Nsight snippets under
-`docs/runs/ncu/` are `q_proj`/`k_proj` GEMM occupancy at N=1 and N=16, not a
-full TokenLoop forward.
+~187 tok/s at **ctx 2048**. Resident NF4 TokenLoop MMA is **35.2** (63 steps)
+/ **35.8** (64 tokens). That MMA gap is still real.
+
+Decode V2 (2026-09-18) is a different executor: CUDA-core GEMV graph + MMA
+prefill chunks of 32. Exclusive ignore-EOS plate: **197** tok/s host / **199**
+device-window, prefill **86 ms**, `max_seq=2048`, same buffer size as Q4_K ctx
+2048. V2 still attends the full axis. The 2026-09-17 `max_seq=512` plate was
+**196** / **200**, prefill **127 ms**. Greedy ids matched TokenLoop sequential
+N=1. CLI `--executor auto` picks this on resident NF4.
+
+Do **not** merge 197 and 187 into “we beat llama.cpp”. Same capacity class on
+this card; not a kernel ranking. Sheet:
+[`docs/img/decodev2-3080.png`](img/decodev2-3080.png). Log:
+[`docs/decode-v2-lab.md`](decode-v2-lab.md).
+
+14B exclusive (2026-09-18): Ollama library `qwen2.5:14b` long **58.9**,
+llama.cpp auto-fit bartowski Q4_K_M **69.9**, both ctx 2048. Decode V2
+**57.5** host is `max_seq=2048`. TokenLoop product CSV **6.56**. Do **not**
+quote the overlapping Ollama dump **5.95**. 14B V2 is not faster than Ollama
+or llama.cpp. 20B: Ollama **11.53** / llama.cpp **11.87** (ctx 2048) vs Decode
+V2 **40** (`max_seq=2048`) vs TokenLoop long **4.59**. Do not quote 20B
+device-window **25.6** / **20.7** or overlapping 20B jobs. Hard-12 20B mean
+**35.2** is not that plateau. **Coming soon:** Ollama 14B hard-12, llama.cpp
+hard-12, 3B Nsight 70–85%.
+
+Nsight snippets under `docs/runs/ncu/` are still `chr_nf4_gemm` occupancy,
+not a Decode V2 forward.
 
 ## Decode and TTFT definitions
 

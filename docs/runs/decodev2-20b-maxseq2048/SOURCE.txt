@@ -1,0 +1,7 @@
+Exclusive Decode V2, max_seq=2048, match Q4_K ctx 2048.
+RTX 3080 12 GB. backend=gemv. No TokenLoop in-process.
+Greedy ids from decodev2-internlm20b-tl-ids-20260917; first 8 still match.
+Host 40.025 tok/s / prefill 220 ms / graph=True.
+Device-window 20.7 is the second 64-token pass at reserved 12256 / 12288 MiB — WDDM scatter, not decode. Same class as 25.6. Quote host 40.0.
+VRAM after load 11752 allocated / 12256 reserved / peak 12153 MiB.
+Compare to exclusive Q4_K long Ollama 11.53 / llama.cpp 11.87 (ctx 2048) and V2 max_seq=512 host 41.0.

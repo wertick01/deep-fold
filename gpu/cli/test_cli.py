@@ -48,7 +48,7 @@ from gpu.cli import from_ollama as from_ollama_mod  # noqa: E402
 from gpu.cli import go_toolchain as go_tc  # noqa: E402
 from gpu.cli import kernel_build as kb  # noqa: E402
 from gpu.cli import hub as hub_mod  # noqa: E402
-from gpu.cli import messages, paths, run as run_mod  # noqa: E402
+from gpu.cli import messages, paths, prefs as prefs_mod, run as run_mod  # noqa: E402
 from gpu.cli import selftest as selftest_mod  # noqa: E402
 from gpu.cli import setup_env as setup_mod  # noqa: E402
 from gpu.cli.ollama_map import ResolveError, hf_id_list, resolve  # noqa: E402
@@ -842,6 +842,23 @@ def test_parser_run_flags() -> None:
     assert args.codec == "auto"
     assert args.max_resident_mib is None
     assert args.residency == "D"
+    assert args.executor == "auto"
+    v2 = build_parser().parse_args(
+        ["run", "--model", "D:/m", "--executor", "decodev2"]
+    )
+    assert v2.executor == "decodev2"
+    tl = build_parser().parse_args(
+        ["run", "--model", "D:/m", "--executor", "tokenloop"]
+    )
+    assert tl.executor == "tokenloop"
+    err = io.StringIO()
+    try:
+        with redirect_stderr(err):
+            build_parser().parse_args(["run", "--model", "D:/m", "--executor", "llamacpp"])
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:  # pragma: no cover
+        raise AssertionError("unknown --executor must not parse")
     vq = build_parser().parse_args(["run", "--model", "D:/m", "--codec", "vq"])
     assert vq.codec == "vq"
     cap = build_parser().parse_args(
@@ -1170,11 +1187,11 @@ def test_parser_k5_commands() -> None:
     assert chat.command == "chat" and chat.model == "D:/m" and chat.max_new_tokens == 8
     assert not hasattr(chat, "prompt")
     defaults = build_parser().parse_args(["chat", "--model", "D:/m"])
-    assert defaults.max_new_tokens == 256 and defaults.max_seq == 2048
+    assert defaults.max_new_tokens == 256 and defaults.max_seq is None
     assert defaults.new is False and defaults.session is None
-    assert defaults.agent is False and defaults.workspace is None
+    assert defaults.agent is None and defaults.workspace is None
     assert defaults.max_tool_rounds == 24 and defaults.agent_trust == "ask"
-    assert defaults.agent_web is False
+    assert defaults.agent_web is None
     agent = build_parser().parse_args(
         ["chat", "--model", "D:/m", "--agent", "--workspace", "D:/proj"]
     )
@@ -1185,8 +1202,19 @@ def test_parser_k5_commands() -> None:
     assert trusted.agent_trust == "workspace"
     web = build_parser().parse_args(["chat", "--model", "D:/m", "--agent", "--agent-web"])
     assert web.agent_web is True
+    no_web = build_parser().parse_args(
+        ["chat", "--model", "D:/m", "--agent", "--no-agent-web"]
+    )
+    assert no_web.agent is True and no_web.agent_web is False
+    no_agent = build_parser().parse_args(["chat", "--model", "D:/m", "--no-agent"])
+    assert no_agent.agent is False
     run_defaults = build_parser().parse_args(["run", "--model", "D:/m"])
     assert run_defaults.max_new_tokens == 64 and run_defaults.max_seq == 512
+    assert run_defaults.executor == "auto"
+    chat_v2 = build_parser().parse_args(
+        ["chat", "--model", "D:/m", "--executor", "decodev2", "--agent"]
+    )
+    assert chat_v2.executor == "decodev2" and chat_v2.agent is True
     setup = build_parser().parse_args(["setup", "--dry-run"])
     assert setup.dry_run is True
     chr_only = build_parser().parse_args(["setup", "--chr-only"])
@@ -1195,6 +1223,48 @@ def test_parser_k5_commands() -> None:
     assert kernel_only.kernel_only is True
     live = build_parser().parse_args(["test", "--live"])
     assert live.live is True
+
+
+def test_agent_user_defaults() -> None:
+    old_agent = os.environ.get("DEEPFOLD_AGENT")
+    old_web = os.environ.get("DEEPFOLD_AGENT_WEB")
+    old_home = os.environ.get("DEEPFOLD_HOME")
+    os.environ.pop("DEEPFOLD_AGENT", None)
+    os.environ.pop("DEEPFOLD_AGENT_WEB", None)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["DEEPFOLD_HOME"] = tmp
+            assert prefs_mod.resolve_agent(None) is False
+            assert prefs_mod.resolve_web(None, agent=False) is False
+            assert prefs_mod.resolve_web(None, agent=True) is True
+            assert prefs_mod.resolve_agent(True) is True
+            assert prefs_mod.resolve_agent(False) is False
+            assert prefs_mod.resolve_web(False, agent=True) is False
+            assert prefs_mod.web_hold_off(None) is False
+            assert prefs_mod.web_hold_off(False) is True
+            prefs_mod.save_pref(prefs_mod.ENV_AGENT, True)
+            assert prefs_mod.resolve_agent(None) is True
+            assert prefs_mod.resolve_web(None, agent=True) is True
+            prefs_mod.save_pref(prefs_mod.ENV_AGENT_WEB, False)
+            assert prefs_mod.resolve_web(None, agent=True) is False
+            assert prefs_mod.web_hold_off(None) is True
+            os.environ["DEEPFOLD_AGENT"] = "0"
+            os.environ["DEEPFOLD_AGENT_WEB"] = "1"
+            assert prefs_mod.resolve_agent(None) is False
+            assert prefs_mod.resolve_web(None, agent=False) is True
+    finally:
+        if old_agent is None:
+            os.environ.pop("DEEPFOLD_AGENT", None)
+        else:
+            os.environ["DEEPFOLD_AGENT"] = old_agent
+        if old_web is None:
+            os.environ.pop("DEEPFOLD_AGENT_WEB", None)
+        else:
+            os.environ["DEEPFOLD_AGENT_WEB"] = old_web
+        if old_home is None:
+            os.environ.pop("DEEPFOLD_HOME", None)
+        else:
+            os.environ["DEEPFOLD_HOME"] = old_home
 
 
 def test_hf_allowlist_includes_32b() -> None:
@@ -1276,6 +1346,98 @@ def test_chat_status_and_toolbar() -> None:
         todos=2,
     )
     assert "agent" in agent_bar and "write" in agent_bar and "todo 2" in agent_bar
+
+
+def test_pick_max_seq_and_overflow() -> None:
+    assert chat_mod.looks_overflow_model({"num_hidden_layers": 64})
+    assert not chat_mod.looks_overflow_model({"num_hidden_layers": 48})
+    assert chat_mod.pick_max_seq(1024, agent=True, vram_mib=12288, overflow=False) == 1024
+    assert chat_mod.pick_max_seq(None, agent=False, vram_mib=12288, overflow=False) == 2048
+    assert chat_mod.pick_max_seq(None, agent=True, vram_mib=12288, overflow=False) == 4096
+    assert chat_mod.pick_max_seq(None, agent=True, vram_mib=8192, overflow=False) == 2048
+    assert chat_mod.pick_max_seq(None, agent=True, vram_mib=12288, overflow=True) == 2048
+    assert chat_mod.pick_max_seq(None, agent=True, vram_mib=None, overflow=False) == 2048
+
+
+def test_format_status_session_suffix() -> None:
+    out = SimpleNamespace(
+        prefill_ms=12.2,
+        prompt_len=100,
+        prefill_n=8,
+        session_hit=True,
+        decode_tok_s=40.0,
+        decode_steps=4,
+        tokens=[1, 2, 3, 4],
+        interrupted=False,
+        stop_token=151645,
+    )
+    text = chat_mod.format_status(out, max_seq=2048, max_new_tokens=256)
+    assert "8 tokens suffix" in text and "104/2048" in text
+    out.session_hit = False
+    out.prefill_n = 100
+    assert "100 tokens full" in chat_mod.format_status(
+        out, max_seq=2048, max_new_tokens=256
+    )
+
+
+def test_format_tool_block() -> None:
+    block = chat_mod.format_tool_block(
+        "grep", {"query": "TokenLoop"}, "a\n" * 20 + "tail"
+    )
+    assert block.startswith("┌ grep TokenLoop")
+    assert block.count("\n") >= 16
+    assert "+5 more" in block or "+4 more" in block
+    short = chat_mod.format_tool_block("glob", {"pattern": "*.py"}, "gpu/cli/chat.py")
+    assert "│ gpu/cli/chat.py" in short and short.endswith("└")
+
+
+def test_apply_session_prefill_cpu() -> None:
+    class _Loop:
+        def __init__(self) -> None:
+            self.kv = SimpleNamespace(seq_len=0)
+            self.log: list[object] = []
+
+        def reset(self) -> None:
+            self.kv.seq_len = 0
+            self.log.append("reset")
+
+        def prefill_from(self, ids, start_pos: int):
+            seq = [int(x) for x in ids]
+            self.kv.seq_len = int(start_pos) + len(seq)
+            self.log.append(("prefill_from", seq, int(start_pos)))
+            return "logits"
+
+        def forward(self, ids, start_pos: int, logits: bool = True):
+            del logits
+            self.log.append(("forward", [int(x) for x in ids], int(start_pos)))
+            return "logits"
+
+        def seal_last(self, token_id: int) -> None:
+            self.kv.seq_len += 1
+            self.log.append(("seal", int(token_id)))
+
+        def decode_from_logits(self, *args, **kwargs):
+            raise AssertionError("not used")
+
+    loop = _Loop()
+    logits, hit, n, miss = chat_mod.apply_session_prefill(loop, [1, 2, 3], None)
+    assert logits == "logits" and hit is False and n == 3 and miss is False
+    assert loop.log[0] == "reset" and loop.log[1][0] == "prefill_from"
+    prefix = chat_mod.seal_and_prefix(loop, [1, 2, 3], [9])
+    assert prefix == [1, 2, 3, 9] and loop.kv.seq_len == 4
+    loop.log.clear()
+    logits, hit, n, miss = chat_mod.apply_session_prefill(loop, [1, 2, 3, 9, 4], prefix)
+    assert hit is True and n == 1 and miss is False
+    assert loop.log == [("prefill_from", [4], 4)]
+    loop.log.clear()
+    logits, hit, n, miss = chat_mod.apply_session_prefill(loop, [1, 2, 3, 9, 4], [1, 2, 3, 9, 4])
+    assert hit is True and n == 0 and loop.log[0][0] == "forward"
+    loop.log.clear()
+    loop.kv.seq_len = 5
+    logits, hit, n, miss = chat_mod.apply_session_prefill(loop, [8, 8], [1, 2, 3, 9, 4])
+    assert hit is False and miss is True and n == 2
+    assert loop.log[0] == "reset"
+    assert chat_mod.session_capable(loop)
 
 
 def test_transcript_roundtrip_under_home() -> None:
@@ -1449,6 +1611,11 @@ def test_agent_v2_tools() -> None:
     assert agent_mod.suffix_after([1, 2], [1, 2, 3]) == [3]
     assert agent_mod.suffix_after([1, 2], [1, 9, 3]) is None
     assert agent_mod.suffix_after([1, 2, 3], [1, 2]) is None
+    assert agent_mod.plan_session_prefill(None, 0, [1, 2]) == ("full", [1, 2])
+    assert agent_mod.plan_session_prefill([1, 2], 2, [1, 2, 3]) == ("suffix", [3])
+    assert agent_mod.plan_session_prefill([1, 2], 2, [1, 2]) == ("repeat", [])
+    assert agent_mod.plan_session_prefill([1, 2], 2, [1, 9]) == ("full", [1, 9])
+    assert agent_mod.plan_session_prefill([1, 2], 1, [1, 2, 3]) == ("full", [1, 2, 3])
     raw = 'prose <tool_call>\n{"name": "grep", "arguments": {"query": "x"}}\n</tool_call>'
     assert agent_mod.visible_stream_text(raw).strip() == "prose"
     assert agent_mod.visible_stream_text("hi <tool") == "hi "
@@ -1580,11 +1747,15 @@ def test_agent_v2_tools() -> None:
             raise AssertionError("web_search must not touch the network")
 
         orig_http = agent_mod._http_get
+        orig_post = agent_mod._http_post
         agent_mod._http_get = _boom  # type: ignore[method-assign]
+        agent_mod._http_post = _boom  # type: ignore[method-assign]
         old_key = os.environ.get("DEEPFOLD_GOOGLE_CSE_KEY")
         old_cx = os.environ.get("DEEPFOLD_GOOGLE_CSE_CX")
         old_brave = os.environ.get("DEEPFOLD_BRAVE_KEY")
         old_brave_alt = os.environ.get("BRAVE_API_KEY")
+        old_tavily = os.environ.get("DEEPFOLD_TAVILY_KEY")
+        old_tavily_alt = os.environ.get("TAVILY_API_KEY")
         old_home = os.environ.get("DEEPFOLD_HOME")
         os.environ["DEEPFOLD_HOME"] = str(root / "dfhome")
         (root / "dfhome").mkdir()
@@ -1592,23 +1763,44 @@ def test_agent_v2_tools() -> None:
         os.environ.pop("DEEPFOLD_GOOGLE_CSE_CX", None)
         os.environ.pop("DEEPFOLD_BRAVE_KEY", None)
         os.environ.pop("BRAVE_API_KEY", None)
+        os.environ.pop("DEEPFOLD_TAVILY_KEY", None)
+        os.environ.pop("TAVILY_API_KEY", None)
         try:
             off = agent_mod.execute("web_search", {"query": "Qwen2.5"}, root)
             assert "off" in off and hits["n"] == 0
             sess = agent_mod.AgentSession(web=True)
-            missing = agent_mod.execute(
+
+            def _fake_tavily(url: str, *, timeout: int, data=None, headers=None, **kwargs):
+                hits["n"] += 1
+                assert "api.tavily.com" in url
+                assert data is not None and b"Qwen2.5" in data
+                assert headers and headers.get("X-Tavily-Access-Mode") == "keyless"
+                payload = {
+                    "results": [
+                        {
+                            "title": "Tavily hit",
+                            "url": "https://tavily.example/qwen",
+                            "content": "free search",
+                        }
+                    ]
+                }
+                return 200, json.dumps(payload).encode("utf-8")
+
+            agent_mod._http_post = _fake_tavily  # type: ignore[method-assign]
+            free = agent_mod.execute(
                 "web_search", {"query": "Qwen2.5"}, root, session=sess
             )
-            assert "DEEPFOLD_BRAVE_KEY" in missing and hits["n"] == 0
+            assert "https://tavily.example/qwen" in free and "free search" in free
             (root / "dfhome" / "cse.env").write_text(
                 "DEEPFOLD_GOOGLE_CSE_CX=only-cx\n", encoding="utf-8"
             )
-            need_key = agent_mod.execute(
+            still_free = agent_mod.execute(
                 "web_search", {"query": "Qwen2.5"}, root, session=sess
             )
-            assert "DEEPFOLD_BRAVE_KEY" in need_key and hits["n"] == 0
+            assert "tavily.example" in still_free
             os.environ["DEEPFOLD_GOOGLE_CSE_KEY"] = "test-key"
             os.environ["DEEPFOLD_GOOGLE_CSE_CX"] = "test-cx"
+            agent_mod._http_post = _boom  # type: ignore[method-assign]
 
             def _fake_get(url: str, *, timeout: int, **kwargs):
                 hits["n"] += 1
@@ -1632,7 +1824,6 @@ def test_agent_v2_tools() -> None:
                 session=sess,
             )
             assert "https://example.com/qwen" in found and "model card" in found
-            assert hits["n"] == 1
 
             def _empty(url: str, *, timeout: int, **kwargs):
                 return 200, b'{"items": []}'
@@ -1681,8 +1872,27 @@ def test_agent_v2_tools() -> None:
                 "web_search", {"query": "Qwen2.5"}, root, session=sess
             )
             assert "https://brave.example/qwen" in brave_hit and "from brave" in brave_hit
+            os.environ.pop("DEEPFOLD_BRAVE_KEY", None)
+            (root / "dfhome" / "cse.env").write_text("", encoding="utf-8")
+            os.environ["DEEPFOLD_TAVILY_KEY"] = "tvly-test"
+
+            def _fake_keyed(url: str, *, timeout: int, data=None, headers=None, **kwargs):
+                hits["n"] += 1
+                assert "api.tavily.com" in url
+                assert headers and str(headers.get("Authorization") or "").startswith(
+                    "Bearer "
+                )
+                assert "X-Tavily-Access-Mode" not in (headers or {})
+                return 200, b'{"results": []}'
+
+            agent_mod._http_post = _fake_keyed  # type: ignore[method-assign]
+            keyed = agent_mod.execute(
+                "web_search", {"query": "zzz"}, root, session=sess
+            )
+            assert "no results" in keyed
         finally:
             agent_mod._http_get = orig_http  # type: ignore[method-assign]
+            agent_mod._http_post = orig_post  # type: ignore[method-assign]
             if old_key is None:
                 os.environ.pop("DEEPFOLD_GOOGLE_CSE_KEY", None)
             else:
@@ -1699,6 +1909,14 @@ def test_agent_v2_tools() -> None:
                 os.environ.pop("BRAVE_API_KEY", None)
             else:
                 os.environ["BRAVE_API_KEY"] = old_brave_alt
+            if old_tavily is None:
+                os.environ.pop("DEEPFOLD_TAVILY_KEY", None)
+            else:
+                os.environ["DEEPFOLD_TAVILY_KEY"] = old_tavily
+            if old_tavily_alt is None:
+                os.environ.pop("TAVILY_API_KEY", None)
+            else:
+                os.environ["TAVILY_API_KEY"] = old_tavily_alt
             if old_home is None:
                 os.environ.pop("DEEPFOLD_HOME", None)
             else:

@@ -4,17 +4,17 @@ Lab log (what we tried, plates, CUDA 70–85% open, 14B/20B next):
 [`decode-v2-lab.md`](decode-v2-lab.md).
 
 Status: synthetic stack is green. Qwen2.5-3B `.chr` loads into Decode V2.
-Greedy ids match TokenLoop on sequential N=1 (prompt 48, 8 new tokens), MMA
-and GEMV. Ignore-EOS 64 at `max_seq=512`: Decode V2 graph **195 tok/s** host /
-**201** device-window (fused QKV+SwiGLU+RoPE-in-attn+4-warp flash-decode+in-place
-RMS + NR=4 GEMV on `lm_head`/SwiGLU). Host 195 is WDDM scatter vs the earlier
-178/182 plates; the device window moved 196 → 201. Prefill is still
-token-at-a-time (~0.9 s), not the TokenLoop chunked TTFT. TokenLoop remains
-the product default. Product bar is still ~206 (+10% vs llama.cpp ~187).
-Today's TokenLoop recheck in the GEMV process was ~8.4 tok/s
-(`graph=linears`); the published 3B plate is still **35.2**. Task Manager CUDA
-while 3B ran is still **70–85%**; that is an open measurement, not a closed
-kernel story ([lab log §4](decode-v2-lab.md#4-cuda-70–85--open-not-closed)).
+Greedy ids match TokenLoop on sequential N=1. Ignore-EOS 64 at `max_seq=2048`
+(same buffer size as Q4_K ctx 2048; V2 still attends the full axis): Decode V2
+**197 tok/s** host / **199** device-window with MMA prefill chunks of 32
+(3B prompt_len=48 is **86 ms**). CLI `--executor auto` picks Decode V2 on
+resident NF4 (3B/14B/20B); overflow 32B stays TokenLoop. 14B **57.5 / 58.1** vs
+exclusive Q4_K long Ollama **58.9** / llama.cpp **69.9**. 20B exclusive **40**
+host vs Q4_K **11.53 / 11.87** (do not quote 25.6 or 20.7). Do not say faster
+than Ollama. Overlapping Ollama 14B 5.95 is not a number. Hard-12: 3B **8/12**
+@ **191** tok/s, 14B **11/12** @ **54.8**, 20B **9/12** @ **35.2** (not the 40
+plateau). **Coming soon:** Ollama 14B hard-12, llama.cpp hard-12, 3B Nsight
+70–85%. Figure: [`docs/img/decodev2-3080.png`](img/decodev2-3080.png).
 
 The ~50 GB/s GEMV wall was a `__constant__` NF4 LUT: every lane hits a
 different nibble, so constant memory serializes. The live kernel copies the
@@ -31,14 +31,14 @@ and the same-process ratio. `CHR_NF4_GEMV_NR=1|2|4|8` overrides the pick.
 Upstream note: `f891996`. Plan A graphs in `gpu/loop/graph.py` cover NF4
 GEMM groups only and copy each group's input into a static buffer. Decode V2
 does not extend that plan. It is a second resident executor with its own
-state, arena, and step graph. `TokenLoop` stays the production path until a
-later switch.
+state, arena, and step graph. CLI `--executor auto` uses it on resident
+NF4; TokenLoop remains overflow / VQ / `--executor tokenloop`.
 
 ## 0. Goals
 
-1. One decode token, batch=1, greedy. Prefill is a sequence of the same
-   write/attend steps (or a later dedicated plan). Not multi-request
-   throughput.
+1. One decode token, batch=1, greedy. Prefill is a dedicated MMA plan:
+   chunks of ``LIVE_MAX_N`` (32) via ``chr_nf4_gemm``, not the N=1 GEMV
+   graph. Not multi-request throughput.
 2. Python does tokenization and I/O. The next token id must not wait on
    Python reading the previous id.
 3. Position and KV length are **GPU buffer contents**, not Python ints
@@ -71,6 +71,7 @@ python gpu/decodev2/test_oracle.py
 python gpu/decodev2/test_state.py
 python gpu/decodev2/test_step.py
 python gpu/decodev2/test_graph.py
+python gpu/decodev2/test_prefill.py
 ```
 
 Absent CUDA is `SKIP`, never a silent pass (`gpu.tests.skips`).
@@ -160,6 +161,8 @@ Two entry points (no `.item()` on the hot path):
 4. leave `token` and `position` unchanged
 
 Teacher-force a prompt id: `load_token(id); forward_decode; position += 1`.
+Chunked prefill (`gpu.decodev2.prefill.forward_prefill`) walks the prompt in
+MMA columns instead; `consume_prompt` uses that. Decode graph is still N=1.
 
 `greedy_decode(state, weights)`: `forward_decode` then `commit_step`
 (`token = next_token`, `position += 1`, `finished |= eos`).
@@ -257,7 +260,7 @@ CUDA (skip if no device):
 
 ## 8. Explicit non-goals (this slice)
 
-- `gpu/loop/generate.py` production switch (TokenLoop stays MMA)
+- wrapping overflow 32B in Decode V2 (CopyRing / TokenLoop stay)
 - editing `nf4_gemm.cu`
 - CopyRing / HOST groups inside the graph
 - parallel MLP split
@@ -265,8 +268,8 @@ CUDA (skip if no device):
 - C++ executor
 - 32B Decode V2 / BF16 32B
 
-14B and 20B Decode V2 plates are **next research**, not this slice's
-acceptance. Notes and VRAM traps: [lab log §6](decode-v2-lab.md#6-next-utilization-research-then-14b--20b).
+14B and 20B Decode V2 plates are in the lab log, not this slice's
+acceptance gate. Notes and VRAM traps: [lab log §6](decode-v2-lab.md#6-next-utilization-research-then-14b--20b).
 
 ## 9. Files
 
@@ -276,16 +279,20 @@ acceptance. Notes and VRAM traps: [lab log §6](decode-v2-lab.md#6-next-utilizat
 | `synth.py` / `oracle.py` / `test_oracle.py` | tiny NF4 models + f32 oracle |
 | `linear.py` / `ops.py` / `step.py` / `test_step.py` | eager step (`mma` or `gemv`) |
 | `graph.py` / `runner.py` / `test_graph.py` | full greedy CUDA graph |
+| `prefill.py` / `test_prefill.py` | MMA chunked prompt (not in the decode graph) |
+| `session.py` / `test_session.py` | CLI `DecodeV2Loop`; `--executor auto` picks it on resident NF4 |
 | `load.py` / `run_3b.py` | Qwen2.5-3B `.chr` ids-gate + ignore-EOS |
 | `bench_step.py` | `MEDIUM_LLAMA` MMA vs GEMV, eager + graph |
 | `gpu/nf4/nf4_gemv.cu` / `test_gemv.py` / `bench_gemv.py` | CUDA-core N=1 candidate |
-| [`docs/decode-v2-lab.md`](decode-v2-lab.md) | experiment log, CUDA util open, 14B/20B next |
+| [`docs/decode-v2-lab.md`](decode-v2-lab.md) | experiment log; Nsight 70–85% Coming soon |
 
 ```text
 python gpu/decodev2/test_oracle.py
 python gpu/decodev2/test_state.py
 python gpu/decodev2/test_step.py
 python gpu/decodev2/test_graph.py
+python gpu/decodev2/test_prefill.py
+python gpu/decodev2/test_session.py
 python gpu/nf4/test_gemv.py
 python gpu/decodev2/run_3b.py
 ```
@@ -314,11 +321,15 @@ Live 2026-09-17, `max_seq=512`, ignore-EOS 64, prompt_len=48:
 | Decode V2 GEMV flash-decode attn + in-place RMS | **182** | 1516 | ids matched; host 182 / device-window 195 |
 | Decode V2 GEMV 4-warp flash + RoPE-in-attn | **178** | 1532 | ids matched; host 178 / device-window 196; WDDM host scatter |
 | Decode V2 GEMV RMS fused into qkv/swiglu/lm_head | 111 | 1137 | ids matched; **miss** — each of 152k lm_head CTAs re-does RMS |
-| Decode V2 GEMV NR=4 on lm_head + SwiGLU | **195** | 918 | ids matched; host 195 / device-window 201 |
+| Decode V2 GEMV NR=4 on lm_head + SwiGLU | **195** | 918 | ids matched; host 195 / device-window 201; N=1 prefill |
+| Decode V2 GEMV + MMA chunked prefill | **196** | **127** | ids matched; host 196 / device-window 200; `LIVE_MAX_N=32`; `max_seq=512` |
+| Decode V2 GEMV + MMA, `max_seq=2048` | **197** | **86** | 2026-09-18; host 197 / device-window 199; same buffer size as Q4_K ctx 2048 |
 | llama.cpp Q4_K_M | **187** | — | not this run |
 
 Greedy ids `[2121, 358, 69431, 389, 419, 11618, 11, 358]` matched. Prefill is
-not the product TTFT. Task Manager CUDA 70–85% during 3B is **open** (lab log
+MMA chunks of 32 (86 ms on 3B / 48 tokens at `max_seq=2048`; 127 ms was
+`max_seq=512`), not the N=1 GEMV graph. Task Manager CUDA 70–85% during 3B is
+**Coming soon** (lab log
 §4): engine idle + skinny RMS/merge + GEMV below HBM peak, not a closed “paint
 one more kernel” story. Flash-decode uses a static `n_q*32` grid of 4-warp
 CTAs (512×128 threads on 3B). RoPE is no longer a separate 18-CTA launch on
@@ -327,8 +338,12 @@ every CTA repeats the same 2048-wide reduction; on `lm_head` that is ~152k
 copies of the work. Leave RMS as the 1-CTA kernel. Optional `rms_w` on
 `nf4_gemv`/`nf4_qkv`/`nf4_swiglu` stays for small-M tests only. Multi-row GEMV
 (NR=4, `M>=4096`) cuts isolated `lm_head` ~494 → 393 µs; q/o/down stay 1-row.
-Host 195 vs llama.cpp 187; device-window 201. Product bar remains +10% vs a
-fresh competitor plate (~206 if 187 holds). Plate:
+Live ignore-EOS plate at `max_seq=2048`: host **197** / device-window **199**,
+prefill **86 ms**. The 2026-09-17 `max_seq=512` plate was host **196** /
+device-window **200**, prefill **127 ms**
+(`decodev2-3b-gemv-prefill-20260917`). Q4_K ~187 is ctx 2048; V2 still attends
+the full buffer — not a kernel ranking.
+fuse9 (N=1 prefill 918 ms) was 195 / 201:
 `C:\dev\models\runs\decodev2-3b-gemv-fuse9-20260917`. Earlier fuse7b
 (178/196): `C:\dev\models\runs\decodev2-3b-gemv-fuse7b-20260917`. RMS-fuse miss:
 `C:\dev\models\runs\decodev2-3b-gemv-fuse8-20260917`. Earlier fuse6:

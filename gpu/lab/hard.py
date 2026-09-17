@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from .catalog import SUPPORTED_NF4, LabModel, lab_by_slug
-from .script import RUNS_DIR, quality_ok
+from .script import POLL_INTERVAL_S, RUNS_DIR, quality_ok
 
 __all__ = [
     "ANSWER_STATES",
@@ -500,6 +500,9 @@ def run_hard(
     isolated: bool = True,
     graphs: bool = True,
     verbose: bool = True,
+    executor: str = "tokenloop",
+    max_seq: int | None = None,
+    interval_s: float | None = None,
 ) -> tuple[Any, list[dict[str, Any]]]:
     """BF16 then NF4 on the hard set. Missing ``.chr`` skips NF4 without crashing."""
     from .sessions import run_both
@@ -525,6 +528,8 @@ def run_hard(
         elif not ready and codec == "nf4" and verbose:
             print(f"NF4 will record a miss: {skip_reason}", flush=True)
 
+    seq = hard_max_seq(lab) if max_seq is None else int(max_seq)
+    poll = POLL_INTERVAL_S if interval_s is None else float(interval_s)
     bundle = run_both(
         dest,
         codec=run_codec,
@@ -532,13 +537,15 @@ def run_hard(
         chr_path=lab.chr_path,
         messages=script.prompts,
         max_new_tokens=script.max_new_tokens,
-        max_seq=hard_max_seq(lab),
+        max_seq=seq,
         graphs=graphs,
         verbose=verbose,
         trust_remote_code=lab.trust_remote_code,
         isolated=isolated,
         items_json=script_path,
         conversation=script.conversation,
+        executor=executor,
+        interval_s=poll,
     )
     scores = score_bundle(bundle, script.items)
     write_scores(dest / "hard_scores.csv", scores)
@@ -860,6 +867,8 @@ def run_hard_one(
     isolated: bool = True,
     graphs: bool = True,
     verbose: bool = True,
+    executor: str = "tokenloop",
+    max_seq: int | None = None,
 ) -> HardRun:
     """One codec of one model, in its own child process, into ``<slug>-<codec>/``.
 
@@ -919,8 +928,9 @@ def run_hard_one(
         else:
             session = run_nf4(
                 chr_path=lab.chr_path,
-                max_seq=hard_max_seq(lab),
+                max_seq=hard_max_seq(lab) if max_seq is None else int(max_seq),
                 graphs=graphs,
+                executor=executor,
                 **common,
             )
     except Exception as exc:  # noqa: BLE001 -- a dead worker is data, not a traceback
@@ -1167,6 +1177,24 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument(
+        "--executor",
+        choices=("auto", "tokenloop", "decodev2"),
+        default="tokenloop",
+        help="NF4 engine. Decode V2 vs Ollama uses decodev2. Default tokenloop keeps old plates.",
+    )
+    parser.add_argument(
+        "--max-seq",
+        type=int,
+        default=0,
+        help="KV capacity. 0 = hard_max_seq(lab) (2048 except 20B TokenLoop 1024).",
+    )
+    parser.add_argument(
+        "--interval",
+        type=float,
+        default=POLL_INTERVAL_S,
+        help="nvidia-smi poll seconds (default 0.12, freeze <= 0.15). 0 = off (20B at VRAM cap).",
+    )
     return parser
 
 
@@ -1260,17 +1288,27 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--lab is required for a live run (or pass --list / --matrix)")
 
     lab = lab_by_slug(args.lab)
+    if args.lab == "qwen25-32b" and args.executor == "decodev2":
+        parser.error("32B is CopyRing / TokenLoop; Decode V2 is not this plate")
 
+    seq = None if int(args.max_seq) <= 0 else int(args.max_seq)
     out_dir = Path(args.out) if args.out else Path(RUNS_DIR) / time.strftime(
         f"hard-{lab.slug}-%Y%m%d-%H%M%S"
     )
-    print(f"lab {lab.slug}  history={args.history}  out={out_dir}", flush=True)
+    print(
+        f"lab {lab.slug}  history={args.history}  executor={args.executor} "
+        f"max_seq={seq or hard_max_seq(lab)}  interval={args.interval}  out={out_dir}",
+        flush=True,
+    )
     bundle, scores = run_hard(
         lab,
         out_dir,
         history=args.history,
         codec=args.codec,
         verbose=not args.quiet,
+        executor=args.executor,
+        max_seq=seq,
+        interval_s=float(args.interval),
     )
     write_scores(out_dir / "hard_scores.csv", scores)
     print(f"wrote {out_dir / 'hard_scores.csv'}")

@@ -10,6 +10,8 @@ env `torch-gpu`). After setup, activate `.venv` or call
 Paris / Berlin / 323 smoke is **not** a quality score. Do not expect the
 author’s 3080 tok/s on another card.
 
+**In progress:** `chat` TTY chrome / agent layout.
+
 ---
 
 ## 1. Install
@@ -119,6 +121,8 @@ Scripts / pipes:
 ```text
 deepfold run --model D:\weights\Qwen2.5-3B-Instruct --prompt "Capital of France?" --max-new-tokens 16
 ```
+
+`--executor auto` (default) uses Decode V2 on resident NF4 and TokenLoop on overflow / VQ. Force MMA with `--executor tokenloop`.
 
 ---
 

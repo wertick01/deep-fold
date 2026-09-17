@@ -93,3 +93,8 @@ is whether dense BF16 still fits in dedicated VRAM.
   Recorded miss in `summary.notes`. Not patched on purpose — forcing the stock
   method drops `cache_position` and the model decodes fluent repetition, which
   would be a fake baseline.
+
+Those decode cells are **TokenLoop MMA** (committed CSVs). Resident Decode V2
+on the same 3080: 3B **197** host / **199** device-window, 14B **57.5**, 20B
+**40** exclusive, `max_seq=2048`. Q4_K 3B long ~187 is ctx 2048; V2 still
+attends the full buffer. Sheet: [`img/decodev2-3080.png`](img/decodev2-3080.png).

@@ -1,4 +1,4 @@
-"""Matched 3080 compare plate: Ollama / llama.cpp / H2 / bitsandbytes.
+"""Matched 3080 compare plate: Ollama / llama.cpp / Decode V2 / TokenLoop.
 
 Same visual language as :mod:`gpu.lab.h2_plate` (Okabe–Ito, ink, card-limit
 red). Matplotlib Agg. No torch, no GPU.
@@ -6,7 +6,8 @@ red). Matplotlib Agg. No torch, no GPU.
     python -m gpu.lab.compare_plate --redraw
 
 Writes ``docs/img/compare-3080.png``. WAVE freeze of
-``docs/runs/compare-3080/compare.json``. Quote 32B **long** 64-token plateaus,
+``docs/runs/compare-3080/compare.json`` plus Decode V2 3B from
+``docs/decode-v2-lab.md``. Quote 32B **long** 64-token plateaus,
 not Ollama's short-EOS smoke mean.
 """
 
@@ -48,6 +49,7 @@ __all__ = [
     "H2_32B_EVAL",
     "LLAMA_32B_LONG",
     "LLAMA_32B_NGL99",
+    "V2_3B_HOST",
     "compare_plate",
     "default_png",
     "redraw",
@@ -66,6 +68,7 @@ H2_32B_SMOKE = 2.31
 OLLAMA_3B_LONG = 187.3
 LLAMA_3B_LONG = 187.0
 H2_3B_LONG = 35.2
+V2_3B_HOST = 197.0
 BNB_3B_SMOKE = 22.2
 H2_COPY_FLOOR_MS = 277.3
 OLLAMA_GPU_LAYERS = 33
@@ -117,8 +120,9 @@ def _header(s: _Sheet, y: float) -> float:
         x0 + 0.14,
         y + 0.42,
         "Greedy  ·  ctx 2048  ·  Qwen2.5 Instruct  ·  quote the 64-token ignore-EOS plateau on 32B\n"
-        "Ollama 0.34.0 is llama-server (Q4_K_M, --flash-attn auto, --load-mode none). "
-        "H2 is NF4 CopyRing. llama.cpp b10964 auto-fit matches Ollama; -ngl 99 was 1.52.",
+        "Ollama 0.34.0 is llama-server (Q4_K_M). 32B H2 is NF4 CopyRing. "
+        "3B Decode V2 is max_seq=2048; Q4_K long is ctx 2048. V2 still attends the full buffer. "
+        "-ngl 99 was 1.52.",
         fs=T_SUB,
         color=INK_SOFT,
         spacing=1.28,
@@ -186,18 +190,18 @@ def _bars(s: _Sheet, y: float) -> float:
     s.text(
         x0 + 0.12,
         y + 0.30,
-        "Resident. Kernel gap, not overflow. bitsandbytes is smoke-only.",
+        "Resident. V2 GEMV vs Q4_K. TokenLoop MMA is the old 3B plate.",
         fs=T_TINY,
         color=INK_SOFT,
     )
     rows_3b = (
-        (OLLAMA, "Ollama", "Q4_K_M  ·  37/37 GPU", OLLAMA_3B_LONG),
-        (LLAMA, "llama.cpp", "Q4_K_M  ·  ngl auto-fit", LLAMA_3B_LONG),
-        (NF4, "H2 NF4", "resident CompressedLinear", H2_3B_LONG),
-        (BNB, "bitsandbytes", "NF4 smoke, no long plateau", BNB_3B_SMOKE),
+        (OLLAMA, "Ollama", "Q4_K_M  ·  37/37 GPU  ·  ctx 2048", OLLAMA_3B_LONG),
+        (LLAMA, "llama.cpp", "Q4_K_M  ·  ctx 2048 long", LLAMA_3B_LONG),
+        (NF4, "Decode V2", "NF4 GEMV  ·  host 197  ·  max_seq 2048", V2_3B_HOST),
+        (BNB, "TokenLoop", "NF4 MMA  ·  product plate 35.2", H2_3B_LONG),
     )
     for i, (color, name, cap, val) in enumerate(rows_3b):
-        _hbar(s, x0 + 0.12, y + 0.52 + i * 0.48, col_w - 0.20, 0.42, val, 200.0, color, name, cap)
+        _hbar(s, x0 + 0.12, y + 0.52 + i * 0.48, col_w - 0.20, 0.42, val, 220.0, color, name, cap)
 
     x1 = x0 + col_w + gap
     s.rect(x1, y, col_w, h, fc=PAPER, ec=RULE, lw=0.7)
@@ -336,8 +340,8 @@ def _footer(s: _Sheet, y: float) -> float:
         "Not a ranking of Marlin / AWQ / ExLlamaV2 / vLLM: those rows are SKIP, not borrowed tok/s.\n"
         "32B Ollama smoke 3.18 tok/s is 8+8+4 tokens; quote long 2.54 vs H2 2.49 steps / 2.53 eval vs llama.cpp auto-fit 2.54 (ngl 99 was 1.52).\n"
         "The 32B tie is not a better GPU kernel. Ollama leaves 32 layers on the 5950X; we copy 6885 MiB over PCIe every token.\n"
-        "3B (fully GPU) is the kernel gap: Q4_K mmvq ~187 tok/s vs NF4 TokenLoop 35.2. H2 smoke 2.31 stays the product overflow plate.\n"
-        "Redraw: python -m gpu.lab.compare_plate --redraw   ·   JSON: docs/runs/compare-3080/   ·   why: docs/compare-3080.md",
+        "3B Decode V2 197 (max_seq=2048) sits next to Q4_K ~187 (ctx 2048). V2 still attends the full buffer — not a kernel ranking. TokenLoop MMA 35.2 stays the old plate.\n"
+        "Redraw: python -m gpu.lab.compare_plate --redraw   ·   JSON: docs/runs/compare-3080/   ·   V2 sheet: docs/img/decodev2-3080.png",
         fs=T_TINY,
         color=INK,
         spacing=1.32,

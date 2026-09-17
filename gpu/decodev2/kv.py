@@ -89,6 +89,13 @@ class GraphSafeKV:
         out.view(-1).masked_fill_(live, 0.0)
         return out
 
+    def view(self, layer: int, seq: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Prefill SDPA window ``[1, n_kv, seq, hd]``. Not used inside the decode graph."""
+        seq = int(seq)
+        if seq < 0 or seq > self.max_seq:
+            raise ValueError(f"KV view seq={seq} not in 0..{self.max_seq}")
+        return self._k_attn[layer][:, :, :seq], self._v_attn[layer][:, :, :seq]
+
     def write(self, layer: int, position: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> None:
         """Write decode ``N=1`` rows. ``position`` is a GPU integer tensor."""
         idx = position.reshape(1).to(dtype=torch.long)
@@ -96,6 +103,17 @@ class GraphSafeKV:
         v_row = v.reshape(1, self.n_kv, self.head_dim)
         self._k[layer].index_copy_(0, idx, k_row)
         self._v[layer].index_copy_(0, idx, v_row)
+
+    def write_range(self, layer: int, start: int, k: torch.Tensor, v: torch.Tensor) -> None:
+        """Write prefill rows ``start..start+n``. ``start`` is a Python int (eager only)."""
+        n = int(k.shape[0])
+        end = int(start) + n
+        if start < 0 or end > self.max_seq:
+            raise ValueError(
+                f"KV overflow: writing slots {start}..{end} into max_seq={self.max_seq}"
+            )
+        self._k[layer][start:end].copy_(k.reshape(n, self.n_kv, self.head_dim))
+        self._v[layer][start:end].copy_(v.reshape(n, self.n_kv, self.head_dim))
 
     def mark_written(self, position: torch.Tensor) -> None:
         """``valid_len = position + 1``. Tensor math, safe to capture."""

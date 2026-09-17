@@ -7,6 +7,8 @@ Deepfold is a **terminal** program: it packs model weights into one `.chr`
 file and generates text on NVIDIA Ampere or Ada. It is not a website, not an
 Ollama plugin, and not a browser chat.
 
+**In progress:** TTY chrome / agent layout. Command list below still applies.
+
 Measured tok/s from the author’s RTX 3080 **do not transfer**. Ada (RTX 40xx,
 `sm_89`) and A100 (`sm_80`) may generate; `doctor` will say `experimental`.
 Turing, Hopper, Blackwell, AMD, and macOS generate are refused.
@@ -300,9 +302,11 @@ The setup script already installs the `hub` extra.
 ### `chat` — conversation in a terminal
 
 Needs a real TTY (PowerShell / Linux terminal, not a redirect). Weights load
-once. Each turn prefills the **whole** history from JSON under
-`$DEEPFOLD_HOME/chats` (KV is not reused across turns). Chat default is 256
-new tokens and `--max-seq 2048` (`run` stays 64 / 512).
+once. Later turns prefill only the new suffix when the chat-template prefix
+matches. `/clear`, `/new`, and `/chats` resume reset GPU KV. Transcripts are
+JSON under `$DEEPFOLD_HOME/chats`. Chat default is 256 new tokens and
+`--max-seq` **2048**; `--agent` on a 12 GB 14B plate picks **4096** (8 GB or
+32B overflow stay 2048). `run` stays 64 / 512. User `--max-seq` always wins.
 
 ```text
 deepfold chat -h
@@ -314,7 +318,7 @@ usage: deepfold chat [-h] [--model MODEL] [--chr CHR] [--codec {auto,nf4,vq}]
                      [--max-seq MAX_SEQ] [--max-resident-mib MAX_RESIDENT_MIB]
                      [--raw] [--no-warmup] [--no-compress] [--quiet] [--debug]
 
-Same load path as run, then a prompt_toolkit session. Enter sends, Ctrl+J newline, Ctrl+C stops a reply. Each turn prefills the whole chat. Needs a TTY; scripts use run --prompt.
+Same load path as run, then a prompt_toolkit session. Enter sends, Ctrl+J newline, Ctrl+C stops a reply. Later turns prefill only the new suffix when the template prefix matches. Needs a TTY; scripts use run --prompt.
 
 options:
   -h, --help            show this help message and exit
@@ -341,7 +345,7 @@ options:
   --debug               traceback after the report
 ```
 
-`--max-seq` for `chat` defaults to 2048.
+`--max-seq` for `chat` defaults to 2048; `--agent` on 12 GB 14B picks 4096.
 
 ```text
 deepfold chat --model D:\weights\Qwen2.5-3B-Instruct
@@ -353,12 +357,12 @@ deepfold chat --model D:\weights\Qwen2.5-14B-Instruct --agent --workspace C:\dev
 `--agent` (or `/agent on`) lets the model use workspace tools: `glob`,
 `grep`, `str_replace`, git read, pytest, and allowlisted `run_argv`.
 Writes and commands follow `--agent-trust` (`ask` default; `/agent trust`).
-Each turn still prefills the whole chat; session KV is Wave B in
-[`spec/agent.md`](spec/agent.md). Prefer 14B over 3B for tool JSON.
-`--agent` cannot be combined with `--raw`. `web_search` is opt-in
-(`--agent-web`). New users: Brave Search key, see
-[`web-search.md`](web-search.md). Google CSE is a fallback for old Cloud
-projects only.
+Session KV is in `chat`; `run --prompt` still cold-prefills. Prefer 14B over
+3B for tool JSON. `--agent` cannot be combined with `--raw`. `--agent` also
+turns on `web_search` (free Tavily) unless `--no-agent-web`. Persist for later
+chats with `/agent default on` or `DEEPFOLD_AGENT=1`. Testers need no
+search key: [`web-search.md`](web-search.md). Brave / Google CSE only if
+those keys are already set.
 
 In-session:
 
@@ -412,7 +416,12 @@ REPL).
 deepfold run --model D:\weights\Qwen2.5-3B-Instruct --prompt "Capital of France?" --max-new-tokens 16
 deepfold run --model D:\weights\Qwen2.5-3B-Instruct --no-compress
 deepfold run --model D:\weights\Qwen2.5-3B-Instruct --prompt "Hi" --raw --debug
+deepfold run --model D:\weights\Qwen2.5-3B-Instruct --executor decodev2 --prompt "Hi"
 ```
+
+`--executor auto` (default) uses Decode V2 on resident NF4 (3B / 14B / 20B)
+and TokenLoop on overflow / VQ. Force MMA with `--executor tokenloop`.
+`--executor decodev2` refuses unless the load is resident NF4.
 
 Windows, lines from a file:
 
@@ -541,7 +550,10 @@ deepfold from-ollama qwen2.5:3b --hf Qwen/Qwen2.5-3B-Instruct --yes --dir D:\wei
 | `DEEPFOLD_CHR` | `.chr` file if present and the header matches the model |
 | `DEEPFOLD_MODELS` | root for `pull` trees and the lab |
 | `DEEPFOLD_HOME` | cache (`%LOCALAPPDATA%\deepfold` / `~/.cache/deepfold`); chat JSON in `chats/` |
-| `DEEPFOLD_BRAVE_KEY` | Brave Search API token (preferred for `web_search`). Or `$DEEPFOLD_HOME/cse.env` |
+| `DEEPFOLD_AGENT` | `1` = `deepfold chat` starts with workspace tools (and web_search unless `DEEPFOLD_AGENT_WEB=0`). Or `$DEEPFOLD_HOME/prefs.env` |
+| `DEEPFOLD_AGENT_WEB` | `0` = do not auto-enable `web_search` with `--agent`. Default follows agent |
+| `DEEPFOLD_TAVILY_KEY` | optional Tavily token for `web_search` (keyless works with no key). Or `$DEEPFOLD_HOME/cse.env` |
+| `DEEPFOLD_BRAVE_KEY` | optional Brave Search token; if set, Brave wins over Tavily. Or `cse.env` |
 | `DEEPFOLD_GOOGLE_CSE_KEY` | Custom Search **JSON API** key; new Cloud projects are usually refused. Or `cse.env` |
 | `DEEPFOLD_GOOGLE_CSE_CX` | Programmable Search engine id |
 | `DEEPFOLD_CHR_BIN` | `chr` / `chr.exe` |

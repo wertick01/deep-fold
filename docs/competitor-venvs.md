@@ -107,9 +107,13 @@ used the official ggml-org **Windows CUDA 12.4 zip** (b10964) plus bartowski
 python -m gpu.lab.llamacpp_h2 --bench
 ```
 
-Recorded 2026-09-15: decode **~1.5 tok/s**, `llama-bench` tg64 **1.47**,
-pp512 **69.8**. Cite [`docs/eval-32b.md`](eval-32b.md) and
-[`docs/runs/llamacpp-h2/`](runs/llamacpp-h2/). That is Instruct 32B overflow,
+Recorded 2026-09-15 (`-ngl 99`, fit abort): decode **~1.52 tok/s**,
+`llama-bench` tg64 **1.47**, pp512 **69.8**. Cite
+[`docs/eval-32b.md`](eval-32b.md) and
+[`docs/runs/llamacpp-h2/`](runs/llamacpp-h2/). The matched 2026-09-17 launch
+omits `-ngl` (auto-fit): long **2.54**, same class as Ollama
+([`docs/runs/llamacpp-h2-autofit/`](runs/llamacpp-h2-autofit/),
+[`docs/compare-3080.md`](compare-3080.md)). That is Instruct 32B overflow,
 not the 3B grid below, and not an Ollama blog number.
 
 The 3B `summary.csv` cell stays empty until someone runs the same harness

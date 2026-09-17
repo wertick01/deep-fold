@@ -10,6 +10,8 @@ conda env `torch-gpu`). После setup активируйте `.venv` или �
 Smoke Paris / Berlin / 323 **не** измеряет качество. Tok/s с авторской 3080
 на другой карте не обещать.
 
+**Дорабатываются:** TTY / агентный layout в `chat`.
+
 ---
 
 ## 1. Установка
@@ -118,6 +120,8 @@ Enter — отправить, Ctrl+J — новая строка. Ctrl+C ост�
 ```text
 deepfold run --model D:\weights\Qwen2.5-3B-Instruct --prompt "Capital of France?" --max-new-tokens 16
 ```
+
+`--executor auto` (по умолчанию) берёт Decode V2 на resident NF4 и TokenLoop на overflow / VQ. MMA: `--executor tokenloop`.
 
 ---
 

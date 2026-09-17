@@ -19,9 +19,19 @@ A 14B–32B model in BF16 does not fit on 12 GB. Quantizing the file is not enou
 
 **deep-fold** is a working stack for that constraint: a CPU compressor, the CHR0 container, packed PyTorch modules, an Ampere GEMM kernel, and a generation loop. Linear weights stay in NF4. The kernel rebuilds BF16 fragments in registers for each tile and throws them away. It never writes a dense weight matrix to device memory. If the packed model still does not fit, a resident subset stays on the GPU and a pinned host tail streams through two device slots.
 
-On one RTX 3080 12 GB, Qwen2.5-14B-Instruct and InternLM2.5-20B-Chat generate at **6.56** and **5.01 tokens/s** with resident packed weights. Qwen2.5-32B-Instruct needs overflow: **2.49 tokens/s** (63 steps) / **2.53** counting all 64 generated tokens. Same card, Ollama and llama.cpp auto-fit Q4_K_M are both **2.54**; llama.cpp `-ngl 99` is **1.52**. On 3B, where both nets fit, Q4_K is about **5×** faster. That is not a kernel ranking. Protocol: [32B evaluation](docs/eval-32b.md), [matched 3080 sheet](docs/compare-3080.md).
+On one RTX 3080 12 GB, resident **Decode V2** (NF4 GEMV graph, MMA prefill
+chunks of 32, `max_seq=2048`) generates at **197** tok/s on Qwen2.5-3B (host;
+device-window **199**), **57.5** on Qwen2.5-14B, and **40** on InternLM2.5-20B-Chat.
+TokenLoop MMA on those models remains **35.2 / 6.56 / 5.01**. Qwen2.5-32B
+still needs overflow CopyRing: **2.49** steps / **2.53** eval. Same card,
+Ollama and llama.cpp auto-fit Q4_K_M 32B are both **2.54**; llama.cpp
+`-ngl 99` is **1.52**. 3B Q4_K long is **~187** at ctx 2048; Decode V2 197
+uses the same buffer size but still attends the full axis — same class, not a
+kernel ranking. 14B: llama.cpp **69.9** / Ollama **58.9** / V2 **57.5**. CLI
+`--executor auto` picks Decode V2 on resident NF4. Protocol:
+[Decode V2 lab](docs/decode-v2-lab.md), [matched 3080 sheet](docs/compare-3080.md).
 
-That shows the stack can run across the VRAM line. It is not a ranking of Marlin, AWQ, ExLlamaV2, or vLLM (those rows are SKIP). The 32B longs that share Ollama’s token timer (Ollama **2.54**, llama.cpp auto-fit **2.54**, H2 **2.53**) are essentially tied; the 3B number is not. Placement, versions, and `-ngl` live in the compare sheet. NF4 and fused reconstruction are known techniques. What this repo adds is the CHR0/Go path, host + CUDA wiring, overflow, and measurements you can inspect.
+That shows the stack can run across the VRAM line. It is not a ranking of Marlin, AWQ, ExLlamaV2, or vLLM (those rows are SKIP). The 32B longs that share Ollama’s token timer (Ollama **2.54**, llama.cpp auto-fit **2.54**, H2 **2.53**) are essentially tied; the 3B TokenLoop **35.2** vs Q4_K **~187** is the old MMA path, not Decode V2. Placement, versions, and `-ngl` live in the compare sheet. NF4 and fused reconstruction are known techniques. What this repo adds is the CHR0/Go path, host + CUDA wiring, overflow, Decode V2, and measurements you can inspect.
 
 ![The deep-fold stack: CPU packing to CHR0, packed device weights, and tile-local reconstruction for matrix multiplication](scheme.png)
 
@@ -39,9 +49,11 @@ Five pieces:
 | [CHR0](docs/spec/chr0.md) | Packed codes, group scales, tensor metadata, unquantized payloads |
 | [`gpu.host`](gpu/host/) | Builds the model on the meta device and attaches packed weights; no dense checkpoint on the GPU |
 | [`chr_nf4_gemm`](gpu/nf4/nf4_gemm.cu) | NF4 → BF16 register fragments, then tensor-core multiply |
+| [`chr_nf4_gemv`](gpu/nf4/nf4_gemv.cu) | N=1 CUDA-core GEMV; Decode V2 decode graph |
 | [`TokenLoop`](gpu/loop/generate.py) and [`CopyRing`](gpu/loop/ring.py) | Greedy generation, chunked prefill, overflow copies |
+| [`DecodeV2Loop`](gpu/decodev2/session.py) | Default CLI executor on resident NF4 (`--executor auto`) |
 
-The CLI is `deepfold doctor`, `pull`, `compress`, `run`, and `chat`. A separate runner records machine metadata and smoke numbers on another PC.
+The CLI is `deepfold doctor`, `pull`, `compress`, `run`, and `chat`. **In progress:** TTY chrome / agent layout (neighbor chat). A separate runner records machine metadata and smoke numbers on another PC.
 
 ### Relationship to prior work
 
@@ -113,6 +125,8 @@ The loader weight figure excludes copy slots and KV. The host tail is copied onc
 
 `TokenLoop` walks the transformer graph itself. It does not call `transformers.generate` on the packed path. Live prefill chunks are at most **32** token positions. The compiled 64-position path is experimental, not the default.
 
+Resident CLI decode (`--executor auto`) uses Decode V2: an N=1 CUDA-core GEMV graph for each new token, and MMA prefill chunks of 32. Overflow, VQ, and `--executor tokenloop` stay on `TokenLoop`.
+
 On small matrices, smaller row tiles and split-K launch more blocks. That helps occupancy and costs a reduction. Kernel microseconds and end-to-end tokens/s are different questions; they are reported separately.
 
 ## 3. Experimental results
@@ -121,7 +135,7 @@ On small matrices, smaller row tiles and split-K launch more blocks. That helps 
 
 Reference machine: **one RTX 3080 12 GB** (**12,288 MiB**), Windows/WDDM, [GDDR6X](https://www.nvidia.com/en-us/geforce/graphics-cards/30-series/rtx-3080-3080ti/). “Device memory” means GPU VRAM.
 
-Smoke: three fixed prompts, greedy decode, 64 new tokens max. Prompts are independent; the attention cache resets. BF16 and NF4 run in separate processes. TTFT is prompt-processing / first-token latency after load and warmup — not download, compress, or first JIT. Decode on TokenLoop is tokens/s after the first token (`decode_tok_s`, 63 steps on a 64-token plateau). `eval_tok_s` counts all generated tokens on the same wall and matches Ollama / llama.cpp `eval_count`. Do not quote cached Ollama `prompt_eval` as TTFT.
+Smoke: three fixed prompts, greedy decode, 64 new tokens max. Prompts are independent; the attention cache resets. BF16 and NF4 run in separate processes. TTFT is prompt-processing / first-token latency after load and warmup — not download, compress, or first JIT. Decode on TokenLoop is tokens/s after the first token (`decode_tok_s`, 63 steps on a 64-token plateau). `eval_tok_s` counts all generated tokens on the same wall and matches Ollama / llama.cpp `eval_count`. Decode V2 plates quoted here are ignore-EOS 64 at `max_seq=2048` (same buffer size as Q4_K ctx 2048; V2 still attends the full axis). Host tok/s includes a per-token `.item()`, so quote the device-window on WDDM too. Do not quote cached Ollama `prompt_eval` as TTFT.
 
 These are repo measurements, not an outside replication. The evidence column says which rows have CSVs in git. Do not merge numbers from different kernel versions into one “benchmark”.
 
@@ -130,10 +144,15 @@ These are repo measurements, not an outside replication. The evidence column say
 | Model / mode | Weight storage on device, MiB | TTFT, ms | Decode, tokens/s | Evidence |
 |---|---:|---:|---:|---|
 | Qwen2.5-3B, BF16 — historical pair | 5,886 | 52 | 23.15 | [CSV](docs/runs/qwen25-3b/summary.csv) |
-| Qwen2.5-3B, NF4 resident — historical pair | 1,563 | 212 | 17.00 | [CSV](docs/runs/qwen25-3b/summary.csv) |
-| Qwen2.5-14B, NF4 resident | 7,483 | 759 | 6.56 | [CSV](docs/runs/qwen25-14b/summary.csv) |
-| InternLM2.5-20B, NF4 resident | 10,062 | 605 | 5.01 | [CSV](docs/runs/internlm20b/summary.csv) |
-| Qwen2.5-32B, NF4 overflow | 9,716 + copy slots | 1,006 | 2.31 smoke / **2.49** steps / **2.53** eval | [Run notes](docs/runs/h2-qwen25-32b/data_path.md), [long](docs/runs/deepfold-long-32b/SUMMARY.txt) |
+| Qwen2.5-3B, NF4 TokenLoop — historical pair | 1,563 | 212 | 17.00 | [CSV](docs/runs/qwen25-3b/summary.csv) |
+| Qwen2.5-3B, NF4 Decode V2 | packed + dense embed | **86** | **197** host / **199** device | [lab](docs/decode-v2-lab.md) |
+| Qwen2.5-14B, NF4 TokenLoop | 7,483 | 759 | 6.56 | [CSV](docs/runs/qwen25-14b/summary.csv) |
+| Qwen2.5-14B, NF4 Decode V2 | 7,483 packed | **322** | **57.5** | [lab](docs/decode-v2-lab.md) |
+| InternLM2.5-20B, NF4 TokenLoop | 10,062 | 605 | 5.01 | [CSV](docs/runs/internlm20b/summary.csv) |
+| InternLM2.5-20B, NF4 Decode V2 | 10,062 packed | **220** | **40** exclusive | [lab](docs/decode-v2-lab.md) |
+| Qwen2.5-32B, NF4 overflow TokenLoop | 9,716 + copy slots | 1,006 | 2.31 smoke / **2.49** steps / **2.53** eval | [Run notes](docs/runs/h2-qwen25-32b/data_path.md), [long](docs/runs/deepfold-long-32b/SUMMARY.txt) |
+
+Decode V2 rows are exclusive 2026-09-17 plates ([lab log](docs/decode-v2-lab.md)), not the historical CSVs. TokenLoop 14B/20B CSVs stay the MMA numbers.
 
 Matched engines on the same card (engine in the left column; launches and counters grouped under it):
 
@@ -144,6 +163,7 @@ Matched engines on the same card (engine in the left column; launches and counte
 <th>Launch / counter</th>
 <th align="right">Weight / smi, MiB</th>
 <th align="right">TTFT, ms</th>
+<th align="right">3B long, tok/s</th>
 <th align="right">32B long, tok/s</th>
 <th>Evidence</th>
 </tr>
@@ -151,9 +171,10 @@ Matched engines on the same card (engine in the left column; launches and counte
 <tbody>
 <tr>
 <td>Ollama 0.34.0</td>
-<td>Q4_K_M <code>qwen2.5:32b</code></td>
+<td>Q4_K_M <code>qwen2.5:*</code></td>
 <td align="right">11,559 smi</td>
 <td align="right">n/a (cached <code>prompt_eval</code>)</td>
+<td align="right"><strong>187.3</strong></td>
 <td align="right"><strong>2.54</strong></td>
 <td><a href="docs/eval-32b.md">32B evaluation</a>, <a href="docs/runs/ollama-h2-32b/SUMMARY.txt">summary</a></td>
 </tr>
@@ -162,6 +183,7 @@ Matched engines on the same card (engine in the left column; launches and counte
 <td>auto-fit (no <code>-ngl</code>)</td>
 <td align="right">11,636 smi</td>
 <td align="right">1,444</td>
+<td align="right" rowspan="2"><strong>187.0</strong></td>
 <td align="right"><strong>2.54</strong></td>
 <td><a href="docs/runs/llamacpp-h2-autofit/SUMMARY.txt">auto-fit</a></td>
 </tr>
@@ -177,12 +199,23 @@ Matched engines on the same card (engine in the left column; launches and counte
 <td>63 <code>step()</code> after first token</td>
 <td align="right" rowspan="2">9,716 + copy slots</td>
 <td align="right" rowspan="2">1,006 smoke / 925 long</td>
+<td align="right"><strong>35.2</strong></td>
 <td align="right"><strong>2.49</strong></td>
 <td rowspan="2"><a href="docs/runs/h2-qwen25-32b/data_path.md">run notes</a>, <a href="docs/runs/deepfold-long-32b/SUMMARY.txt">long</a></td>
 </tr>
 <tr>
 <td>64 generated tokens / same wall</td>
+<td align="right"><strong>35.8</strong></td>
 <td align="right"><strong>2.53</strong></td>
+</tr>
+<tr>
+<td>deep-fold Decode V2</td>
+<td>NF4 GEMV graph, <code>max_seq=2048</code></td>
+<td align="right">—</td>
+<td align="right">86 (3B prefill)</td>
+<td align="right"><strong>197</strong></td>
+<td align="right">—</td>
+<td><a href="docs/decode-v2-lab.md">Decode V2 lab</a></td>
 </tr>
 </tbody>
 </table>
@@ -197,13 +230,17 @@ without `-ngl` does the same class of split; H2 streamed 6885 MiB/token.
 (`llama-bench` pp512 is 69.8 tokens/s). Sheet:
 [compare-3080](docs/compare-3080.md), [figure](docs/img/compare-3080.png).
 
-**14B.** Committed BF16: **0.92 tokens/s**, **1,028 ms TTFT**. NF4: **6.56 tokens/s**, **759 ms**. After-load PyTorch allocation 28,270 MiB vs 7,539 MiB. That is dense oversubscribe vs resident packed on this Windows box, not an isolated kernel bake-off.
+**14B.** Committed BF16: **0.92 tokens/s**, **1,028 ms TTFT**. NF4 TokenLoop:
+**6.56 tokens/s**, **759 ms**. Decode V2 on the same weights: **57.5 tok/s**,
+**322 ms** at `max_seq=2048` ([lab](docs/decode-v2-lab.md)). After-load PyTorch allocation
+28,270 MiB vs 7,539 MiB. That is dense oversubscribe vs resident packed on
+this Windows box, not an isolated kernel bake-off.
 
 ![Qwen2.5-14B BF16 and NF4 memory and generation measurements](docs/img/lab-qwen25-14b.png)
 
 *Figure 2. Committed 14B comparison. Dedicated GPU use and PyTorch allocator counters are not the same thing. The figure’s “working set” / “shared” labels need that split.*
 
-**20B.** BF16 load was recorded. Generation failed: the model’s remote generate code did not match the installed Transformers. No BF16 tokens/s. That is an environment miss, not proof a BF16 baseline is impossible.
+**20B.** BF16 load was recorded. Generation failed: the model’s remote generate code did not match the installed Transformers. No BF16 tokens/s. That is an environment miss, not proof a BF16 baseline is impossible. TokenLoop NF4: **5.01 tok/s**, **605 ms**. Decode V2 exclusive ignore-EOS: **40 tok/s** host, **220 ms** prefill (`max_seq=2048`). Do not quote the 25.6 / 20.7 device-windows (second 64-token pass at VRAM cap) or overlapping 20B jobs. Hard-12 on the same weights is **9/12** at **35.2 tok/s**, not the 40 plateau.
 
 **32B overflow.** All three smoke replies passed. Serial copy of the host tail calibrates at about **277 ms/token** (~**3.6 tokens/s** if the wall were copy-only). Measured generation is about **432 ms/token**. The copy figure is a transfer reference, not model throughput. No BF16 32B baseline. TokenLoop 32B NF4 hard-12 is **12/12** (mean **2.12 tok/s**). Ollama 32B on the same fixture is **11/12** (miss `gsm8k-stickers`); Ollama 3B is **7/12**.
 
@@ -212,19 +249,39 @@ counts all 64 generated tokens on the same wall (**2.53**). Ollama
 `eval_count=64` is **2.54**. Quote **2.53 vs 2.54** when matching the server
 timer. Not enough to rank them.
 
-![Matched 32B/3B decode on one RTX 3080: Ollama and llama.cpp auto-fit 2.54, H2 2.49 steps / 2.53 eval, llama.cpp -ngl 99 is 1.52](docs/img/compare-3080.png)
+![Matched 32B/3B decode on one RTX 3080: 32B Ollama and llama.cpp auto-fit 2.54, H2 2.49/2.53; 3B Decode V2 197 next to Q4_K ~187](docs/img/compare-3080.png)
 
-*Figure 3. Quote 32B **long** plateaus. Ollama 2.54 vs llama.cpp auto-fit 2.54 vs H2 2.53 (`eval_tok_s`) is CPU-suffix vs CPU-suffix vs PCIe CopyRing, not a kernel win. H2 step rate is 2.49. llama.cpp 1.52 is `-ngl 99` (fit abort). On 3B both nets fit: Ollama ~187 vs TokenLoop 35.2 / 35.8 — the whole generate path, not an isolated NF4 GEMM. SKIP rows stay SKIP. Redraw: `python -m gpu.lab.compare_plate --redraw`.*
+*Figure 3. Quote 32B **long** plateaus. Ollama 2.54 vs llama.cpp auto-fit 2.54 vs H2 2.53 (`eval_tok_s`) is CPU-suffix vs CPU-suffix vs PCIe CopyRing, not a kernel win. H2 step rate is 2.49. llama.cpp 1.52 is `-ngl 99` (fit abort). 3B Decode V2 **197** (`max_seq=2048`) sits next to Q4_K **~187** (ctx 2048). V2 still attends the full buffer. TokenLoop MMA **35.2** is the old resident plate. SKIP rows stay SKIP. Redraw: `python -m gpu.lab.compare_plate --redraw`.*
 
-### 3.3 Newer author-reported measurements
+![Decode V2 resident 3B/14B/20B on one RTX 3080](docs/img/decodev2-3080.png)
 
-| Run | BF16 TTFT / decode | NF4 TTFT / decode | Evidence status |
+*Figure 4. Decode V2 GEMV graph + MMA prefill-32. Headline V2 (`max_seq=2048`): 3B **197**, 14B **57.5**, 20B **40**. Exclusive Q4_K long (ctx 2048): 14B llama.cpp **69.9** / Ollama **58.9**; 20B Ollama **11.53** / llama.cpp **11.87**. V2 still attends the full axis. Overlapping 14B 5.95 and 20B 25.6 / 20.7 are not decode. Hard-12 is the second panel. Redraw: `python -m gpu.lab.decodev2_plate --redraw`.*
+
+### 3.3 Decode V2 (2026-09-18, `max_seq=2048`)
+
+CLI default `--executor auto` uses Decode V2 on resident NF4 (3B / 14B / 20B) and TokenLoop on overflow / VQ. Greedy ids matched TokenLoop sequential N=1. Ignore-EOS 64, `max_seq=2048` to match Q4_K ctx 2048. V2 still attends the full buffer; Q4_K attends live length. Host tok/s includes a per-token `.item()`; quote the device-window on WDDM too.
+
+| Model | TokenLoop MMA, tok/s | Decode V2 host / device, tok/s | Ollama Q4_K long | llama.cpp Q4_K long | Prefill V2, ms | Evidence |
+|---|---:|---:|---:|---:|---:|---|
+| Qwen2.5-3B | 35.2 (product plate) | **197** / **199** | **187.3** ctx 2048 | **187.0** ctx 2048 | **86** | [lab](docs/decode-v2-lab.md), [run](docs/runs/decodev2-3b-maxseq2048/) |
+| Qwen2.5-14B | 6.56 (committed CSV) | **57.5** / **58.1** | **58.9** ctx 2048 | **69.9** ctx 2048 | **322** | [lab](docs/decode-v2-lab.md), [Ollama](docs/runs/ollama-h2-14b/), [llama.cpp](docs/runs/llamacpp-h2-14b/), [V2](docs/runs/decodev2-14b-maxseq2048/) |
+| InternLM2.5-20B | 5.01 smoke / **4.59** long | **40** host | **11.53** ctx 2048 | **11.87** ctx 2048 | **220** | [lab](docs/decode-v2-lab.md), [Ollama](docs/runs/ollama-h2-20b/), [llama.cpp](docs/runs/llamacpp-h2-20b/), [V2](docs/runs/decodev2-20b-maxseq2048/) |
+
+Do not merge those timers into “we beat llama.cpp”. 14B V2 **57.5** is under exclusive Ollama **58.9** and llama.cpp **69.9**. Overlapping Ollama 14B **5.95** and overlapping 20B jobs are not numbers. 20B device-window **25.6** / **20.7** is a second pass at the VRAM cap, not decode. 32B is still CopyRing. The 2026-09-17 `max_seq=512` plate was **196 / 55.6 / 41.0**.
+
+Hard-12 (independent turns, 256 new tokens, same fixture as Ollama):
+
+| Model | Decode V2 | Ollama Q4_K | llama.cpp Q4_K |
 |---|---|---|---|
-| Qwen2.5-3B, paired run dated 2026-09-14 | 48 ms / 24.8 tokens/s | 92 ms / 28.7 tokens/s | Author-reported; paired raw CSVs are outside git |
+| Qwen2.5-3B | **8/12** · **190.9** tok/s | **7/12** | Coming soon |
+| Qwen2.5-14B | **11/12** · **54.8** tok/s | Coming soon | Coming soon |
+| InternLM2.5-20B | **9/12** · **35.2** tok/s | **9/12** | Coming soon |
 
-Occupancy and prefill work moved NF4 decode ahead of BF16 in that session. BF16 still wins TTFT. Do not attach these numbers to the old 3B CSV or plot them as one run.
+20B hard-12 **35.2** is not the ignore-EOS **40**. Evidence: [3B](docs/runs/hard-decodev2-3b/), [14B](docs/runs/hard-decodev2-14b/), [20B](docs/runs/hard-decodev2-20b/), [Ollama 3B](docs/runs/ollama-hard-3b/), [Ollama 20B](docs/runs/ollama-hard-20b/).
 
-A separate bitsandbytes NF4 smoke: **22.2 tokens/s / 60 ms** in the matched 3080 JSON (an older 22.8 / 57 ms dump is outside git). The [committed 3B competitor matrix](docs/runs/competitor-qwen25-3b/) is still SKIP for AWQ / GPTQ / ExLlamaV2 / vLLM. Matched rows that *do* exist: Ollama, llama.cpp, bitsandbytes, and H2 — [compare-3080](docs/compare-3080.md). 3B long: Ollama **187.3**, llama.cpp **187.0**, H2 **35.2** steps / **35.8** eval.
+**Coming soon:** Ollama 14B hard-12; llama.cpp hard-12 (3B / 14B / 20B); 3B Nsight CUDA 70–85%. **In progress:** CLI TTY chrome / agent layout.
+
+The 2026-09-14 paired 3B BF16 vs TokenLoop NF4 (48 ms / 24.8 vs 92 ms / 28.7) is a different stack. bitsandbytes NF4 smoke: **22.2 tok/s / 60 ms**. AWQ / GPTQ / ExLlamaV2 / vLLM stay SKIP.
 
 ### 3.4 Memory metrics
 
@@ -256,12 +313,13 @@ There is a corpus NLL adapter. No published WikiText PPL. A local GSM8K slice in
 
 - One GPU, one Windows box. Other Ampere-family capabilities are experimental. No published Linux tokens/s.
 - Public `pull` allowlist is four models. The architecture walker is wider than that list; a layout that parses is not a guarantee for an arbitrary checkpoint.
-- Generation is greedy. `chat` does not reload weights between turns. It re-prefills the whole conversation and does not reuse the KV prefix. Transcripts are JSON under `$DEEPFOLD_HOME/chats`.
+- Generation is greedy. `chat` does not reload weights between turns. Later turns prefill only the new suffix when the chat-template prefix matches. Transcripts are JSON under `$DEEPFOLD_HOME/chats`.
 - `--max-seq` defaults to 512 for `run` and 2048 for `chat`. Longer context costs KV. The fit estimate uses a fixed runtime allowance, not a promise for every length or GPU load.
 - Overflow depends on host RAM, pinning, PCIe, and OS sync. Placement and auto-eligibility are conservative heuristics.
 - VQ 2-bit is explicit experimental tooling; the 3B chat canary failed. `--codec auto` picks NF4 or NF4 overflow, never VQ.
-- Newer 3B and competitor claims still need full public artifacts. Broad quality and “faster than 4-bit engines” are not established. Matched 32B longs that share Ollama’s token timer (Ollama **2.54**, llama.cpp auto-fit **2.54**, H2 **2.53**) are tied, not a win; 3B Q4_K is far ahead of this NF4 decode kernel.
-- Decode V2 (`gpu/decodev2`) is an experimental N=1 CUDA-graph decoder. TokenLoop remains the shipped generate path. Lab log: [`docs/decode-v2-lab.md`](docs/decode-v2-lab.md). Do not quote its 3B tok/s as a product switch.
+- Newer 3B and competitor claims still need full public artifacts. Broad quality and “faster than 4-bit engines” are not established. Matched 32B longs that share Ollama’s token timer (Ollama **2.54**, llama.cpp auto-fit **2.54**, H2 **2.53**) are tied, not a win. 3B Decode V2 **197** (`max_seq=2048`) and Q4_K **~187** (ctx 2048) are the same capacity class; V2 still attends the full buffer. TokenLoop MMA **35.2** is the old resident path. 14B V2 **57.5** is not faster than Ollama **58.9** or llama.cpp **69.9**.
+- Decode V2 (`gpu/decodev2`) is the CLI default on resident NF4 (`--executor auto`). Overflow / VQ / 32B stay TokenLoop. Lab log: [`docs/decode-v2-lab.md`](docs/decode-v2-lab.md). Do not quote overlapping 20B jobs or the 25.6 / 20.7 device-windows as 20B decode. Hard-12 20B **35.2** is not ignore-EOS **40**.
+- **Coming soon:** Ollama 14B hard-12; llama.cpp hard-12 (3B / 14B / 20B); 3B Nsight CUDA 70–85%. **In progress:** CLI TTY chrome / agent layout.
 - A CPU/GPU layer split was tried on `exp/cpu-hybrid-overflow` and missed Ollama (**2.091** vs **2.54**). Default generate is still CopyRing **2.49**. Details stay on that branch.
 
 ## 5. Installation
@@ -343,6 +401,8 @@ python -m pip install -e ".[internlm]"
 
 ### Chat controls
 
+**In progress:** TTY chrome / agent layout.
+
 | Input | Action |
 |---|---|
 | Enter | Submit |
@@ -355,19 +415,20 @@ python -m pip install -e ".[internlm]"
 | `/chats` | List / resume a saved conversation |
 | `/copy` | Copy last reply (`/copy all` for the whole chat) |
 | `/save [path]` | Write last reply as UTF-8 |
-| `/agent on` `/agent off` `/agent trust` | Workspace tools (grep/patch/pytest/allowlisted argv) |
+| `/agent on` `/agent off` `/agent trust` `/agent default` | Workspace tools (grep/patch/pytest/allowlisted argv); web_search follows |
 | `/quit` or `/exit` | Exit |
 
-`chat` needs a real TTY. Scripts: `run --prompt` (answer on stdout, diagnostics on stderr). History is JSON under `$DEEPFOLD_HOME/chats` and must fit `--max-seq` (chat default 2048). Each turn re-prefills; the GPU KV cache is not reused across turns. Chat default is 256 new tokens (`run` stays at 64). `/clear`, `/new`, or raise `--max-seq` when context fills. The stream shows markdown and a Unicode sketch of `$...$` / `$$`; `/copy` keeps the raw model text.
+`chat` needs a real TTY. Scripts: `run --prompt` (answer on stdout, diagnostics on stderr). History is JSON under `$DEEPFOLD_HOME/chats` and must fit `--max-seq` (chat default 2048; `--agent` on 12 GB 14B picks 4096). Later turns prefill only the new suffix when the template prefix matches. Chat default is 256 new tokens (`run` stays at 64). `/clear`, `/new`, or raise `--max-seq` when context fills. The stream shows markdown and a Unicode sketch of `$...$` / `$$`; `/copy` keeps the raw model text.
 
 `--agent` (or `/agent on`) is the coding-agent flag. The TTY can search
 (`glob`/`grep`), patch (`str_replace`), run pytest, and run an allowlisted
 `run_argv`. Writes and commands follow `--agent-trust` (`ask` default).
-Each turn still prefills the whole chat; session KV is Wave B in
-[`docs/spec/agent.md`](docs/spec/agent.md). 14B is the agent model; 3B is
-chat/smoke. There is no general shell. `web_search` stays off until `--agent-web`
-plus `DEEPFOLD_BRAVE_KEY` ([walkthrough](docs/web-search.md)). Google CSE
-keys are a fallback for an old Cloud project only.
+Session KV lives in `chat`; `run --prompt` still cold-prefills. 14B is the
+agent model; 3B is chat/smoke. There is no general shell. `web_search`
+turns on with `--agent` (free Tavily; [`walkthrough`](docs/web-search.md));
+`--no-agent-web` keeps tools local. `/agent default on` or `DEEPFOLD_AGENT=1`
+remembers this for the next `chat`. Brave or Google CSE only if those keys
+are already set.
 
 ## 7. CLI and configuration
 
@@ -383,7 +444,7 @@ keys are a fallback for an old Cloud project only.
 | `deepfold test` | CLI acceptance |
 | `deepfold test --live` | Local readiness; no download, no generate |
 
-Common flags: `--max-new-tokens`, `--max-seq`, `--no-compress`, `--no-warmup`, `--raw`. `--max-resident-mib` caps packed-weight residency for overflow experiments. `deepfold COMMAND --help` is the parser contract.
+Common flags: `--max-new-tokens`, `--max-seq`, `--no-compress`, `--no-warmup`, `--raw`, `--executor auto|tokenloop|decodev2`. `--max-resident-mib` caps packed-weight residency for overflow experiments. `deepfold COMMAND --help` is the parser contract.
 
 | Variable | Purpose |
 |---|---|
@@ -392,7 +453,10 @@ Common flags: `--max-new-tokens`, `--max-seq`, `--no-compress`, `--no-warmup`, `
 | `DEEPFOLD_CHR_BIN` | Compressor executable |
 | `DEEPFOLD_MODELS` | Model root |
 | `DEEPFOLD_HOME` | Cache root |
-| `DEEPFOLD_BRAVE_KEY` | Brave Search API token (or `$DEEPFOLD_HOME/cse.env`) |
+| `DEEPFOLD_AGENT` | `1` = `chat` starts with tools (`prefs.env` or `/agent default on`) |
+| `DEEPFOLD_AGENT_WEB` | `0` = keep `web_search` off when agent is on; default follows agent |
+| `DEEPFOLD_TAVILY_KEY` | Optional Tavily token for `web_search` (keyless works with none) |
+| `DEEPFOLD_BRAVE_KEY` | Optional Brave Search token (wins over Tavily if set) |
 | `DEEPFOLD_GOOGLE_CSE_KEY` | Custom Search JSON API key (legacy; or `cse.env`) |
 | `DEEPFOLD_GOOGLE_CSE_CX` | Programmable Search engine id |
 | `DEEPFOLD_RUNS` | Report directory root |
@@ -438,7 +502,7 @@ python -m gpu.lab.run --model-dir ./models/Qwen2.5-3B-Instruct --chr ./models/qw
 
 This is a separate stack from the small CLI env: [lab guide](docs/lab.md). A fair pair records commit, model revision, env, prompts, token counts, context, warmup, and memory counters for both sessions.
 
-Kernel checks: [`gpu/nf4/verify.py`](gpu/nf4/verify.py), [`gpu/nf4/numerics.py`](gpu/nf4/numerics.py). Overflow: [`gpu/lab/h2_trace.py`](gpu/lab/h2_trace.py), [32B notes](docs/eval-32b.md). Matched engines: [`python -m gpu.lab.compare_plate --redraw`](docs/compare-3080.md). `--dry-plot` uses synthetic fixtures. Do not publish those numbers as measurements.
+Kernel checks: [`gpu/nf4/verify.py`](gpu/nf4/verify.py), [`gpu/nf4/numerics.py`](gpu/nf4/numerics.py). Overflow: [`gpu/lab/h2_trace.py`](gpu/lab/h2_trace.py), [32B notes](docs/eval-32b.md). Matched engines: [`python -m gpu.lab.compare_plate --redraw`](docs/compare-3080.md). Decode V2 sheet: `python -m gpu.lab.decodev2_plate --redraw`. `--dry-plot` uses synthetic fixtures. Do not publish those numbers as measurements.
 
 ## 9. Documentation and development
 
@@ -446,8 +510,8 @@ Kernel checks: [`gpu/nf4/verify.py`](gpu/nf4/verify.py), [`gpu/nf4/numerics.py`]
 |---|---|
 | Short install | [Quickstart](docs/quickstart.md), [Russian](docs/quickstart.ru.md) |
 | CLI details | [Install](docs/install.md), [UX notes](docs/ux.md) |
-| Agent mode (tools in CLI; KV is Wave B) | [Agent spec](docs/spec/agent.md) |
-| Agent web search (Brave key) | [English](docs/web-search.md), [Russian](docs/web-search.ru.md) |
+| Agent mode (tools + session KV in CLI) | [Agent spec](docs/spec/agent.md) |
+| Agent web search (free Tavily) | [English](docs/web-search.md), [Russian](docs/web-search.ru.md) |
 | Container and NF4 layout | [CHR0](docs/spec/chr0.md), [NF4](docs/spec/nf4.md) |
 | Kernel and generation | [Ampere kernel](docs/kernel-ampere.md), [TokenLoop](docs/token-loop.md) |
 | Overflow | [H2 design](docs/plan-h2-ring.md), [recorded data path](docs/runs/h2-qwen25-32b/data_path.md) |
@@ -455,6 +519,7 @@ Kernel checks: [`gpu/nf4/verify.py`](gpu/nf4/verify.py), [`gpu/nf4/numerics.py`]
 | Quality checks | [Hard-12](docs/eval-hard-qwen25.md), [local evaluation](docs/eval-local.md) |
 | Kernel profiling | [Nsight records](docs/runs/ncu/) |
 | 32B vs Ollama / llama.cpp Q4_K_M (same 3080) | [32B evaluation](docs/eval-32b.md), [compare sheet](docs/compare-3080.md) |
+| Decode V2 (resident GEMV; CLI `--executor auto`) | [Lab log](docs/decode-v2-lab.md), [contract](docs/decode-v2.md), [figure](docs/img/decodev2-3080.png) |
 | Other competitor stacks (AWQ / Marlin / ExLlama / vLLM still SKIP) | [Competitor environments](docs/competitor-venvs.md) |
 
 Useful PRs: complete run artifacts, Windows/Linux install tests, stronger checkpoint identity, broader quality eval, matched 4-bit engine comparisons. Perf changes should come with both numerical checks and generate-path timings.

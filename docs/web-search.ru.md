@@ -1,148 +1,113 @@
-# web_search: Brave Search (пошагово)
+# web_search: бесплатный поиск (Tavily)
 
 Агент в `deepfold chat --agent` может искать в интернете инструментом
-`web_search`. Для **новых** пользователей Google Custom Search JSON API
-[закрыт](https://developers.google.com/custom-search/v1/overview). Рабочий
-путь — [Brave Search API](https://api-dashboard.search.brave.com/documentation/quickstart).
-Это не выдача google.com один-в-один, но это настоящий веб-поиск: заголовок,
-URL, сниппет.
+`web_search`. Чтобы **просто протестировать продукт**, карта и аккаунт
+не нужны: достаточно `--agent` (поиск включается вместе с агентом).
+По умолчанию идёт
+[Tavily keyless](https://docs.tavily.com/documentation/keyless) — общий
+бесплатный лимит, без регистрации.
 
-Официальный quickstart Brave: карточка нужна, чтобы **включить план**. После
-активации Search обычно дают месячные кредиты (порядка 1000 запросов). Без
-плана ключ не выдают.
+Это не выдача google.com один-в-один. Результат — заголовок, URL, сниппет.
+HTML google.com / DuckDuckGo Deepfold **не** скрейпит.
 
-Ключ **не** клади в git, в чат и в `.chr`.
+**Дорабатываются:** TTY / агентный layout. Поиск ниже по-прежнему включается флагом `--agent`.
 
----
+Ключи (если заведёшь позже) **не** клади в git, в чат и в `.chr`.
 
-## 1. Аккаунт
-
-1. Открой [регистрацию Brave Search API](https://api-dashboard.search.brave.com/register).
-2. Укажи email и пароль.
-3. Подтверди почту по ссылке из письма.
-4. Войди в [дашборд](https://api-dashboard.search.brave.com/).
+English: [`web-search.md`](web-search.md). Контракт:
+[`spec/agent.md`](spec/agent.md) §5.7.
 
 ---
 
-## 2. План Search
+## 1. Тестер: только флаг
 
-1. В дашборде открой [Plans](https://api-dashboard.search.brave.com/app/plans)
-   (меню слева → Plans).
-2. Выбери план **Search** (в нём есть Web Search; LLM Context для Deepfold не
-   обязателен).
-3. Введи карту, как просит форма. Без этого шаг «API Keys» часто пустой.
-4. Дождись, пока план станет active.
-
-Цены и кредиты: [pricing](https://api-dashboard.search.brave.com/documentation/pricing).
-Следи за расходом в дашборде, не в Deepfold.
-
----
-
-## 3. Ключ
-
-1. Меню → **API Keys**
-   ([прямая ссылка](https://api-dashboard.search.brave.com/app/api-keys), путь
-   может чуть отличаться).
-2. **Add API Key**.
-3. Имя, например `deepfold-3080`. Это ярлык, не сам секрет.
-4. Скопируй токен **один раз**. Его показывают при создании. Если потерял —
-   revoke и сделай новый, старый не восстановить.
-5. Не вставляй ключ в Cursor-чат и не коммить.
-
----
-
-## 4. Куда положить ключ на этом ПК (Windows)
-
-Нужна переменная `DEEPFOLD_BRAVE_KEY`. Достаточно **одного** из двух способов.
-После записи **закрой и заново открой** терминал и Cursor: уже запущенные окна
-старый env не подхватят.
-
-### Способ A — пользовательская env (удобно)
-
-PowerShell **от твоего пользователя**, не от администратора:
+Пока агент выключен, модель **не видит** `web_search` и сокет не
+открывается. `--agent` включает инструменты и поиск. Чтобы поиск не
+включался: `--no-agent-web` или `/agent web off`.
 
 ```powershell
-[System.Environment]::SetEnvironmentVariable(
-  "DEEPFOLD_BRAVE_KEY",
-  "вставь-токен-сюда",
-  "User")
-```
-
-Проверка, что строка есть (значение не печатаем):
-
-```powershell
-[bool][System.Environment]::GetEnvironmentVariable("DEEPFOLD_BRAVE_KEY", "User")
-```
-
-Должно быть `True`.
-
-### Способ B — файл кэша Deepfold
-
-Файл `%LOCALAPPDATA%\deepfold\cse.env` уже gitignored. UTF-8, одна строка на
-ключ:
-
-```text
-DEEPFOLD_BRAVE_KEY=вставь-токен-сюда
-```
-
-Если в файле уже есть `DEEPFOLD_GOOGLE_CSE_CX` — не стирай, просто добавь
-строку Brave. Env выигрывает у файла, если заданы оба.
-
-Алиас `BRAVE_API_KEY` тоже читается (как в доке Brave). Предпочтительнее
-`DEEPFOLD_BRAVE_KEY`.
-
----
-
-## 5. Включить инструмент в чате
-
-Пока нет `--agent-web` (или `/agent web on`), модель **не видит** `web_search` и
-сокет не открывается.
-
-```powershell
-python -m gpu.cli chat --model D:\weights\Qwen2.5-14B-Instruct --agent --agent-web --workspace C:\dev\deep-fold
+python -m gpu.cli chat --model D:\weights\Qwen2.5-14B-Instruct --agent --workspace C:\dev\deep-fold
 ```
 
 Подставь свой каталог модели. 14B для инструментов надёжнее 3B.
 
+Чтобы каждый следующий `chat` стартовал так же, без флагов:
+
+```text
+/agent default on
+```
+
+Это пишет `%LOCALAPPDATA%\deepfold\prefs.env` (`DEEPFOLD_AGENT=1`). Env
+`DEEPFOLD_AGENT=1` делает то же самое. Снять: `/agent default off` или
+`--no-agent`.
+
 Уже внутри сессии:
 
 ```text
+/agent on
 /agent web on
 ```
 
 На trust `ask` каждый поиск спросит `y/N`. Для сессии без вопросов:
 `--agent-trust workspace` или `/agent trust workspace`.
 
+Попроси в чате факт, которого нет в репозитории. В логе инструментов должно
+мелькнуть `web_search …`, в результате — нумерованные URL.
+
 ---
 
-## 6. Как понять, что заработало
+## 2. Если keyless упёрся в лимит (HTTP 429)
 
-Попроси в чате что-то, чего нет в репозитории, например свежую дату релиза
-библиотеки. В логе инструментов должно мелькнуть `web_search …`, в результате —
-нумерованные URL.
+Общий keyless-пул общий на всех. Карту по-прежнему не просят.
 
-Типичные отказы (ключ в текст ошибки не попадает):
+1. Заведи бесплатный ключ на [app.tavily.com](https://app.tavily.com)
+   (обычно 1000 поисков/месяц, без карты).
+2. Положи его в env или в `%LOCALAPPDATA%\deepfold\cse.env` (файл уже
+   gitignored):
+
+```powershell
+[System.Environment]::SetEnvironmentVariable(
+  "DEEPFOLD_TAVILY_KEY",
+  "tvly-вставь-сюда",
+  "User")
+```
+
+Или строка в файле:
+
+```text
+DEEPFOLD_TAVILY_KEY=tvly-вставь-сюда
+```
+
+Закрой и заново открой терминал и Cursor. Алиас `TAVILY_API_KEY` тоже
+читается; предпочтительнее `DEEPFOLD_TAVILY_KEY`.
+
+---
+
+## 3. Опционально: Brave / Google
+
+Если **уже есть** ключ, агент его возьмёт:
+
+| Приоритет | Когда |
+|---|---|
+| 1. Brave | задан `DEEPFOLD_BRAVE_KEY` (или `BRAVE_API_KEY`) |
+| 2. Google CSE | заданы **оба** `DEEPFOLD_GOOGLE_CSE_KEY` и `DEEPFOLD_GOOGLE_CSE_CX` |
+| 3. Tavily | иначе: ключ Tavily или keyless |
+
+Brave Search API при регистрации обычно **сразу просит карту** — для теста
+продукта это не путь. Google Custom Search JSON API
+[закрыт для новых Cloud-проектов](https://developers.google.com/custom-search/v1/overview).
+Виджет `cse.js` к агенту не подключается.
+
+---
+
+## 4. Ошибки
 
 | Сообщение | Что сделать |
 |---|---|
-| `web_search is off` | `--agent-web` или `/agent web on` |
-| `needs DEEPFOLD_BRAVE_KEY` | шаг 4, потом новый терминал |
-| HTTP 401 / 403 | новый ключ, план active |
-| HTTP 422 | план Search не включает Web Search |
-| HTTP 429 | кредиты/лимит; подожди или пополни в дашборде |
+| `web_search is off` | `--agent` (поиск идёт с агентом), `--agent-web`, или `/agent web on` |
+| Tavily HTTP 429 | шаг 2 (бесплатный ключ, без карты) |
+| Tavily HTTP 401 / 403 | проверь `DEEPFOLD_TAVILY_KEY` |
+| Brave HTTP 401 / 403 / 422 / 429 | план Brave; для теста продукта убери ключ Brave, чтобы снова пошёл Tavily |
+| Google CSE HTTP 403 | новый Cloud-проект JSON API не выдаёт; убери CSE-ключи |
 
-Живой запрос из этой инструкции Deepfold сам не делает: ключ должен появиться
-у тебя, потом уже чат.
-
----
-
-## 7. Google CSE
-
-Ветка Google остаётся: если заданы **оба** `DEEPFOLD_GOOGLE_CSE_KEY` и
-`DEEPFOLD_GOOGLE_CSE_CX` **и нет** ключа Brave, используется Custom Search JSON
-API. Для нового Cloud-проекта это обычно 403. Если задан Brave — берётся Brave.
-
-Виджет `cse.js` / `<div class="gcse-search">` к агенту не подключается.
-
-English: [`web-search.md`](web-search.md). Контракт инструмента:
-[`spec/agent.md`](spec/agent.md) §5.7.
+Живой запрос эта страница сама не делает.

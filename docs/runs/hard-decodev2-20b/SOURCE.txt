@@ -1,0 +1,6 @@
+Exclusive Decode V2 hard-12 internlm20b, same protocol as Ollama (12 items, 256 new, max_seq=2048).
+Harness only: nvidia-smi poll off (--interval 0), HF module dropped after DecodeV2Loop.from_model.
+Accuracy 9/12 (75%), same misses as the smi-poll plate: money, machines, batball.
+Mean decode 35.2 tok/s (was 29.8 with smi poll). Steady items ~34–38. Item 1 still TTFT 294 s / 20.3 tok/s.
+from_model+warmup still ~10 min at the 12 GB cap. Do not quote mean TTFT 26162 or peak_smi 698 (no poll).
+Not the ignore-EOS 64 plate (41 tok/s).

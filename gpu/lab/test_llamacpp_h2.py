@@ -66,6 +66,8 @@ def test_size_and_model_from_filename() -> None:
     check("32B before 3B substring", size == "32B" and "32B" in model, f"{size} {model}")
     size, model = _size_and_model("internlm2_5-20b-chat-Q4_K_M.gguf")
     check("internlm 20b lowercase", size == "20B" and "internlm" in model, f"{size} {model}")
+    size, model = _size_and_model("Qwen2.5-14B-Instruct-Q4_K_M.gguf")
+    check("14B before 3B substring", size == "14B" and "14B" in model, f"{size} {model}")
     size, model = _size_and_model("Qwen2.5-3B-Instruct-Q4_K_M.gguf")
     check("3B qwen", size == "3B", f"{size} {model}")
 

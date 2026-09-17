@@ -1,10 +1,12 @@
 """Workspace tools for ``deepfold chat --agent``.
 
-v2 surface: search, patch, git read, allowlisted argv, todo. Opt-in
-``web_search`` (Brave Search, or Google CSE on an old Cloud project) is
-off until ``--agent-web``. Paths stay under ``--workspace``. Writes,
-tests, commands, and web follow ``--agent-trust``. Not an unrestricted
-shell. Session KV is Wave B (TokenLoop); this module is CPU-only.
+v2 surface: search, patch, git read, allowlisted argv, todo. ``web_search``
+defaults to free Tavily (keyless) whenever agent tools are on, unless the
+user passed ``--no-agent-web`` or ``DEEPFOLD_AGENT_WEB=0``. Brave and Google
+CSE are optional if those keys are set. Paths stay under ``--workspace``.
+Writes, tests, commands, and web follow ``--agent-trust``. Not an
+unrestricted shell. Session KV lives in ``chat`` (TokenLoop and Decode V2).
+This module is CPU-only.
 """
 
 from __future__ import annotations
@@ -57,6 +59,7 @@ __all__ = [
     "run_read_only_parallel",
     "strip_tool_xml",
     "suffix_after",
+    "plan_session_prefill",
     "tool_call_closed",
     "tool_schemas",
     "truncated_tool_call",
@@ -98,13 +101,23 @@ _WEB_NUM_MAX = 8
 _WEB_TIMEOUT_S = 15
 _CSE_ENDPOINT = "https://www.googleapis.com/customsearch/v1"
 _BRAVE_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
+_TAVILY_ENDPOINT = "https://api.tavily.com/search"
 _CSE_ENV_KEY = "DEEPFOLD_GOOGLE_CSE_KEY"
 _CSE_ENV_CX = "DEEPFOLD_GOOGLE_CSE_CX"
 _BRAVE_ENV = "DEEPFOLD_BRAVE_KEY"
 _BRAVE_ENV_ALT = "BRAVE_API_KEY"
+_TAVILY_ENV = "DEEPFOLD_TAVILY_KEY"
+_TAVILY_ENV_ALT = "TAVILY_API_KEY"
 _CSE_FILE = "cse.env"
 _SECRET_KEYS = frozenset(
-    {_CSE_ENV_KEY, _CSE_ENV_CX, _BRAVE_ENV, _BRAVE_ENV_ALT}
+    {
+        _CSE_ENV_KEY,
+        _CSE_ENV_CX,
+        _BRAVE_ENV,
+        _BRAVE_ENV_ALT,
+        _TAVILY_ENV,
+        _TAVILY_ENV_ALT,
+    }
 )
 
 SCHEMAS: list[dict[str, Any]] = [
@@ -245,8 +258,9 @@ SCHEMAS: list[dict[str, Any]] = [
     {
         "name": "web_search",
         "description": (
-            "Web search via Brave Search, or Google CSE if those keys are set. "
-            "Off unless --agent-web. Returns titles, URLs, and snippets. Not a browser."
+            "Web search. Default is free Tavily (no API key). Brave or Google "
+            "CSE if those keys are set. On with --agent unless --no-agent-web. "
+            "Returns titles, URLs, and snippets. Not a browser."
         ),
         "parameters": {
             "type": "object",
@@ -326,7 +340,7 @@ def load_workspace_rules(workspace: Path) -> str:
 
 
 def tool_schemas(*, web: bool = False) -> list[dict[str, Any]]:
-    """Schemas advertised to the model. ``web_search`` stays off until opted in."""
+    """Schemas advertised to the model. ``web_search`` only when ``web`` is on."""
     if web:
         return list(SCHEMAS)
     return [item for item in SCHEMAS if item["name"] != "web_search"]
@@ -338,9 +352,9 @@ def agent_system(workspace: Path, *, web: bool = False) -> str:
     web_line = ""
     if web:
         web_line = (
-            "web_search looks up current public facts (Brave Search, or Google "
-            "CSE). Cite the returned URLs and do not invent links. Prefer "
-            "glob/grep for this workspace.\n"
+            "web_search looks up current public facts (free Tavily by default; "
+            "Brave or Google CSE if those keys are set). Cite the returned URLs "
+            "and do not invent links. Prefer glob/grep for this workspace.\n"
         )
     return (
         f"{SYSTEM_MARK} {workspace}\n"
@@ -495,6 +509,29 @@ def suffix_after(old: Sequence[int], new: Sequence[int]) -> list[int] | None:
     if prev != cur[:n]:
         return None
     return cur[n:]
+
+
+def plan_session_prefill(
+    prefix_ids: Sequence[int] | None,
+    kv_len: int,
+    new_ids: Sequence[int],
+) -> tuple[str, list[int]]:
+    """How to extend KV. ``full`` / ``suffix`` / ``repeat``.
+
+    ``repeat`` means the new template is identical to the ids already in KV
+    (need last-slot logits, no new tokens). ``full`` is reset + prefill.
+    """
+    cur = [int(x) for x in new_ids]
+    if not cur:
+        return "full", []
+    if prefix_ids is None or int(kv_len) != len(prefix_ids):
+        return "full", cur
+    delta = suffix_after(prefix_ids, cur)
+    if delta is None:
+        return "full", cur
+    if not delta:
+        return "repeat", []
+    return "suffix", delta
 
 
 def render_tool_calls(calls: list[dict[str, Any]]) -> str:
@@ -784,6 +821,7 @@ def execute_calls(
     *,
     session: AgentSession | None = None,
     confirm: Any = None,
+    progress: Any = None,
 ) -> list[tuple[str, dict[str, Any], str]]:
     """Run one assistant's tool list. ``confirm(name, args) -> bool`` or None=allow."""
 
@@ -791,6 +829,8 @@ def execute_calls(
         name = str(call.get("name") or "")
         arguments = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
         allowed = True if confirm is None else bool(confirm(name, arguments))
+        if allowed and progress is not None:
+            progress(name, arguments)
         result = (
             execute(name, arguments, workspace, session=session)
             if allowed
@@ -799,6 +839,8 @@ def execute_calls(
         return name, arguments, clip_result(result)
 
     if calls and all(str(c.get("name") or "") in READ_TOOLS for c in calls) and len(calls) > 1:
+        if progress is not None:
+            progress("_parallel", {"n": len(calls)})
         return run_read_only_parallel(calls, workspace, session=session)
     return [_one(call) for call in calls]
 
@@ -1214,6 +1256,27 @@ def _http_get(
         return status, resp.read(_MAX_READ_BYTES)
 
 
+def _http_post(
+    url: str,
+    *,
+    timeout: int,
+    data: bytes,
+    headers: dict[str, str] | None = None,
+) -> tuple[int, bytes]:
+    """POST JSON ``data``. Tests patch this; do not log headers (may hold keys)."""
+    hdrs = {
+        "User-Agent": "DeepfoldAgent/0.1",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    if headers:
+        hdrs.update(headers)
+    req = urllib.request.Request(url, data=data, method="POST", headers=hdrs)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        status = int(getattr(resp, "status", 200) or 200)
+        return status, resp.read(_MAX_READ_BYTES)
+
+
 def _cse_url(query: str, num: int, *, key: str, cx: str) -> str:
     params = urllib.parse.urlencode(
         {"key": key, "cx": cx, "q": query, "num": str(num)}
@@ -1281,6 +1344,16 @@ def _cse_creds() -> tuple[str, str]:
     return key or file.get(_CSE_ENV_KEY, ""), cx or file.get(_CSE_ENV_CX, "")
 
 
+def _tavily_key() -> str:
+    """Optional Tavily token. Empty means keyless (no account). Never log the value."""
+    for name in (_TAVILY_ENV, _TAVILY_ENV_ALT):
+        text = os.environ.get(name, "").strip()
+        if text:
+            return text
+    file = _parse_cse_file(_cse_file())
+    return file.get(_TAVILY_ENV, "") or file.get(_TAVILY_ENV_ALT, "")
+
+
 def _brave_key() -> str:
     """Brave token. Env wins; else ``$DEEPFOLD_HOME/cse.env``. Never log the value."""
     for name in (_BRAVE_ENV, _BRAVE_ENV_ALT):
@@ -1289,6 +1362,74 @@ def _brave_key() -> str:
             return text
     file = _parse_cse_file(_cse_file())
     return file.get(_BRAVE_ENV, "") or file.get(_BRAVE_ENV_ALT, "")
+
+
+def _format_tavily(payload: Any, *, query: str) -> str:
+    if not isinstance(payload, dict):
+        return "error: tavily returned non-JSON"
+    err = payload.get("error") or payload.get("detail")
+    if isinstance(err, dict):
+        msg = str(err.get("message") or err.get("code") or "error")
+        return f"error: tavily: {msg}"
+    if isinstance(err, list) and err:
+        return f"error: tavily: {err[0]}"
+    if isinstance(err, str) and err.strip() and "results" not in payload:
+        return f"error: tavily: {err.strip()}"
+    items = payload.get("results")
+    if not isinstance(items, list) or not items:
+        return f"(no results for {query!r})"
+    rows: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        title = " ".join(str(item.get("title") or "").split())
+        link = str(item.get("url") or "").strip()
+        snippet = " ".join(str(item.get("content") or "").split())
+        if not link:
+            continue
+        block = f"{len(rows) + 1}. {title}\n   {link}"
+        if snippet:
+            block += f"\n   {snippet}"
+        rows.append(block)
+        if len(rows) >= _WEB_NUM_MAX:
+            break
+    return "\n".join(rows) if rows else f"(no results for {query!r})"
+
+
+def _tavily_search(query: str, num: int, *, token: str) -> str:
+    """Free default: keyless Tavily. Optional ``DEEPFOLD_TAVILY_KEY`` raises the cap."""
+    headers: dict[str, str] = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    else:
+        headers["X-Tavily-Access-Mode"] = "keyless"
+    body = json.dumps(
+        {"query": query, "max_results": num, "search_depth": "fast"}
+    ).encode("utf-8")
+    try:
+        status, raw = _http_post(
+            _TAVILY_ENDPOINT, timeout=_WEB_TIMEOUT_S, data=body, headers=headers
+        )
+    except urllib.error.HTTPError as exc:
+        code = int(getattr(exc, "code", 0) or 0)
+        if code == 429:
+            return (
+                "error: tavily HTTP 429 (free keyless cap). "
+                "A free Tavily key is 1000 searches/month, no credit card: "
+                "https://app.tavily.com — set DEEPFOLD_TAVILY_KEY"
+            )
+        if code in (401, 403):
+            return f"error: tavily HTTP {code} (check DEEPFOLD_TAVILY_KEY)"
+        return f"error: tavily HTTP {code or 'error'}"
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return "error: tavily request failed"
+    if status != 200:
+        return f"error: tavily HTTP {status}"
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, ValueError):
+        return "error: tavily returned non-JSON"
+    return clip_result(_format_tavily(payload, query=query))
 
 
 def _format_brave(payload: Any, *, query: str) -> str:
@@ -1373,7 +1514,7 @@ def _web_search(
     arguments: dict[str, Any], *, session: AgentSession | None
 ) -> str:
     if session is None or not session.web:
-        return "error: web_search is off (pass --agent-web or /agent web on)"
+        return "error: web_search is off (pass --agent / --agent-web or /agent web on)"
     query = str(arguments.get("query") or "").strip()
     if not query:
         return "error: query is required"
@@ -1381,25 +1522,14 @@ def _web_search(
         return f"error: query longer than {_WEB_QUERY_MAX} characters"
     num = _as_int(arguments.get("num"), _WEB_NUM_DEFAULT)
     num = max(1, min(_WEB_NUM_MAX, num))
+    # Paid/legacy keys win if the user set them. Testers get Tavily keyless.
     brave = _brave_key()
     if brave:
         return _brave_search(query, num, token=brave)
     key, cx = _cse_creds()
     if key and cx:
         return _google_search(query, num, key=key, cx=cx)
-    if cx and not key:
-        return (
-            "error: Google CSE cx is set but DEEPFOLD_GOOGLE_CSE_KEY is missing. "
-            "New Google Cloud projects cannot use that JSON API. "
-            "Set DEEPFOLD_BRAVE_KEY (Brave Search) instead. See docs/web-search.md."
-        )
-    if key and not cx:
-        return "error: web_search needs DEEPFOLD_GOOGLE_CSE_CX, or set DEEPFOLD_BRAVE_KEY."
-    return (
-        "error: web_search needs DEEPFOLD_BRAVE_KEY (Brave Search API) "
-        "in the environment or $DEEPFOLD_HOME/cse.env. "
-        "Google CSE is closed to new Cloud projects. See docs/web-search.md."
-    )
+    return _tavily_search(query, num, token=_tavily_key())
 
 
 def _todo(session: AgentSession | None, items: Any) -> str:

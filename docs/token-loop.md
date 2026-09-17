@@ -1,6 +1,13 @@
 # Token loop on an RTX 3080 12 GB
 
 This is module 5 of [schema.md](schema.md): how a token actually walks the model.
+
+**Product CLI (2026-09-17).** Resident NF4 (3B / 14B / 20B) uses Decode V2
+(`gpu/decodev2`, `--executor auto`): N=1 CUDA-core GEMV graph + MMA prefill
+chunks of 32. This page describes **TokenLoop** (`gpu/loop/generate.py`) —
+still the overflow / CopyRing / VQ / `--executor tokenloop` path. Decode V2
+numbers: [`decode-v2-lab.md`](decode-v2-lab.md).
+
 Neighbors we rely on and do not argue with:
 
 - kernel — [kernel-ampere.md](kernel-ampere.md): one skeleton `mma.sync.m16n8k16`, decode tile `128×256`, codebook only **256×8**;

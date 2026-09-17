@@ -62,6 +62,7 @@ def gate_tokens() -> None:
         OLLAMA_3B_LONG,
         OLLAMA_GPU_LAYERS,
         OLLAMA_TOTAL_LAYERS,
+        V2_3B_HOST,
     )
     from gpu.lab.h2_plate import DECODE_TOK_S, STREAMED_MIB
 
@@ -70,7 +71,8 @@ def gate_tokens() -> None:
     check("llama.cpp 32B auto-fit is 2.54", LLAMA_32B_LONG == 2.54, str(LLAMA_32B_LONG))
     check("llama.cpp ngl 99 freeze is 1.52", LLAMA_32B_NGL99 == 1.52, str(LLAMA_32B_NGL99))
     check("Ollama 3B long is 187.3", OLLAMA_3B_LONG == 187.3, str(OLLAMA_3B_LONG))
-    check("H2 3B long is 35.2", H2_3B_LONG == 35.2, str(H2_3B_LONG))
+    check("H2 3B TokenLoop is 35.2", H2_3B_LONG == 35.2, str(H2_3B_LONG))
+    check("Decode V2 3B host is 197", V2_3B_HOST == 197.0, str(V2_3B_HOST))
     check("33/65 layers", (OLLAMA_GPU_LAYERS, OLLAMA_TOTAL_LAYERS) == (33, 65), "")
     check("stream 96 / 6885 matches H2 plate", H2_STREAM_MATRICES == 96 and H2_STREAM_MIB == 6885, "")
     check("H2 product smoke stays 2.31", DECODE_TOK_S == 2.31, str(DECODE_TOK_S))
@@ -93,6 +95,8 @@ def gate_honesty() -> None:
     check("names SKIP", "SKIP" in text, "")
     check("warns against smoke 3.18", "3.18" in text, "")
     check("mentions ngl 99 / fit abort", "ngl 99" in text and "fit abort" in text, "")
+    check("names Decode V2", "Decode V2" in text, "")
+    check("quotes 197 with max_seq 2048", "197" in text and "2048" in text, "")
     check("does not say faster than Ollama", "faster than Ollama" not in text.lower(), "")
     check("does not quote 0.8 as design", "0.8" not in text, "")
 

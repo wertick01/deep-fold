@@ -12,7 +12,7 @@ _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
-from gpu.lab.ollama_h2 import _fold_ndjson, _timings
+from gpu.lab.ollama_h2 import _fold_ndjson, _size_label, _timings
 
 CHECKS: list[tuple[str, bool, str]] = []
 
@@ -74,10 +74,21 @@ def test_fold_ndjson_joins_stream_chunks() -> None:
     check("keeps timers", folded.get("eval_count") == 8, str(folded.get("eval_count")))
 
 
+def test_size_label_14b_is_not_3b() -> None:
+    from argparse import Namespace
+
+    check("explicit 14B", _size_label(Namespace(size="14B", model="qwen2.5:14b")) == "14B", "")
+    check("14b tag not 3B", _size_label(Namespace(size="", model="qwen2.5:14b")) == "14B", "")
+    check("3b tag", _size_label(Namespace(size="", model="qwen2.5:3b")) == "3B", "")
+    check("20b internlm", _size_label(Namespace(size="", model="internlm2.5:20b-q4km")) == "20B", "")
+    check("32b tag", _size_label(Namespace(size="", model="qwen2.5:32b")) == "32B", "")
+
+
 TESTS = [
     test_cached_prompt_is_not_ttft,
     test_uncached_prompt_is_comparable,
     test_fold_ndjson_joins_stream_chunks,
+    test_size_label_14b_is_not_3b,
 ]
 
 

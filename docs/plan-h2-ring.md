@@ -11,7 +11,8 @@ Product smoke Qwen2.5-32B-Instruct on RTX 3080 12 GB:
 | | |
 |---|---|
 | Decode | **2.31 tok/s** mean (2.30–2.32; ~432 ms/tok) |
-| llama.cpp Q4_K_M, same smoke | **1.5 tok/s** decode (`docs/eval-32b.md`, 2026-09-15) |
+| llama.cpp Q4_K_M `-ngl 99` | **1.52** (2026-09-15; fit abort — not the matched launch) |
+| llama.cpp / Ollama auto-fit long | **2.54** vs H2 **2.49** steps / **2.53** eval (`docs/compare-3080.md`) |
 | TTFT | **1006 ms** mean (2 chunks, `LIVE_MAX_N=32`) |
 | Smoke | Paris / Berlin / 323 **3/3**, `gate.txt` PASS |
 | Packed NF4 | **16599 MiB** — does not fit on the card |
@@ -88,7 +89,7 @@ ran pageable (~0.76–0.82 tok/s, ~7.3 GiB/s). Fix: `cpu_is_pinned()` in
 | Third slot / half-M / embedding by rows / `cudaHostRegister` of the whole `.chr` | **Not v1.** |
 | 2.7 tok/s target as a 32B gate without a file | **No.** Chat gate is 3B canary + live 32B smoke. |
 | 10 tok/s / Marlin / 8B llama.cpp Q4 caliber | **No.** |
-| Beat llama.cpp Q4_K_M 32B overflow on this 3080 (~1.5 tok/s) | **Measured**, not a 10 tok/s claim. |
+| Beat llama.cpp Q4_K_M 32B overflow on this 3080 | **`-ngl 99` was 1.52; matched auto-fit is 2.54 vs H2 2.53.** Not a kernel win. |
 
 ## Waves
 

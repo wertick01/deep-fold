@@ -206,9 +206,13 @@ def _timings(payload: dict[str, Any]) -> dict[str, Any]:
 def _size_label(args: argparse.Namespace) -> str:
     if args.size:
         return str(args.size)
-    name = str(args.model).lower()
+    name = str(args.model).lower().replace("_", "-")
     if "32b" in name:
         return "32B"
+    if "20b" in name:
+        return "20B"
+    if "14b" in name:
+        return "14B"
     if "3b" in name:
         return "3B"
     return "unknown"

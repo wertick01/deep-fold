@@ -2,23 +2,33 @@
 
 from __future__ import annotations
 
+import os
 import re
 import signal
 import sys
+import time
 from argparse import Namespace
 from pathlib import Path
 from typing import Any
 
 from . import agent as agent_mod
-from . import clipboard, md, messages, run as run_mod
+from . import clipboard, md, messages, prefs, run as run_mod
 from . import transcript as store
 
 __all__ = [
+    "apply_session_prefill",
     "chat",
     "classify_slash",
     "format_status",
+    "format_tool_block",
     "last_assistant",
+    "looks_overflow_model",
     "parse_chat_choice",
+    "pick_max_seq",
+    "run_agent_message",
+    "run_session_generate",
+    "seal_and_prefix",
+    "session_capable",
     "toolbar_text",
     "turn_stop",
 ]
@@ -26,6 +36,16 @@ __all__ = [
 
 def _err(text: str) -> None:
     print(text, file=sys.stderr)
+
+
+def wait_line(msg: str) -> None:
+    sys.stderr.write(f"\r\x1b[2K{msg}")
+    sys.stderr.flush()
+
+
+def clear_wait() -> None:
+    sys.stderr.write("\r\x1b[2K")
+    sys.stderr.flush()
 
 
 def classify_slash(line: str) -> str | None:
@@ -124,7 +144,16 @@ def format_status(out, *, max_seq: int, max_new_tokens: int) -> str:
     bits: list[str] = []
     if reason == "interrupted":
         bits.append("interrupted")
-    bits.append(f"prefill {out.prefill_ms:.0f} ms ({out.prompt_len} tokens)")
+    n_pref = getattr(out, "prefill_n", None)
+    if n_pref is None:
+        n_pref = out.prompt_len
+    hit = getattr(out, "session_hit", None)
+    kind = ""
+    if hit is True:
+        kind = " suffix"
+    elif hit is False:
+        kind = " full"
+    bits.append(f"prefill {out.prefill_ms:.0f} ms ({n_pref} tokens{kind})")
     if out.decode_steps:
         bits.append(f"{out.decode_tok_s:.1f} tok/s × {out.decode_steps}")
     elif reason == "interrupted":
@@ -134,6 +163,285 @@ def format_status(out, *, max_seq: int, max_new_tokens: int) -> str:
     bits.append(f"seq {used}/{max_seq}")
     bits.append(f"stop {reason}")
     return "  ·  ".join(bits)
+
+
+CHAT_MAX_SEQ = 2048
+AGENT_MAX_SEQ_8GB = 2048
+AGENT_MAX_SEQ_12GB = 4096
+_VRAM_12GB_MIB = 10_000
+
+
+def looks_overflow_model(cfg: dict[str, Any]) -> bool:
+    """32B-class Qwen (64 layers) overflows 12 GB; 14B/20B do not."""
+    return int(cfg.get("num_hidden_layers") or 0) >= 60
+
+
+def pick_max_seq(
+    explicit: int | None,
+    *,
+    agent: bool,
+    vram_mib: int | None,
+    overflow: bool,
+) -> int:
+    """Chat stays 2048. Agent on a 12 GB 14B plate is 4096. User flag wins."""
+    if explicit is not None:
+        return int(explicit)
+    if not agent:
+        return CHAT_MAX_SEQ
+    if overflow:
+        return CHAT_MAX_SEQ
+    if vram_mib is None or int(vram_mib) < _VRAM_12GB_MIB:
+        return AGENT_MAX_SEQ_8GB
+    return AGENT_MAX_SEQ_12GB
+
+
+TOOL_BLOCK_LINES = 16
+
+
+def format_tool_block(name: str, arguments: dict[str, Any], content: str) -> str:
+    """Readable tool result for the TTY. Not a TUI chrome."""
+    head = agent_mod.format_call(name, arguments)
+    body = content if isinstance(content, str) else str(content)
+    lines = body.splitlines() or ([body] if body else [])
+    clipped = lines[:TOOL_BLOCK_LINES]
+    extra = len(lines) - len(clipped)
+    rows = [f"┌ {head}"]
+    for line in clipped:
+        rows.append(f"│ {line}")
+    if extra > 0:
+        rows.append(f"└ +{extra} more")
+    else:
+        rows.append("└")
+    return "\n".join(rows)
+
+
+def session_capable(loop) -> bool:
+    return all(
+        callable(getattr(loop, name, None))
+        for name in ("prefill_from", "decode_from_logits", "seal_last")
+    )
+
+
+def _seq_ids(ids) -> list[int]:
+    if hasattr(ids, "reshape"):
+        return [int(x) for x in ids.reshape(-1).tolist()]
+    if hasattr(ids, "tolist"):
+        return [int(x) for x in ids.tolist()]
+    return [int(x) for x in ids]
+
+
+def _token_chunk(ids, start: int, end: int | None = None):
+    if hasattr(ids, "reshape"):
+        flat = ids.reshape(-1)
+        return flat[start:] if end is None else flat[start:end]
+    seq = list(ids)
+    return seq[start:] if end is None else seq[start:end]
+
+
+def _kv_len(loop) -> int:
+    kv = getattr(loop, "kv", None)
+    if kv is None:
+        return 0
+    return int(getattr(kv, "seq_len", 0) or 0)
+
+
+def apply_session_prefill(loop, ids, prefix_ids: list[int] | None):
+    """Walk only the new suffix when the template prefix still matches.
+
+    Returns ``(logits, session_hit, prefill_n, miss)``. ``miss`` is a prefix
+    mismatch (full prefill after a live KV). First turn is full, not a miss.
+    """
+    prompt = _seq_ids(ids)
+    kv_len = _kv_len(loop)
+    mode, delta = agent_mod.plan_session_prefill(prefix_ids, kv_len, prompt)
+    if mode == "full":
+        miss = prefix_ids is not None
+        loop.reset()
+        logits = loop.prefill_from(_token_chunk(ids, 0), 0)
+        return logits, False, len(prompt), miss
+    if mode == "suffix":
+        start = len(prompt) - len(delta)
+        logits = loop.prefill_from(_token_chunk(ids, start), kv_len)
+        return logits, True, len(delta), False
+    fwd = getattr(loop, "forward", None)
+    if callable(fwd) and kv_len >= 1:
+        logits = fwd(_token_chunk(ids, len(prompt) - 1), kv_len - 1)
+        return logits, True, 0, False
+    loop.reset()
+    logits = loop.prefill_from(_token_chunk(ids, 0), 0)
+    return logits, False, len(prompt), False
+
+
+def seal_and_prefix(loop, prompt: list[int], tokens: list[int]) -> list[int]:
+    """Write the last sampled token, then snapshot ids that actually sit in KV."""
+    total = list(prompt) + [int(t) for t in tokens]
+    seq = _kv_len(loop)
+    if tokens and hasattr(loop, "seal_last") and seq < len(total):
+        loop.seal_last(int(tokens[-1]))
+        seq = _kv_len(loop)
+    if seq <= 0:
+        return total
+    return total[:seq]
+
+
+def run_session_generate(
+    loop,
+    ids,
+    max_new: int,
+    *,
+    stop,
+    prefix_ids: list[int] | None,
+    on_token=None,
+    should_stop=None,
+) -> tuple[object, list[int] | None, bool]:
+    """One prefill+decode. Returns ``(out, prefix_ids, miss)``.
+
+    ``miss`` is a live prefix mismatch. Decode V2 and TokenLoop both work when
+    they expose ``prefill_from`` / ``decode_from_logits`` / ``seal_last``.
+    """
+    prompt = _seq_ids(ids)
+    if not session_capable(loop):
+        out = loop.generate(
+            ids,
+            max_new,
+            stop=stop,
+            on_token=on_token,
+            should_stop=should_stop,
+        )
+        return out, None, False
+    miss = False
+    kv_len = _kv_len(loop)
+    mode, _delta = agent_mod.plan_session_prefill(prefix_ids, kv_len, prompt)
+    if mode == "full" and prefix_ids is not None:
+        miss = True
+    _cuda_sync(loop)
+    t0 = time.perf_counter()
+    logits, hit, n_pref, miss_apply = apply_session_prefill(loop, ids, prefix_ids)
+    _cuda_sync(loop)
+    prefill_ms = (time.perf_counter() - t0) * 1000.0
+    miss = miss or miss_apply
+    out = loop.decode_from_logits(
+        logits,
+        max_new,
+        prompt_len=len(prompt),
+        stop=stop,
+        on_token=on_token,
+        should_stop=should_stop,
+        prefill_ms=prefill_ms,
+    )
+    out.session_hit = hit
+    out.prefill_n = n_pref
+    new_prefix = seal_and_prefix(loop, prompt, list(out.tokens))
+    return out, new_prefix, miss
+
+
+def run_agent_message(
+    tok,
+    loop,
+    stop,
+    history: list[dict[str, Any]],
+    text: str,
+    *,
+    workspace: Path,
+    agent_state: agent_mod.AgentSession,
+    max_seq: int,
+    max_new: int,
+    max_rounds: int,
+    prefix_ids: list[int] | None = None,
+    raw: bool = False,
+    confirm=None,
+    on_status=None,
+    on_token=None,
+) -> tuple[list[Any], list[int] | None, str, list[tuple[str, dict[str, Any], str]]]:
+    """One user message plus tool rounds. No TTY. ``confirm`` None = allow."""
+    history.append({"role": "user", "content": text})
+    agent_mod.ensure_agent_system(history, workspace, web=agent_state.web)
+    tools = agent_mod.tool_schemas(web=agent_state.web)
+    steps = 0
+    stalled = 0
+    outs: list[Any] = []
+    ran: list[tuple[str, dict[str, Any], str]] = []
+    prefix = prefix_ids
+    while True:
+        steps += 1
+        ids = _encode_history(tok, history, raw=raw, tools=tools)
+        if int(ids.numel()) >= max_seq:
+            if steps == 1 and history and history[-1].get("role") == "user":
+                history.pop()
+            return outs, prefix, "max_seq", ran
+        out, prefix, miss = run_session_generate(
+            loop,
+            ids,
+            max_new,
+            stop=stop,
+            prefix_ids=prefix,
+            on_token=on_token,
+        )
+        if miss and on_status is not None:
+            on_status("agent: KV prefix miss, full prefill")
+        outs.append(out)
+        parts: list[str] = []
+        if on_token is None and out is not None:
+            for tid in out.tokens:
+                if stop and int(tid) in set(int(s) for s in stop):
+                    continue
+                piece = tok.decode([int(tid)], skip_special_tokens=True)
+                if piece:
+                    parts.append(piece)
+        reply = "".join(parts).strip()
+        if not reply and out is not None:
+            reply = tok.decode(out.tokens, skip_special_tokens=True).strip()
+        if on_status is not None and out is not None:
+            on_status(
+                format_status(out, max_seq=max_seq, max_new_tokens=max_new)
+            )
+        if reply and agent_mod.degenerate_tool_text(reply):
+            if stalled < 1:
+                stalled += 1
+                continue
+            return outs, prefix, "stalled", ran
+        if reply and agent_mod.truncated_tool_call(reply):
+            if stalled < 1:
+                stalled += 1
+                history.append({"role": "assistant", "content": reply})
+                history.append(
+                    {
+                        "role": "user",
+                        "content": "continue the tool call JSON and close </tool_call>",
+                    }
+                )
+                continue
+            return outs, prefix, "truncated", ran
+        calls = agent_mod.parse_tool_calls(reply) if reply else []
+        visible = agent_mod.strip_tool_xml(reply).strip() if calls else reply
+        msg: dict[str, Any] = {"role": "assistant", "content": visible}
+        if calls:
+            msg["tool_calls"] = calls
+        history.append(msg)
+        if not calls:
+            return outs, prefix, "ok", ran
+        results = agent_mod.execute_calls(
+            calls,
+            workspace,
+            session=agent_state,
+            confirm=confirm,
+        )
+        ran.extend(results)
+        for name, arguments, clipped in results:
+            history.append({"role": "tool", "name": name, "content": clipped})
+            if on_status is not None:
+                on_status(format_tool_block(name, arguments, clipped))
+        if steps >= max_rounds:
+            return outs, prefix, "max_rounds", ran
+
+
+def _cuda_sync(loop) -> None:
+    device = getattr(loop, "device", None)
+    if getattr(device, "type", None) != "cuda":
+        return
+    import torch
+
+    torch.cuda.synchronize()
 
 
 def toolbar_text(
@@ -264,7 +572,7 @@ def _choose_chat(
 
 
 def chat(args: Namespace) -> int:
-    """Interactive generate. Loads weights once. Each turn prefills the history."""
+    """Interactive generate. Loads weights once. Session KV across turns."""
     if not _is_tty():
         _err(messages.CHAT_NEED_TTY)
         return 1
@@ -279,17 +587,40 @@ def chat(args: Namespace) -> int:
 
     ws_arg = getattr(args, "workspace", None)
     workspace = Path(ws_arg or ".").expanduser().resolve()
-    agent_on = bool(getattr(args, "agent", False))
-    if bool(getattr(args, "raw", False)) and agent_on:
+    explicit_agent = getattr(args, "agent", None)
+    explicit_web = getattr(args, "agent_web", None)
+    raw_on = bool(getattr(args, "raw", False))
+    if raw_on and explicit_agent is True:
         _err("chat: --agent cannot be used with --raw")
         return 1
+    agent_on = False if raw_on else prefs.resolve_agent(explicit_agent)
+    web_hold = prefs.web_hold_off(explicit_web)
     if (agent_on or ws_arg is not None) and not workspace.is_dir():
         _err(f"chat: --workspace {workspace} is not a directory")
         return 1
     max_rounds = max(1, int(getattr(args, "max_tool_rounds", 24) or 24))
     agent_state = agent_mod.AgentSession(
         trust=str(getattr(args, "agent_trust", None) or "ask"),
-        web=bool(getattr(args, "agent_web", False)),
+        web=prefs.resolve_web(explicit_web, agent=agent_on),
+    )
+
+    from .doctor import probe as _probe
+    from .paths import ENV_MODEL
+
+    overflow_guess = False
+    model_hint = getattr(args, "model", None) or os.environ.get(ENV_MODEL)
+    if model_hint:
+        try:
+            from .codec import load_config
+
+            overflow_guess = looks_overflow_model(load_config(model_hint))
+        except (OSError, TypeError, ValueError):
+            overflow_guess = False
+    args.max_seq = pick_max_seq(
+        getattr(args, "max_seq", None),
+        agent=agent_on,
+        vram_mib=_probe().vram_total_mib,
+        overflow=overflow_guess,
     )
 
     code, ctx = run_mod.prepare_run(args)
@@ -306,7 +637,11 @@ def chat(args: Namespace) -> int:
             vram_mib=machine.vram_total_mib,
         )
     except RuntimeError as exc:
-        if "out of memory" not in str(exc).lower():
+        msg = str(exc)
+        if msg.startswith("decodev2:"):
+            _err(msg)
+            return 1
+        if "out of memory" not in msg.lower():
             raise
         from .doctor import _smi_used_mib
 
@@ -329,12 +664,12 @@ def chat(args: Namespace) -> int:
             color=color,
         )
     )
-    _err(messages.CHAT_HELP)
+    _err(_dim("Enter sends · Ctrl+J newline · /help · /agent", color=color))
     if agent_on:
         _err(
             _dim(
                 f"agent on  trust={agent_state.trust}  workspace {workspace}  "
-                "writes/tests follow --agent-trust"
+                f"kv 0/{max_seq}  writes/tests follow --agent-trust"
                 + ("  web_search on" if agent_state.web else ""),
                 color=color,
             )
@@ -374,6 +709,7 @@ def chat(args: Namespace) -> int:
         event.app.exit(exception=KeyboardInterrupt())
 
     last_out = None
+    prefix_ids: list[int] | None = None
     current = store.new_transcript(str(model))
 
     session = PromptSession(
@@ -392,6 +728,15 @@ def chat(args: Namespace) -> int:
                 "/copy",
                 "/save",
                 "/agent",
+                "/agent on",
+                "/agent off",
+                "/agent web on",
+                "/agent web off",
+                "/agent default on",
+                "/agent default off",
+                "/agent trust ask",
+                "/agent trust write",
+                "/agent trust workspace",
             ],
             ignore_case=True,
             sentence=True,
@@ -442,10 +787,39 @@ def chat(args: Namespace) -> int:
         _err(f"resumed {current.id}  {current.title}  {user_turns} turns")
     idle_interrupt = 0
 
+    def _ask_yes_no(message: str) -> bool:
+        from prompt_toolkit.shortcuts import prompt as pt_prompt
+
+        kb = KeyBindings()
+
+        @kb.add("y")
+        @kb.add("Y")
+        @kb.add("д")
+        def _yes(event) -> None:  # type: ignore[no-untyped-def]
+            event.app.exit(result="y")
+
+        @kb.add("n")
+        @kb.add("N")
+        @kb.add("enter")
+        @kb.add("c-c")
+        def _no(event) -> None:  # type: ignore[no-untyped-def]
+            event.app.exit(result="n")
+
+        try:
+            ans = pt_prompt(message, key_bindings=kb)
+        except (KeyboardInterrupt, EOFError):
+            return False
+        return agent_mod.confirm_accepted(ans or "n")
+
     def _persist() -> None:
         current.messages = list(history)
         current.model = str(model)
         store.save_transcript(current)
+
+    def _reset_kv() -> None:
+        nonlocal prefix_ids
+        loop.reset()
+        prefix_ids = None
 
     def _print_status(out) -> None:
         nonlocal last_out
@@ -462,15 +836,23 @@ def chat(args: Namespace) -> int:
         _err(_dim(line, color=color))
 
     def _run_turn(ids, *, hide_tools: bool) -> tuple[object | None, list[str], bool]:
+        nonlocal prefix_ids
         abort = {"on": False, "why": ""}
         parts: list[str] = []
         markdown = md.MarkdownStream(sys.stdout.write, color=color)
         emitted = {"n": 0}
+        wait_cleared = {"on": False}
 
         def want_stop() -> bool:
             return abort["on"]
 
+        def _clear_wait() -> None:
+            if not wait_cleared["on"]:
+                clear_wait()
+                wait_cleared["on"] = True
+
         def on_token(tid: int) -> None:
+            _clear_wait()
             if tid in stop_set:
                 return
             piece = tok.decode([tid], skip_special_tokens=True)
@@ -505,11 +887,33 @@ def chat(args: Namespace) -> int:
         signal.signal(signal.SIGINT, on_sigint)
         out = None
         interrupted = False
+        prompt = _seq_ids(ids)
         try:
-            out = loop.generate(
+            if session_capable(loop):
+                kv_len = _kv_len(loop)
+                mode, delta = agent_mod.plan_session_prefill(
+                    prefix_ids, kv_len, prompt
+                )
+                if mode == "full" and prefix_ids is not None:
+                    tag = "agent" if agent_on else "chat"
+                    _err(f"{tag}: KV prefix miss, full prefill")
+                n_show = (
+                    len(delta)
+                    if mode == "suffix"
+                    else (0 if mode == "repeat" else len(prompt))
+                )
+                if mode == "repeat":
+                    wait_line("prefill (repeat)…")
+                else:
+                    wait_line(f"prefill {n_show} tokens ({mode})…")
+            else:
+                wait_line(f"prefill {len(prompt)} tokens…")
+            out, prefix_ids, _miss = run_session_generate(
+                loop,
                 ids,
                 max_new,
                 stop=stop,
+                prefix_ids=prefix_ids,
                 on_token=on_token,
                 should_stop=want_stop,
             )
@@ -518,6 +922,7 @@ def chat(args: Namespace) -> int:
             abort["why"] = "user"
         finally:
             signal.signal(signal.SIGINT, prev)
+            _clear_wait()
             markdown.close()
             sys.stdout.flush()
         if out is not None and abort["why"] == "tool":
@@ -555,20 +960,22 @@ def chat(args: Namespace) -> int:
             _err(messages.CHAT_HELP)
             _err(
                 f"this chat {current.id} is JSON at {current.path or store.chats_root()}. "
-                "The GPU KV cache is empty between turns; the next prompt re-encodes "
-                "this history."
+                f"KV {_kv_len(loop)}/{max_seq}; later turns prefill only the new "
+                "suffix when the chat-template prefix matches. "
+                "/clear, /new, and /chats resume reset KV. y/n is one key (Enter = no)."
             )
             if agent_on:
-                _err(
-                    f"agent on, workspace {workspace}. "
-                    "Tools: list_dir, read_file, write_file, run_tests."
+                names = ", ".join(
+                    str(item["name"])
+                    for item in agent_mod.tool_schemas(web=agent_state.web)
                 )
+                _err(f"agent on, workspace {workspace}. Tools: {names}.")
             continue
         if kind == "clear":
             history.clear()
             if agent_on:
                 agent_mod.ensure_agent_system(history, workspace, web=agent_state.web)
-            loop.reset()
+            _reset_kv()
             last_out = None
             current.title = ""
             _persist()
@@ -581,7 +988,7 @@ def chat(args: Namespace) -> int:
             history = []
             if agent_on:
                 agent_mod.ensure_agent_system(history, workspace, web=agent_state.web)
-            loop.reset()
+            _reset_kv()
             last_out = None
             _err(f"new chat {current.id}")
             continue
@@ -618,7 +1025,7 @@ def chat(args: Namespace) -> int:
                 history = []
                 if agent_on:
                     agent_mod.ensure_agent_system(history, workspace, web=agent_state.web)
-                loop.reset()
+                _reset_kv()
                 last_out = None
                 queued = str(picked[1])
                 _err(f"new chat {current.id}")
@@ -628,7 +1035,7 @@ def chat(args: Namespace) -> int:
                 history = []
                 if agent_on:
                     agent_mod.ensure_agent_system(history, workspace, web=agent_state.web)
-                loop.reset()
+                _reset_kv()
                 last_out = None
                 _err(f"new chat {current.id}")
                 continue
@@ -637,19 +1044,21 @@ def chat(args: Namespace) -> int:
                 history = list(current.messages)
                 if agent_on:
                     agent_mod.ensure_agent_system(history, workspace, web=agent_state.web)
-                loop.reset()
+                _reset_kv()
                 last_out = None
                 _err(f"resumed {current.id}  {current.title}")
             continue
         if kind == "stats":
+            kv_n = _kv_len(loop)
             if last_out is None:
-                _err("no turn yet")
+                _err(f"no turn yet  kv {kv_n}/{max_seq}")
             else:
                 _err(
                     format_status(
                         last_out, max_seq=max_seq, max_new_tokens=max_new
                     )
                 )
+                _err(f"kv {kv_n}/{max_seq}")
             continue
         if kind == "copy":
             arg = text.split()[1].lower() if len(text.split()) > 1 else ""
@@ -689,7 +1098,7 @@ def chat(args: Namespace) -> int:
         if kind == "agent":
             bits = text.split()
             arg = bits[1].lower() if len(bits) > 1 else ""
-            if bool(getattr(args, "raw", False)):
+            if raw_on:
                 _err("agent: cannot enable while --raw")
                 continue
             if arg == "trust":
@@ -704,14 +1113,31 @@ def chat(args: Namespace) -> int:
                     _err(f"agent trust {level}")
                 continue
             if arg == "web":
-                flag = bits[2].lower() if len(bits) > 2 else ""
-                if flag in ("on", "1", "true"):
-                    agent_state.web = True
-                elif flag in ("off", "0", "false"):
-                    agent_state.web = False
-                else:
-                    _err("usage: /agent web on|off")
+                sub = bits[2].lower() if len(bits) > 2 else ""
+                if sub == "default":
+                    flag = prefs.parse_bool(bits[3] if len(bits) > 3 else "")
+                    if flag is None:
+                        _err("usage: /agent web default on|off")
+                        continue
+                    path = prefs.save_pref(prefs.ENV_AGENT_WEB, flag)
+                    web_hold = not flag
+                    agent_state.web = flag
+                    if agent_on:
+                        agent_mod.ensure_agent_system(
+                            history, workspace, web=agent_state.web
+                        )
+                        _persist()
+                    _err(
+                        f"agent web_search default {'on' if flag else 'off'}  "
+                        f"saved {path}"
+                    )
                     continue
+                flag = prefs.parse_bool(sub)
+                if flag is None:
+                    _err("usage: /agent web on|off | /agent web default on|off")
+                    continue
+                agent_state.web = flag
+                web_hold = not flag
                 if agent_on:
                     agent_mod.ensure_agent_system(
                         history, workspace, web=agent_state.web
@@ -726,11 +1152,53 @@ def chat(args: Namespace) -> int:
                     )
                 )
                 continue
+            if arg == "default":
+                flag = prefs.parse_bool(bits[2] if len(bits) > 2 else "")
+                if flag is None:
+                    stored = prefs.pref_tristate(prefs.ENV_AGENT)
+                    stored_web = prefs.pref_tristate(prefs.ENV_AGENT_WEB)
+                    _err(
+                        "agent default "
+                        + ("on" if stored else "off" if stored is False else "unset")
+                        + "  web "
+                        + (
+                            "on"
+                            if stored_web
+                            else "off"
+                            if stored_web is False
+                            else "follows agent"
+                        )
+                        + "  /agent default on|off"
+                    )
+                    continue
+                if flag and not workspace.is_dir():
+                    _err(f"agent: workspace {workspace} is not a directory")
+                    continue
+                path = prefs.save_pref(prefs.ENV_AGENT, flag)
+                if flag:
+                    agent_on = True
+                    if not web_hold:
+                        agent_state.web = True
+                    agent_mod.ensure_agent_system(
+                        history, workspace, web=agent_state.web
+                    )
+                    _persist()
+                else:
+                    agent_on = False
+                    agent_mod.drop_agent_system(history)
+                    _persist()
+                extra = "  web_search on" if agent_on and agent_state.web else ""
+                _err(
+                    f"agent default {'on' if flag else 'off'}  saved {path}{extra}"
+                )
+                continue
             if arg in ("on", "1", "true"):
                 if not workspace.is_dir():
                     _err(f"agent: workspace {workspace} is not a directory")
                     continue
                 agent_on = True
+                if not web_hold:
+                    agent_state.web = True
                 agent_mod.ensure_agent_system(history, workspace, web=agent_state.web)
                 _persist()
                 extra = "  web_search on" if agent_state.web else ""
@@ -743,14 +1211,22 @@ def chat(args: Namespace) -> int:
             elif arg == "":
                 plan = f"  todo {len(agent_state.todos)}" if agent_state.todos else ""
                 web = "  web on" if agent_state.web else ""
+                stored = prefs.pref_tristate(prefs.ENV_AGENT)
+                hint = ""
+                if stored:
+                    hint = "  default on"
+                elif stored is False:
+                    hint = "  default off"
                 _err(
                     f"agent {'on' if agent_on else 'off'}  trust={agent_state.trust}  "
-                    f"workspace {workspace}{plan}{web}  /agent on|off|trust|web"
+                    f"workspace {workspace}{plan}{web}{hint}  "
+                    "/agent on|off|trust|web|default"
                 )
             else:
                 _err(
-                    "usage: /agent on | /agent off | /agent trust ask|write|workspace "
-                    "| /agent web on|off"
+                    "usage: /agent on | /agent off | /agent default on|off | "
+                    "/agent trust ask|write|workspace | /agent web on|off | "
+                    "/agent web default on|off"
                 )
             continue
         if kind == "unknown":
@@ -831,29 +1307,34 @@ def chat(args: Namespace) -> int:
                     name, arguments, trust=agent_state.trust
                 ):
                     return True
+                clear_wait()
                 diff = agent_mod.edit_preview(name, arguments, workspace)
                 if diff:
                     _err(_dim(diff[:2000], color=color))
-                try:
-                    ans = session.prompt(
-                        f"allow {agent_mod.format_call(name, arguments)}? [y/N] "
-                    )
-                except (KeyboardInterrupt, EOFError):
-                    ans = "n"
-                ok = agent_mod.confirm_accepted(ans)
+                ok = _ask_yes_no(
+                    f"allow {agent_mod.format_call(name, arguments)}? [y/N] "
+                )
                 if not ok:
                     _err(_dim("denied", color=color))
                 return ok
 
-            for name, arguments, clipped in agent_mod.execute_calls(
+            def _progress(name: str, arguments: dict[str, Any]) -> None:
+                if name == "_parallel":
+                    wait_line(f"running {int(arguments.get('n', 0))} reads…")
+                    return
+                wait_line(f"running {agent_mod.format_call(name, arguments)}…")
+
+            results = agent_mod.execute_calls(
                 calls,
                 workspace,
                 session=agent_state,
                 confirm=_confirm,
-            ):
-                _err(_dim(f"tool {agent_mod.format_call(name, arguments)}", color=color))
+                progress=_progress,
+            )
+            clear_wait()
+            for name, arguments, clipped in results:
                 history.append({"role": "tool", "name": name, "content": clipped})
-                _err(_dim(f"→ {agent_mod.preview(clipped)}", color=color))
+                _err(format_tool_block(name, arguments, clipped))
             _persist()
             if steps >= max_rounds:
                 _err(f"agent: stop after {max_rounds} tool rounds")

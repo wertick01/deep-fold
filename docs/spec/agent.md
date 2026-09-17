@@ -9,13 +9,12 @@ with line numbers, patch files, run tests, iterate until the request is
 done. The runtime bar is Deepfold: one Ampere GPU, packed `.chr`,
 sandboxed workspace, no cloud round-trip.
 
-Wave A (tools, stop, hide XML) and Wave C (trust, `run_argv`, `AGENTS.md`)
-are in [`gpu/cli/agent.py`](../../gpu/cli/agent.py) and
-[`gpu/cli/chat.py`](../../gpu/cli/chat.py). Wave B (session KV) is **not**:
-`TokenLoop.generate` still resets and prefills the whole chat each turn.
-Shipping the remaining waves does not require an IDE plugin. The TTY is
-the first surface. An editor extension is a later client of the same
-session, not a rewrite.
+Wave A (tools, stop, hide XML), Wave B (session KV in `chat`), and Wave C
+(trust, `run_argv`, `AGENTS.md`) are in [`gpu/cli/agent.py`](../../gpu/cli/agent.py)
+and [`gpu/cli/chat.py`](../../gpu/cli/chat.py). `TokenLoop.generate` / `run --prompt`
+still reset and prefill cold. Shipping later clients does not require an IDE
+plugin. The TTY is the first surface. An editor extension is a later client of
+the same session, not a rewrite.
 
 ---
 
@@ -43,22 +42,24 @@ Files: [`gpu/cli/agent.py`](../../gpu/cli/agent.py),
 
 The four-tool v1 loop (`list_dir` / `read_file` / `write_file` /
 `run_tests`) is the compatibility core. Search, patch, git read,
-allowlisted argv, todos, stop-on-tool, stream hiding, and
-`--agent-trust` are on that core now. Session KV is not.
+allowlisted argv, todos, stop-on-tool, stream hiding,
+`--agent-trust`, and session KV in `chat` are on that core now.
 
 | Piece | Behavior |
 |---|---|
 | Tools | `list_dir`, `read_file`, `glob`, `grep`, `git_status`, `git_diff`, `str_replace`, `write_file`, `delete_file`, `run_tests`, `run_argv`, `todo` |
 | Protocol | Qwen XML `<tool_call>…</tool_call>` plus optional `apply_chat_template(..., tools=)` |
 | History | Flattened to `user`/`assistant` strings; tool results become `<tool_response>` user turns |
-| GPU | `TokenLoop.generate` still calls `reset()` then prefills **all** prompt ids (Wave B) |
+| GPU | `chat` reuses KV (`prefill_from` / suffix / `decode_from_logits`). `generate()` for `run --prompt` still resets |
 | Safety | Paths must resolve under `--workspace`; `.git` blocked; confirm follows `--agent-trust` (`ask` default). `run_argv` is an allowlist, not a shell |
 | Caps | `--max-tool-rounds` default 24; read 400 lines / 1 MiB; write 256 KiB; pytest 120 s; grep 50 files / 80 hits |
 | Stream | Hide `<tool_call>` XML; stop decode when a call parses; truncated JSON retried once |
 | Failure | Degenerate `!!!!` tool spam retried once |
 
-The remaining product gap is **session KV**, not “we only have four
-tools.” 14B is the agent plate; 3B warns.
+The remaining product gap is **TTY chrome** (Ink-class layout), not session KV.
+14B is the agent plate; 3B warns.
+
+**In progress (Дорабатываются):** TTY chrome / agent layout (neighbor chat).
 
 `deepfold run --prompt` stays non-agent. `--agent` cannot combine with
 `--raw`. Those two rules stay.
@@ -330,27 +331,30 @@ launched. Deepfold does not download random MCP servers.
 
 `web_search` is not a browser and not HTML scraping.
 
-**Default backend for new users:** [Brave Search API](https://api-dashboard.search.brave.com/documentation/quickstart)
-(`GET /res/v1/web/search`). How to get a key: [`web-search.md`](../web-search.md)
-(English), [`web-search.ru.md`](../web-search.ru.md) (step-by-step).
+**Default for testers (no account, no card):** [Tavily keyless](https://docs.tavily.com/documentation/keyless)
+(`POST https://api.tavily.com/search`, header `X-Tavily-Access-Mode: keyless`,
+`search_depth=fast`). Walkthrough: [`web-search.md`](../web-search.md),
+[`web-search.ru.md`](../web-search.ru.md).
 
-**Fallback:** Google Custom Search JSON API when *both* CSE env vars are set
-and Brave is not. That JSON API is closed to new Cloud projects.
+**If keys are already set:** Brave, else Google CSE (both vars), else Tavily
+(keyed or keyless). Brave’s signup usually requires a card; Google’s Custom
+Search JSON API is closed to new Cloud projects. A free Tavily API key
+(typically 1 000/month, no card) is optional when keyless returns 429.
 
 | | |
 |---|---|
 | Tool | `web_search` `{query, num?}` |
-| Default | **Off.** Not in the advertised schema until `--agent-web` or `/agent web on`. |
-| Keys | `DEEPFOLD_BRAVE_KEY` (or `BRAVE_API_KEY`), else Google `DEEPFOLD_GOOGLE_CSE_KEY` + `DEEPFOLD_GOOGLE_CSE_CX`. Env or `$DEEPFOLD_HOME/cse.env`. Never in git, `.chr`, or chat JSON. |
+| Default | **Off** for plain `chat`. On when `--agent` / `/agent on` / `DEEPFOLD_AGENT=1` / `/agent default on`. `web_search` follows agent unless `--no-agent-web` or `DEEPFOLD_AGENT_WEB=0`. |
+| Keys | Optional. `DEEPFOLD_TAVILY_KEY` (or `TAVILY_API_KEY`); `DEEPFOLD_BRAVE_KEY` (or `BRAVE_API_KEY`); Google `DEEPFOLD_GOOGLE_CSE_KEY` + `DEEPFOLD_GOOGLE_CSE_CX`. Env or `$DEEPFOLD_HOME/cse.env`. Never in git, `.chr`, or chat JSON. |
 | Confirm | Same as `run_argv`: ask at `ask`/`write`, auto at `workspace`. |
 | Caps | Query 200 chars; 1–8 hits (default 5); 15 s; result clipped to 12 KiB. |
 | Result | Numbered title / URL / snippet. Cite those URLs; do not invent links. |
-| Prefer | If Brave is set, Brave wins even when CSE vars exist. |
+| Prefer | Brave if set; else CSE if both vars; else Tavily. |
 
-Without the flag, `execute("web_search")` returns an error and does
-**not** open a socket. Missing token: error, no HTTP. This is not
-DuckDuckGo Instant Answer, Bing, Google HTML scrape, or the
-`<script src=cse.js>` widget.
+Without agent tools, `execute("web_search")` returns an error and does
+**not** open a socket. With agent + web and no keys, Tavily keyless **does**
+HTTP. This is not DuckDuckGo Instant Answer, Bing, Google HTML scrape, or
+the `<script src=cse.js>` widget. `run --prompt` never enables tools.
 
 ---
 
@@ -427,12 +431,14 @@ sandbox, unique `str_replace`, grep caps.
 
 This already changes the product: the model can search and patch.
 
-### Wave B — session KV — **not landed**
+### Wave B — session KV — landed in CLI
 
-`prefill_from` / suffix check / `decode_from_logits`. `/clear` resets
-KV. Agent `max_seq` policy in §3.4. Prefix-miss fallback. CPU tests
-for `suffix_after`; live test: two-turn chat tok/s and prefill_ms drop
-on turn 2 when the prefix hits.
+`prefill_from` / suffix check / `decode_from_logits` / `seal_last` on
+`TokenLoop` and `DecodeV2Loop`. `chat` plans with `plan_session_prefill`. `/clear` `/new`
+`/chats` resume reset KV. Agent `max_seq` policy in §3.4. Prefix-miss
+fallback prints `chat:` / `agent: KV prefix miss, full prefill`. CPU tests
+for `suffix_after` and `plan_session_prefill`. Decode V2 without those
+methods falls back to cold `generate()`.
 
 `run --prompt` and `generate()` stay cold-prefill.
 
@@ -482,7 +488,7 @@ Honest overlap, not a disclaimer.
 | Git | status/diff/commit | status/diff; commit via allowlisted `git` + confirm |
 | Plan | todo | `todo` |
 | Rules | `AGENTS.md` | same filename in the workspace |
-| Multi-step | many tool rounds, KV lives | Wave B session KV |
+| Multi-step | many tool rounds, KV lives | session KV in `chat` |
 | IDE | VS Code / JetBrains | TTY first; Wave D HTTP client |
 | Browser | yes (Cursor) | no |
 | Cloud model | yes | no; local `.chr` only |
@@ -513,10 +519,10 @@ generate for the agent path. Do not add a second CUDA context.
 
 ## 13. Flags (v2)
 
-- `--agent`
+- `--agent` / `--no-agent` (also `DEEPFOLD_AGENT` or `/agent default`)
 - `--workspace`
 - `--max-tool-rounds` (default 24)
 - `--agent-trust {ask,write,workspace}`
-- `--agent-web` (`web_search`; Brave or Google CSE; off by default)
+- `--agent-web` / `--no-agent-web` (`web_search`; follows `--agent`; free Tavily keyless)
 
 No `--shell`. No `--mcp` until Wave D.

@@ -154,6 +154,7 @@ def _spawn_session(
     conversation: str = "independent",
     plate: str = "hard",
     residency_policy: str = "D",
+    executor: str = "tokenloop",
 ) -> LabSession:
     """Child process loads the model, records, exits; this process never holds it."""
     parent = Path(out_dir) if out_dir is not None else Path(tempfile.mkdtemp(prefix="lab-iso-"))
@@ -195,6 +196,8 @@ def _spawn_session(
         cmd.append("--quiet")
     if residency_policy and residency_policy != "D":
         cmd.extend(["--residency", str(residency_policy)])
+    if executor and executor != "tokenloop":
+        cmd.extend(["--executor", str(executor)])
     env = os.environ.copy()
     env["PYTHONPATH"] = str(_REPO) + os.pathsep + env.get("PYTHONPATH", "")
     print(f"[isolated {codec}] {' '.join(cmd)}", flush=True)
@@ -571,7 +574,8 @@ def run_bf16(
     sampler = Sampler("bf16", interval_s=interval_s, verbose=verbose)
     sampler.start()
     vram_before = smi_used_mib()
-    time.sleep(min(0.5, interval_s * 4))  # a few idle samples before the load
+    if interval_s > 0:
+        time.sleep(min(0.5, interval_s * 4))  # a few idle samples before the load
 
     model = None
     tokenizer = None
@@ -784,11 +788,15 @@ def run_nf4(
     items_json: str | Path | None = None,
     plate: str = "hard",
     residency_policy: str = "D",
+    executor: str = "tokenloop",
 ) -> LabSession:
-    """Our driver: ``load_model`` + ``TokenLoop``, greedy, one forward per token.
+    """Our driver: ``load_model`` + TokenLoop or Decode V2, greedy, one token.
 
     The ``.chr`` is the only weight file opened. ``transformers`` is used for the
     tokenizer and the chat template, never for the forward pass.
+
+    ``executor`` is ``tokenloop`` (default, competitor / eval / old hard),
+    ``decodev2``, or ``auto`` (resident NF4 → Decode V2, overflow → TokenLoop).
 
     ``isolated=True`` runs in a child process so this process never holds the
     weights. The notebook must use that, or the compressed VRAM trace starts
@@ -812,11 +820,12 @@ def run_nf4(
             conversation=conversation,
             plate=plate,
             residency_policy=residency_policy,
+            executor=executor,
         )
     import torch
 
+    from gpu.decodev2.session import DecodeV2Loop, pick_executor
     from gpu.host import load_model
-    from gpu.loop import TokenLoop
 
     _require_cuda()
     model_dir, chr_path = str(model_dir), str(chr_path)
@@ -825,7 +834,8 @@ def run_nf4(
     sampler = Sampler("nf4", interval_s=interval_s, verbose=verbose)
     sampler.start()
     vram_before = smi_used_mib()
-    time.sleep(min(0.5, interval_s * 4))
+    if interval_s > 0:
+        time.sleep(min(0.5, interval_s * 4))
 
     model = None
     tokenizer = None
@@ -865,7 +875,21 @@ def run_nf4(
             detail=f"load_s={load_s:.1f}, cap_mib={cap_info.get('cap_mib')}, {report}",
         )
 
-        loop = TokenLoop(model, max_seq=max_seq, norm="exact", overlap=True)
+        chosen, why = pick_executor(
+            executor, report, getattr(model, "deepfold_plan", None)
+        )
+        if str(executor) == "decodev2" and why is not None:
+            raise RuntimeError(why)
+        if chosen == "decodev2":
+            loop = DecodeV2Loop.from_model(model, max_seq=max_seq)
+            # Packed NF4 stays aliased on DeviceWeights. Drop the HF module so
+            # 20B is not packed-embed + dense-embed + KV at the 12 GB cap.
+            model = None
+            gc.collect()
+        else:
+            from gpu.loop import TokenLoop
+
+            loop = TokenLoop(model, max_seq=max_seq, norm="exact", overlap=True)
         sampler.mark("warmup_start", detail=repr(loop))
         warm_ms = loop.warmup(prompt=8, tokens=16)
         graph_mode = "off"
@@ -937,6 +961,7 @@ def run_nf4(
         weight_mib = loop.weight_bytes / MIB
         kv_mib = loop.kv.mib
         prefill_chunk = loop.prefill_chunk
+        engine = type(loop).__name__
         try:
             loop.kv = None
         except Exception:
@@ -945,7 +970,9 @@ def run_nf4(
             model.to("cpu")
         except Exception:
             pass
-        del loop, model, tokenizer
+        loop = None
+        model = None
+        tokenizer = None
         unload(sampler, detail="del loop/model/tokenizer, gc, empty_cache")
         finished = _finish(
             session,
@@ -957,7 +984,8 @@ def run_nf4(
             weight_mib=weight_mib,
             kv_mib=kv_mib,
             notes=(
-                f"gpu.host.load_model + gpu.loop.TokenLoop, graph={graph_mode}, "
+                f"gpu.host.load_model + {engine}, executor={executor}, "
+                f"graph={graph_mode}, "
                 f"max_seq={max_seq}, prefill_chunk={prefill_chunk}; {_turns_note(conversation)}; "
                 "ttft = prefill of the whole prompt; no from_pretrained, no transformers.generate"
             ),
@@ -1089,6 +1117,7 @@ def run_both(
     quality: Callable[[int, str], bool] | None = None,
     conversation: str = "independent",
     items_json: str | Path | None = None,
+    executor: str = "tokenloop",
 ) -> LabBundle:
     """BF16 session, process exit, NF4 session -- sequential, on one GPU.
 
@@ -1160,6 +1189,7 @@ def run_both(
                 verbose=verbose,
                 trust_remote_code=trust_remote_code,
                 isolated=isolated,
+                executor=executor,
                 **extra,
             )
             if nf4_note:

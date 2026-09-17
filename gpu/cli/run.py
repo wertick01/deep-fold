@@ -1,9 +1,11 @@
 """``deepfold run`` and ``deepfold compress``: a wrapper around what works.
 
 Architecture gate, resolve or pack the ``.chr`` with Go ``chr``, then
-``gpu.host.load_model`` + ``gpu.loop.TokenLoop``. ``transformers.generate`` is
-never called. GGUF and an unknown ``model_type`` lose before the GPU is
-probed. A sibling ``.chr`` is accepted only when the CHR0 header matches.
+``gpu.host.load_model`` then ``--executor auto`` (default): Decode V2 on
+resident NF4, TokenLoop on overflow/VQ. Force with ``--executor tokenloop``
+or ``--executor decodev2``. ``transformers.generate`` is never called. GGUF
+and an unknown ``model_type`` lose before the GPU is probed. A sibling
+``.chr`` is accepted only when the CHR0 header matches.
 
 Assistant text goes to stdout; diagnostics go to stderr, so
 ``python -m gpu.cli run --prompt ... > answer.txt`` is usable.
@@ -16,6 +18,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 from . import messages
 from .arch import gate, missing_internlm_extras
@@ -407,7 +410,23 @@ def _open_loop(
         model, local_files_only=True, trust_remote_code=trust_remote_code
     )
 
+    executor = str(getattr(args, "executor", "auto") or "auto")
     cap = _max_resident_bytes(args, model, chr_file, vram_mib)
+    if executor == "decodev2":
+        from gpu.decodev2.session import decodev2_refused
+
+        requested = getattr(args, "codec", None) or "auto"
+        file_codec = _file_codec(chr_file)
+        codec_now = (
+            "vq"
+            if requested == "vq" or file_codec == "vq"
+            else (file_codec or "nf4")
+        )
+        why = decodev2_refused(
+            SimpleNamespace(overflow=cap is not None, codec=codec_now)
+        )
+        if why is not None:
+            raise RuntimeError(why)
     _err(f"loading {chr_file} (the only weight file opened)")
     loaded, report = load_model(
         model,
@@ -438,8 +457,30 @@ def _open_loop(
         + f", load {report.seconds:.1f} s"
     )
 
-    loop = TokenLoop(loaded, max_seq=args.max_seq)
-    _err(f"graph family: {loop.plan.family} (qkv pack: {loop.plan.qkv_pack or 'split'})")
+    if executor == "tokenloop":
+        chosen, why = "tokenloop", None
+    else:
+        from gpu.decodev2.session import pick_executor
+
+        chosen, why = pick_executor(
+            executor, report, getattr(loaded, "deepfold_plan", None)
+        )
+        if executor == "decodev2" and why is not None:
+            raise RuntimeError(why)
+    if chosen == "decodev2":
+        from gpu.decodev2.session import DecodeV2Loop
+
+        loop = DecodeV2Loop.from_model(loaded, max_seq=args.max_seq)
+        how = "auto" if executor == "auto" else "flag"
+        _err(
+            f"executor=decodev2 ({how}) family={loop.plan.family} "
+            f"prefill_chunk={loop.prefill_chunk}"
+        )
+    else:
+        loop = TokenLoop(loaded, max_seq=args.max_seq)
+        if executor == "auto" and why:
+            _err(f"executor=tokenloop (auto: {why})")
+        _err(f"graph family: {loop.plan.family} (qkv pack: {loop.plan.qkv_pack or 'split'})")
     if codec == "vq" and loop.prefill_chunk == 1:
         _err(
             "VQ GEMM is decode-only: the prompt is walked one token at a time "
@@ -529,7 +570,11 @@ def run(args) -> int:
             args, model, chr_file, checked.trust_remote_code, vram_mib=m.vram_total_mib
         )
     except RuntimeError as exc:
-        if "out of memory" not in str(exc).lower():
+        msg = str(exc)
+        if msg.startswith("decodev2:"):
+            _err(msg)
+            return 1
+        if "out of memory" not in msg.lower():
             raise
         from .doctor import _smi_used_mib
 

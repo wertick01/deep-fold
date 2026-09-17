@@ -30,18 +30,21 @@
 лежит упакованным в pinned-RAM хоста. Полного плотного слоя на устройстве нет
 ни в один момент.
 
-Измерено на одной RTX 3080 12 ГБ: Qwen2.5-14B-Instruct (~28 ГиБ 16-битных
-весов) выдаёт около 6,6 токена в секунду; internlm2.5-20B (~38 ГиБ) — около 5,0.
-У Qwen2.5-32B overflow даёт **2,49 ток/с** (63 шага) / **2,53** по всем 64
-сгенерированным токенам. Ollama и llama.cpp auto-fit Q4_K_M на той же карте —
-оба **2,54**; llama.cpp `-ngl 99` — **1,52**. На 3B, где обе сети влезают,
-Q4_K примерно в **5 раз** быстрее. Это не рейтинг ядер. Протокол:
-[docs/eval-32b.md](docs/eval-32b.md),
+Измерено на одной RTX 3080 12 ГБ: resident **Decode V2** (NF4 GEMV,
+префилл MMA пачками 32, `max_seq=2048`) — **197** ток/с на Qwen2.5-3B (host;
+device-window **199**), **57,5** на 14B, **40** на internlm2.5-20B. TokenLoop MMA на тех
+же моделях — **35,2 / 6,56 / 5,01**. У Qwen2.5-32B overflow CopyRing даёт
+**2,49 ток/с** (63 шага) / **2,53** по всем 64 токенам. Ollama и llama.cpp
+auto-fit Q4_K_M на 32B — оба **2,54**; llama.cpp `-ngl 99` — **1,52**. На 3B
+Q4_K long ≈ **187** при ctx 2048; Decode V2 197 — тот же размер буфера, но V2
+по-прежнему смотрит на всю ось. 14B: llama.cpp **69,9** / Ollama **58,9** / V2
+**57,5**. CLI `--executor auto` берёт V2 на
+resident NF4. **Дорабатываются:** TTY / агентный layout. Протокол:
+[docs/decode-v2-lab.md](docs/decode-v2-lab.md),
 [docs/compare-3080.md](docs/compare-3080.md).
-Когда влезают оба
-варианта (3B), decode на упакованном пути уже быстрее BF16; время до первого токена
-по-прежнему больше. Сжатие окупается, когда несжатая модель на карту не
-помещается.
+Когда влезают оба варианта (3B), TokenLoop NF4 уже быстрее BF16; время до
+первого токена по-прежнему больше. Decode V2 на 3B — другой путь (GEMV graph).
+Сжатие окупается, когда несжатая модель на карту не помещается.
 
 ![deep-fold: веса всё время работы лежат упакованными — CPU один раз пишет NF4 в CHR0, CompressedLinear держит в VRAM только коды и групповые шкалы, каждое GEMM восстанавливает фрагмент в регистрах и выбрасывает его](scheme.png)
 
@@ -247,7 +250,9 @@ Marlin.
 ![Ход работы на одной RTX 3080 12 ГБ: голодное ядро 3B, правка occupancy, честная пара, 14B и 20B влезло/не влезло, трудный eval, локальный срез GSM8K](docs/img/progress-3080.png)
 
 *Рисунок. Дуга на этой карте; каждое число подписано пластиной, с которой
-взято. Зафиксированная 3B (`docs/runs/qwen25-3b/`, график видеопамяти выше) —
+взято. Это TokenLoop / BF16 / occupancy — не текущий resident decode.
+Decode V2: [`docs/img/decodev2-3080.png`](docs/img/decodev2-3080.png)
+(3B **197**, 14B **57,5**, 20B **40** при `max_seq=2048`). Зафиксированная 3B (`docs/runs/qwen25-3b/`, график видеопамяти выше) —
 голодное ядро: 23,1 против 17,0 ток/с; скорость выдачи с той картинки не
 читается. NF4 после правки occupancy, без пары BF16: 31,6 ток/с / 167 мс.
 Таблица выше — парный замер одной сессии, 24,8 против 28,7 ток/с. Рабочие
@@ -293,8 +298,14 @@ GSM8K (первые 200 из 1 319 пунктов основного теста,
 
 Скорости здесь переворачиваются по той же причине. BF16 выдаёт 0,92 токена в
 секунду, потому что на каждый токен основная часть весов вынуждена ехать по
-шине, а упакованный путь NF4 доходит до 6,56 — быстрее в семь с лишним раз. Это
+шине, а упакованный путь TokenLoop NF4 доходит до 6,56 — быстрее в семь с лишним раз. Это
 сравнение не ядра с ядром: так выглядит разница между «влезло» и «не влезло».
+Decode V2 на тех же весах (`max_seq=2048`): **57,5 ток/с**, префилл **322 мс**.
+Exclusive Q4_K long, ctx 2048: Ollama **58,9**, llama.cpp **69,9**.
+V2 не быстрее Ollama/llama.cpp на 14B. Пересекающийся Ollama **5,95** — не число.
+Пластина: [`docs/img/decodev2-3080.png`](docs/img/decodev2-3080.png).
+Q4_K: [`docs/runs/ollama-h2-14b/`](docs/runs/ollama-h2-14b/),
+[`docs/runs/llamacpp-h2-14b/`](docs/runs/llamacpp-h2-14b/).
 
 ### internlm2_5-20b-chat — 20B отвечает на карте 12 ГБ, у BF16 нет опорной линии
 
@@ -319,8 +330,11 @@ GSM8K (первые 200 из 1 319 пунктов основного теста,
 рабочий набор CUDA после загрузки — снова резерв аллокатора: **37 882 МиБ
 против 10 273 МиБ**, то есть примерно 37 ГиБ против примерно 10 ГиБ. 11 976
 значит только, что у прибора кончилась шкала; остаток BF16 идёт из системной
-оперативной памяти, которую Windows показывает как разделяемую память GPU. NF4
-выдаёт 5,01 токена в секунду и проходит проверку.
+оперативной памяти, которую Windows показывает как разделяемую память GPU. TokenLoop NF4
+выдаёт 5,01 токена в секунду и проходит проверку. Decode V2 exclusive на тех же
+весах: **40 ток/с**, префилл **220 мс** (`max_seq=2048`). Q4_K long, ctx 2048: Ollama **11,53**,
+llama.cpp **11,87**. Не цитировать device-window 25,6 / 20,7. Hard-12 на тех же
+весах — **9/12** при **35,2 ток/с**, это не плато 40.
 
 Позже на тех же весах NF4 прогнали трудный eval из 12 пунктов, только NF4:
 **8/12** (промахи: train, machines, sheep, bat-and-ball). Среднее время до
@@ -380,13 +394,23 @@ transformers 5 больше не передаёт `cache_position`, и моде�
 277 мс, если бы стена равнялась copy; измеренная стена ~432 мс/ток.
 Перерисовать: `python -m gpu.lab.h2_plate --redraw`.*
 
-![Сопоставленный decode на одной RTX 3080: Ollama Q4_K_M против H2 NF4 против llama.cpp](docs/img/compare-3080.png)
+![Сопоставленный decode на одной RTX 3080: 32B ничья 2,54; 3B Decode V2 197 рядом с Q4_K ~187](docs/img/compare-3080.png)
 
 *Рисунок. Плато 64 токена на 32B: Ollama **2,54**, llama.cpp auto-fit **2,54**,
 H2 **2,49** шагов / **2,53** сгенерированных токенов; `-ngl 99` был **1,52**.
-На 3B обе сети влезают: ~187 против TokenLoop 35,2 / 35,8 — весь путь
-генерации, не изолированный NF4 GEMM. SKIP так и SKIP.
+На 3B Decode V2 **197** (`max_seq=2048`) рядом с Q4_K **~187** (ctx 2048) —
+тот же размер буфера, V2 всё ещё смотрит на всю ось. TokenLoop MMA **35,2** — старая пластина.
 Перерисовать: `python -m gpu.lab.compare_plate --redraw`.*
+
+![Decode V2 resident 3B/14B/20B на одной RTX 3080](docs/img/decodev2-3080.png)
+
+*Рисунок. Decode V2 GEMV + префилл MMA-32. V2 (`max_seq=2048`): 3B **197**, 14B **57,5**, 20B **40**.
+Exclusive Q4_K long (ctx 2048): 14B llama.cpp **69,9** / Ollama **58,9**; 20B Ollama **11,53** / llama.cpp **11,87**.
+V2 смотрит на весь буфер. Пересекающийся 14B 5,95 и 20B 25,6 / 20,7 — не decode.
+Hard-12: 3B **8/12**, 14B **11/12**, 20B **9/12** (35,2 ток/с, не 40).
+**Скоро будет выполнено:** Ollama 14B hard-12, llama.cpp hard-12, Nsight 70–85%.
+**Дорабатываются:** TTY / агентный layout.
+Перерисовать: `python -m gpu.lab.decodev2_plate --redraw`.*
 
 <table>
 <thead>
@@ -425,6 +449,12 @@ H2 **2,49** шагов / **2,53** сгенерированных токенов;
 <td align="right"><strong>35,8</strong></td>
 <td align="right"><strong>2,53</strong></td>
 </tr>
+<tr>
+<td>deep-fold Decode V2</td>
+<td>NF4 GEMV graph, max_seq=2048</td>
+<td align="right"><strong>197</strong></td>
+<td align="right">—</td>
+</tr>
 </tbody>
 </table>
 
@@ -448,11 +478,13 @@ TTFT **1444 мс**, `nvidia-smi` **11 636 МиБ** — тот же класс, �
 H2 **2,49** шагов / **2,53** сгенерированных токенов против **2,54** — два
 разных потолка (PCIe 6885 МиБ/ток против CPU-хвоста), не победа ядра.
 Слойный гибрид пробовали на `exp/cpu-hybrid-overflow` (long **2,091**);
-Ollama не обогнали, в `main` этот код не сливали. На 3B Q4_K ~187 ток/с, наш
-NF4 TokenLoop 35,2 / 35,8 (весь тракт, не одно ядро). Пластина:
-[`docs/img/compare-3080.png`](docs/img/compare-3080.png). Протокол:
+Ollama не обогнали, в `main` этот код не сливали. На 3B Q4_K ~187 ток/с (ctx 2048), TokenLoop MMA 35,2 / 35,8, Decode V2 **197**
+(`max_seq=2048`). V2 смотрит на весь буфер. Не сливать таймеры в «обогнали llama.cpp». **Скоро будет выполнено:** Ollama 14B hard-12, llama.cpp hard-12, Nsight 70–85%. Пластины:
+[`docs/img/compare-3080.png`](docs/img/compare-3080.png),
+[`docs/img/decodev2-3080.png`](docs/img/decodev2-3080.png). Протокол:
 [`docs/eval-32b.md`](docs/eval-32b.md),
-[`docs/compare-3080.md`](docs/compare-3080.md).
+[`docs/compare-3080.md`](docs/compare-3080.md),
+[`docs/decode-v2-lab.md`](docs/decode-v2-lab.md).
 
 Живой прогон: `C:\dev\models\runs\h2-qwen25-32b-20260914-234048`
 (`python -m gpu.lab.h2_trace --no-timing`). Короткая копия
@@ -568,8 +600,10 @@ What is 17 times 19? Reply with the number only.
   **Не пишите, что deep-fold быстрее существующих 4-битных движков вообще.**
   Сопоставленные ряды на этой карте: Ollama 32B long **2,54** против H2 **2,53**
   по счёту сгенерированных токенов (**2,49** шагов; ничья потолков, не ядра);
-  llama.cpp auto-fit **2,54** (`-ngl 99` был **1,52**); 3B Ollama **187,3** против H2 **35,2** / **35,8**
-  ([docs/compare-3080.md](docs/compare-3080.md)). Живой
+  llama.cpp auto-fit **2,54** (`-ngl 99` был **1,52**); 3B Ollama **187,3**
+  (ctx 2048) против Decode V2 **197** (`max_seq=2048`) и TokenLoop **35,2** / **35,8**
+  ([docs/compare-3080.md](docs/compare-3080.md),
+  [docs/decode-v2-lab.md](docs/decode-v2-lab.md)). Живой
   дымовой прогон bitsandbytes NF4 в JSON сравнения — 22,2 ток/с / 60 мс; наш
   парный NF4 — 28,7 ток/с / 92 мс. Это разные стеки
   (`Linear4bit` против `CompressedLinear` + `TokenLoop`), не сравнение ядер.
@@ -714,6 +748,7 @@ python -c "from gpu.lab import comparison_figure; comparison_figure(r'docs/runs/
 python -m gpu.lab.progress_plate --redraw
 python -m gpu.lab.h2_plate --redraw
 python -m gpu.lab.compare_plate --redraw
+python -m gpu.lab.decodev2_plate --redraw
 ```
 
 Дым 32B overflow (Ampere, живые веса вне git):
@@ -731,13 +766,16 @@ python -m gpu.lab.h2_trace --no-timing
 |---|---|
 | Пластина хода работы (от первых графиков до сейчас) | [docs/img/progress-3080.png](docs/img/progress-3080.png) |
 | Пластина overflow 32B | [docs/img/h2-qwen25-32b.png](docs/img/h2-qwen25-32b.png) |
-| Сопоставленный decode Ollama / H2 / llama.cpp | [docs/img/compare-3080.png](docs/img/compare-3080.png) |
+| Сопоставленный decode Ollama / H2 / llama.cpp / Decode V2 | [docs/img/compare-3080.png](docs/img/compare-3080.png) |
+| Decode V2 3B/14B/20B | [docs/img/decodev2-3080.png](docs/img/decodev2-3080.png) |
+| Exclusive Q4_K long 14B (Ollama 58,9 / llama.cpp 69,9) | [docs/runs/ollama-h2-14b/](docs/runs/ollama-h2-14b/), [docs/runs/llamacpp-h2-14b/](docs/runs/llamacpp-h2-14b/) |
+| Контракт Decode V2 (цели, non-goals) | [docs/decode-v2.md](docs/decode-v2.md) |
 | Методика лаборатории и чтение картинки | [docs/lab.md](docs/lab.md) |
-| CLI (`doctor` / `run`) | [docs/ux.md](docs/ux.md) |
-| Агентный режим (инструменты в CLI; KV — волна B, спека EN) | [docs/spec/agent.md](docs/spec/agent.md) |
-| Веб-поиск агента (ключ Brave, пошагово) | [docs/web-search.ru.md](docs/web-search.ru.md) |
+| CLI (`doctor` / `run`) — **дорабатываются** TTY / агент | [docs/ux.md](docs/ux.md) |
+| Агентный режим (инструменты и session KV в CLI) — **дорабатываются** | [docs/spec/agent.md](docs/spec/agent.md) |
+| Веб-поиск агента (бесплатный Tavily, без карты) | [docs/web-search.ru.md](docs/web-search.ru.md) |
 | Трудный eval (вопросы, ответы, время 3B/14B) | [docs/eval-hard-qwen25.md](docs/eval-hard-qwen25.md) |
-| Дым 32B; Ollama / llama.cpp auto-fit 2,54; H2 2,49 шагов / 2,53 eval; `-ngl 99` = 1,52; hard-12 Ollama 3B = 7/12, 32B = 11/12; TokenLoop 32B = 12/12 | [docs/eval-32b.md](docs/eval-32b.md), [docs/compare-3080.md](docs/compare-3080.md) |
+| Дым 32B; Ollama / llama.cpp auto-fit 2,54; H2 2,49 шагов / 2,53 eval; `-ngl 99` = 1,52; Decode V2 3B = 197 (`max_seq=2048`); 14B Q4_K = 58,9 / 69,9; **скоро:** Ollama 14B hard-12, llama.cpp hard-12, Nsight | [docs/eval-32b.md](docs/eval-32b.md), [docs/compare-3080.md](docs/compare-3080.md), [docs/decode-v2-lab.md](docs/decode-v2-lab.md) |
 | Кольцо overflow H2 | [docs/plan-h2-ring.md](docs/plan-h2-ring.md) |
 | Счётчики Nsight GEMM (не tok/s) | [docs/runs/ncu/](docs/runs/ncu/) |
 | Матрица 4-битных конкурентов (3B SKIP кроме bnb; 32B Ollama/llama.cpp сняты) | [docs/runs/competitor-qwen25-3b/](docs/runs/competitor-qwen25-3b/), [docs/runs/compare-3080/](docs/runs/compare-3080/) |

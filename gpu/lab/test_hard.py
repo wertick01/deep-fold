@@ -861,6 +861,36 @@ def gate_worker_cli() -> None:
     )
     check("worker accepts --items-json", args.items_json == "script.json", args.items_json)
     check("worker accepts --conversation", args.conversation == "history", args.conversation)
+    v2 = _parser().parse_args(
+        ["--codec", "nf4", "--out", "x", "--executor", "decodev2"]
+    )
+    check("worker accepts --executor decodev2", v2.executor == "decodev2", v2.executor)
+    default = _parser().parse_args(["--codec", "nf4", "--out", "x"])
+    check("worker executor defaults to tokenloop", default.executor == "tokenloop", default.executor)
+    from gpu.lab.hard import _parser as hard_parser
+
+    hard = hard_parser().parse_args(["--lab", "qwen25-3b", "--executor", "decodev2", "--max-seq", "2048"])
+    check("hard CLI accepts --executor decodev2", hard.executor == "decodev2", hard.executor)
+    check("hard CLI accepts --max-seq 2048", hard.max_seq == 2048, str(hard.max_seq))
+    quiet_smi = hard_parser().parse_args(
+        ["--lab", "internlm20b", "--interval", "0"]
+    )
+    check("hard CLI accepts --interval 0", quiet_smi.interval == 0.0, str(quiet_smi.interval))
+    from gpu.lab.sampler import Sampler
+
+    try:
+        Sampler("nf4", interval_s=0.2)
+        check("sampler rejects interval > 0.15", False, "no raise")
+    except ValueError:
+        check("sampler rejects interval > 0.15", True, "")
+    off = Sampler("nf4", interval_s=0.0)
+    check("sampler allows interval 0", off.interval_s == 0.0, str(off.interval_s))
+    try:
+        hard_parser().parse_args(["--lab", "qwen25-32b", "--executor", "decodev2"])
+        # parse_args succeeds; main() rejects. Flag must still parse.
+        check("32B decodev2 still parses (main refuses)", True, "")
+    except SystemExit as exc:
+        check("32B decodev2 still parses (main refuses)", False, str(exc))
 
 
 def main(argv: list[str] | None = None) -> int:

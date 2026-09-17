@@ -1,79 +1,77 @@
-# web_search: Brave Search
+# web_search: free Tavily (no card)
 
-`deepfold chat --agent` can call `web_search`. Google’s Custom Search JSON API
-is [closed to new customers](https://developers.google.com/custom-search/v1/overview).
-The path that still signs up is the
-[Brave Search API](https://api-dashboard.search.brave.com/documentation/quickstart).
-Results are title / URL / snippet, not google.com ranking.
+`deepfold chat --agent` can call `web_search`. Testers do **not** need an
+account or a credit card: `--agent` turns search on with the tools. The
+default backend is
+[Tavily keyless](https://docs.tavily.com/documentation/keyless) (shared free
+cap). Results are title / URL / snippet, not google.com ranking. Deepfold
+does not scrape Google or DuckDuckGo HTML.
 
-Brave’s own quickstart requires a card to **activate a plan**. The Search plan
-then typically includes monthly credits (about 1 000 queries). No plan → no key.
+**In progress:** agent TTY chrome. Search wiring below still applies.
 
-Never put the token in git, chat, or a `.chr`.
+Never put tokens in git, chat, or a `.chr`.
 
-Russian walkthrough (click-by-click, this machine): [`web-search.ru.md`](web-search.ru.md).
+Russian walkthrough: [`web-search.ru.md`](web-search.ru.md).
+Contract: [`spec/agent.md`](spec/agent.md) §5.7.
 
 ---
 
-## 1. Account
+## Testers
 
-1. [Register](https://api-dashboard.search.brave.com/register).
-2. Confirm the email.
-3. Open the [dashboard](https://api-dashboard.search.brave.com/).
+Until agent tools are on, the model does not see `web_search` and no
+socket opens. `--agent` enables both. `--no-agent-web` keeps tools local.
 
-## 2. Search plan
+```powershell
+python -m gpu.cli chat --model D:\weights\Qwen2.5-14B-Instruct --agent --workspace C:\dev\deep-fold
+```
 
-1. [Plans](https://api-dashboard.search.brave.com/app/plans).
-2. Activate **Search** (includes Web Search).
-3. Enter a card when asked.
-4. Wait until the plan is active.
+Remember for later chats (writes `$DEEPFOLD_HOME/prefs.env`):
 
-Pricing: [docs](https://api-dashboard.search.brave.com/documentation/pricing).
+```text
+/agent default on
+```
 
-## 3. API key
+Same as `DEEPFOLD_AGENT=1`. Undo with `/agent default off` or `--no-agent`.
+14B is the agent plate. Trust `ask` confirms each search.
 
-1. **API Keys** → **Add API Key** (name e.g. `deepfold`).
-2. Copy the token once. If lost, revoke and create another.
+## Optional free Tavily key (HTTP 429)
 
-## 4. Store it (Windows)
-
-User env (restart Cursor/terminals afterwards):
+Keyless is a shared pool. A free API key is typically 1 000 searches/month
+and does **not** require a card: [app.tavily.com](https://app.tavily.com).
 
 ```powershell
 [System.Environment]::SetEnvironmentVariable(
-  "DEEPFOLD_BRAVE_KEY",
-  "paste-token-here",
+  "DEEPFOLD_TAVILY_KEY",
+  "tvly-paste-here",
   "User")
 ```
 
 Or UTF-8 `%LOCALAPPDATA%\deepfold\cse.env`:
 
 ```text
-DEEPFOLD_BRAVE_KEY=paste-token-here
+DEEPFOLD_TAVILY_KEY=tvly-paste-here
 ```
 
-`BRAVE_API_KEY` is also read. Env wins over the file.
+`TAVILY_API_KEY` is also read. Restart the terminal afterwards.
 
-## 5. Opt in
+## Optional Brave / Google
 
-```powershell
-python -m gpu.cli chat --model D:\weights\Qwen2.5-14B-Instruct --agent --agent-web --workspace C:\dev\deep-fold
-```
+| Order | When |
+|---|---|
+| 1. Brave | `DEEPFOLD_BRAVE_KEY` or `BRAVE_API_KEY` is set |
+| 2. Google CSE | both `DEEPFOLD_GOOGLE_CSE_KEY` and `DEEPFOLD_GOOGLE_CSE_CX` |
+| 3. Tavily | otherwise: Tavily key, else keyless |
 
-Or `/agent web on` in an existing session. 14B is the agent plate. Trust `ask`
-confirms each search.
+Brave’s dashboard usually asks for a card before a plan activates — skip it
+for product tests. Google’s Custom Search JSON API is closed to new Cloud
+projects. The `cse.js` widget is not this tool.
 
-## 6. Errors
+## Errors
 
 | Message | Fix |
 |---|---|
-| `web_search is off` | `--agent-web` / `/agent web on` |
-| `needs DEEPFOLD_BRAVE_KEY` | step 4 + new terminal |
-| HTTP 401 / 403 | new key; plan active |
-| HTTP 422 | plan missing Web Search |
-| HTTP 429 | credits / rate limit |
-
-If **both** Google CSE env vars are set and Brave is not, the old CSE JSON API
-is used. If Brave is set, Brave wins.
-
-Contract: [`spec/agent.md`](spec/agent.md) §5.7.
+| `web_search is off` | `--agent` (search follows), `--agent-web`, or `/agent web on` |
+| Tavily HTTP 429 | free Tavily key (no card) |
+| Tavily HTTP 401 / 403 | check `DEEPFOLD_TAVILY_KEY` |
+| Brave 401 / 403 / 422 / 429 | Brave plan; unset the Brave key to fall back to Tavily |
+| Google CSE HTTP 403 | new Cloud projects are refused; unset CSE keys |

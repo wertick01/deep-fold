@@ -3,6 +3,9 @@
 This page is the path for people who already have a model on disk and want the
 NF4 driver without a notebook.
 
+**In progress (Дорабатываются):** TTY chrome / agent layout from the neighbor
+chat. The shipped `gpu/cli` path below still runs.
+
 **Shipped** (`gpu/cli/`). Neighbor install is [`install.md`](install.md);
 short commands: [`quickstart.md`](quickstart.md). A one-model metrics dump for
 another PC is `scripts/plate.ps1` / `scripts/plate.sh`.
@@ -25,8 +28,9 @@ A100 (`sm_80`) and Ada (`sm_89`) **generate as experimental** — allowed, not t
 **refused**. The kernel image is `sm_80/sm_86/sm_89` plus PTX `compute_80`.
 
 The lab comparison plate is separate: `python -m gpu.lab.run`, or
-`gpu.host.load_model` + `gpu.loop.TokenLoop` by hand. See the
-[README](../README.md).
+`gpu.host.load_model` + `gpu.loop.TokenLoop` by hand. Resident CLI generate
+(`--executor auto`) uses Decode V2 on NF4 that fits; overflow / VQ stay on
+TokenLoop. See the [README](../README.md).
 
 ## After a HuggingFace model is on disk
 

@@ -94,6 +94,21 @@ def test_write_at_gpu_position() -> None:
     assert k_att.shape == (1, st.spec.n_kv, st.spec.max_seq, st.spec.head_dim)
 
 
+def test_write_range_and_view() -> None:
+    st = _cpu_state()
+    n = 3
+    k = torch.arange(n * st.spec.n_kv * st.spec.head_dim, dtype=torch.float32).reshape(
+        n, st.spec.n_kv, st.spec.head_dim
+    )
+    v = k + 1
+    st.kv.write_range(0, 2, k, v)
+    k_win, v_win = st.kv.view(0, 5)
+    assert k_win.shape == (1, st.spec.n_kv, 5, st.spec.head_dim)
+    assert torch.equal(st.kv.k[0, 2:5], k)
+    assert torch.equal(st.kv.v[0, 2:5], v)
+    assert torch.equal(k_win[0, :, 2:5, :], k.permute(1, 0, 2))
+
+
 def test_commit_feeds_token_on_device() -> None:
     st = _cpu_state()
     st.next_token.fill_(st.spec.eos_id)

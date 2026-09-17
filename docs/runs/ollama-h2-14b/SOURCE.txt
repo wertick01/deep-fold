@@ -1,0 +1,16 @@
+Ollama 0.34.0 library tag qwen2.5:14b (~9.0 GB Q4_K_M). Exclusive card
+2026-09-18 (VRAM idle ~700 MiB before load). stream=True, greedy smoke +
+64-token travelogue, ctx 2048.
+
+Quote long **58.9 tok/s** (n=64), smi after load **9649**. Smoke mean 66.5
+is mixed short EOS; do not quote it as the plateau.
+
+An earlier same-day dump (`ollama-h2-14b-20260918`) was **5.95** long while
+another network was on the GPU. That is overlapping WDDM, not a number.
+
+Decode V2 on the same Instruct is **57.5** host at `max_seq=2048`. The
+2026-09-17 `max_seq=512` plate was **55.6**. llama.cpp auto-fit long on
+bartowski Q4_K_M is **69.9**.
+
+Live: C:\dev\models\runs\ollama-h2-14b-20260918-exclusive
+Command: python -m gpu.lab.ollama_h2 --model qwen2.5:14b --size 14B

@@ -1,0 +1,12 @@
+llama.cpp b10964 llama-server, bartowski Qwen2.5-14B-Instruct Q4_K_M
+(8988110976 bytes), --n-gpu-layers omitted (auto-fit). Exclusive card
+2026-09-18. Same greedy smoke + ignore-EOS 64-token travelogue. ctx 2048.
+
+Long **69.9 tok/s** (n=64). Smoke mean 68.9. TTFT ~34 ms. smi 9714 MiB.
+
+Ollama library tag long on this card is **58.9**. Decode V2 is **57.5** host
+at `max_seq=2048`. Do not merge ctx 2048 into a kernel ranking: V2 still
+attends the full buffer, and 57.5 is under both Q4_K longs.
+
+Live: C:\dev\models\runs\llamacpp-h2-14b-20260918-exclusive
+Command: python -m gpu.lab.llamacpp_h2 --gguf C:\dev\models\gguf\Qwen2.5-14B-Instruct-Q4_K_M.gguf

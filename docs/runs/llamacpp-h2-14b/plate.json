@@ -1,0 +1,163 @@
+{
+  "schema": "deepfold.llamacpp_h2.v1",
+  "plan_only": false,
+  "cmd": [
+    "C:\\dev\\models\\llama.cpp\\llama-server.exe",
+    "--model",
+    "C:\\dev\\models\\gguf\\Qwen2.5-14B-Instruct-Q4_K_M.gguf",
+    "--ctx-size",
+    "2048",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "8765",
+    "--parallel",
+    "1",
+    "--jinja",
+    "--no-webui",
+    "--perf",
+    "-lv",
+    "1"
+  ],
+  "gguf_note": "C:\\dev\\models\\gguf\\Qwen2.5-14B-Instruct-Q4_K_M.gguf size=8988110976 (not the bartowski Q4_K_M length 19851336576)",
+  "ctx": 2048,
+  "n_predict": 64,
+  "ngl": -1,
+  "ngl_omitted": true,
+  "parallel": 1,
+  "long_n": 64,
+  "quant": "Q4_K_M",
+  "model": "Qwen2.5-32B-Instruct",
+  "source": "bartowski/Qwen2.5-32B-Instruct-GGUF",
+  "llama_cpp": "ggml-org/llama.cpp b10964 win-cuda-12.4",
+  "smi_before_mib": 760.0,
+  "messages": [
+    {
+      "id": 1,
+      "prompt": "Reply with one short sentence. What is the capital of France?",
+      "reply": "The capital of France is Paris.",
+      "needles": [
+        "paris",
+        "париж"
+      ],
+      "quality_ok": true,
+      "prompt_n": 42,
+      "prompt_ms": 36.889,
+      "predicted_n": 8,
+      "predicted_ms": 102.257,
+      "decode_tok_s": 68.45497129780846,
+      "wall_ms": 144.36700000078417,
+      "raw": {
+        "cache_n": 0,
+        "prompt_n": 42,
+        "prompt_ms": 36.889,
+        "prompt_per_token_ms": 0.8783095238095239,
+        "prompt_per_second": 1138.5507874976279,
+        "predicted_n": 8,
+        "predicted_ms": 102.257,
+        "predicted_per_token_ms": 14.608142857142857,
+        "predicted_per_second": 68.45497129780846
+      }
+    },
+    {
+      "id": 2,
+      "prompt": "And the capital of Germany?",
+      "reply": "The capital of Germany is Berlin.",
+      "needles": [
+        "berlin",
+        "берлин"
+      ],
+      "quality_ok": true,
+      "prompt_n": 35,
+      "prompt_ms": 32.6,
+      "predicted_n": 8,
+      "predicted_ms": 100.137,
+      "decode_tok_s": 69.90423120325154,
+      "wall_ms": 157.04679999907967,
+      "raw": {
+        "cache_n": 0,
+        "prompt_n": 35,
+        "prompt_ms": 32.6,
+        "prompt_per_token_ms": 0.9314285714285715,
+        "prompt_per_second": 1073.6196319018404,
+        "predicted_n": 8,
+        "predicted_ms": 100.137,
+        "predicted_per_token_ms": 14.305285714285715,
+        "predicted_per_second": 69.90423120325154
+      }
+    },
+    {
+      "id": 3,
+      "prompt": "What is 17 times 19? Reply with the number only.",
+      "reply": "323",
+      "needles": [
+        "323"
+      ],
+      "quality_ok": true,
+      "prompt_n": 45,
+      "prompt_ms": 33.823,
+      "predicted_n": 4,
+      "predicted_ms": 43.945,
+      "decode_tok_s": 68.26715212197064,
+      "wall_ms": 102.16870000294875,
+      "raw": {
+        "cache_n": 0,
+        "prompt_n": 45,
+        "prompt_ms": 33.823,
+        "prompt_per_token_ms": 0.7516222222222222,
+        "prompt_per_second": 1330.455607131242,
+        "predicted_n": 4,
+        "predicted_ms": 43.945,
+        "predicted_per_token_ms": 14.648333333333333,
+        "predicted_per_second": 68.26715212197064
+      }
+    }
+  ],
+  "smi_after_load_mib": 9714.0,
+  "warmup": {
+    "reply": "Hello! How can I assist you today",
+    "prompt_n": 31,
+    "prompt_ms": 202.187,
+    "predicted_n": 8,
+    "predicted_ms": 156.536,
+    "decode_tok_s": 44.718147902080034,
+    "wall_ms": 376.80120000004536,
+    "raw": {
+      "cache_n": 0,
+      "prompt_n": 31,
+      "prompt_ms": 202.187,
+      "prompt_per_token_ms": 6.522161290322581,
+      "prompt_per_second": 153.32340852774905,
+      "predicted_n": 8,
+      "predicted_ms": 156.536,
+      "predicted_per_token_ms": 22.362285714285715,
+      "predicted_per_second": 44.718147902080034
+    }
+  },
+  "long": {
+    "prompt": "Write a long travelogue about rivers, forests, and cities. Keep going with more sentences.",
+    "reply": "My journey began at the confluence of two rivers, where the blue waters of the Swift and the green waters of the Serene met in a dance of currents. The air was crisp, carrying the scent of wet earth and the distant hum of life. I stood on the banks, feeling the cool breeze against my skin",
+    "ignore_eos": true,
+    "prompt_n": 48,
+    "prompt_ms": 35.739,
+    "predicted_n": 64,
+    "predicted_ms": 900.905,
+    "decode_tok_s": 69.92968181994772,
+    "wall_ms": 966.049299997394,
+    "raw": {
+      "cache_n": 0,
+      "prompt_n": 48,
+      "prompt_ms": 35.739,
+      "prompt_per_token_ms": 0.7445624999999999,
+      "prompt_per_second": 1343.0705951481575,
+      "predicted_n": 64,
+      "predicted_ms": 900.905,
+      "predicted_per_token_ms": 14.300079365079364,
+      "predicted_per_second": 69.92968181994772
+    }
+  },
+  "mean_decode_tok_s": 68.87545154101021,
+  "mean_ttft_ms": 34.437333333333335,
+  "smoke_ok": true,
+  "smi_after_generate_mib": 9634.0
+}

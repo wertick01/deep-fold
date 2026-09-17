@@ -268,6 +268,8 @@ class Generation:
     h2d_copies: int = 0
     h2d_copy_ms: float = 0.0
     h2d_forwards: int = 0
+    session_hit: bool | None = None
+    prefill_n: int | None = None
     spec_verifies: int = 0
     spec_skips: int = 0
     spec_draft_accepted: int = 0
@@ -908,6 +910,31 @@ class TokenLoop:
 
     # --- phases ------------------------------------------------------------
     @torch.no_grad()
+    def prefill_from(self, ids: torch.Tensor, start_pos: int) -> torch.Tensor:
+        """Walk ``ids`` into KV slots ``start_pos..``. Chat session path.
+
+        ``generate()`` still prefills from 0 after ``reset()``. ``start_pos``
+        is the first free slot (usually ``kv.seq_len``).
+        """
+        ids = ids.reshape(-1).to(self.device, torch.long)
+        n = int(ids.numel())
+        pos = int(start_pos)
+        if n == 0:
+            raise ValueError("empty prompt")
+        if pos < 0 or pos + n > self.max_seq:
+            raise ValueError(f"position {pos}+{n} past max_seq={self.max_seq}")
+        if self.prefill_mode == "hold":
+            step = max(1, min(PREFILL_HOLD_SUPERCHUNK, self.max_seq))
+        else:
+            step = max(1, self.prefill_chunk)
+        out = None
+        for lo in range(0, n, step):
+            hi = min(lo + step, n)
+            out = self.forward(ids[lo:hi], pos + lo, logits=(hi == n))
+        assert out is not None
+        return out
+
+    @torch.no_grad()
     def prefill(self, ids: torch.Tensor) -> torch.Tensor:
         """Walk the prompt once, filling KV slots ``0..len-1``.
 
@@ -916,19 +943,74 @@ class TokenLoop:
         :data:`PREFILL_HOLD_SUPERCHUNK` so each HOST MLP matrix is H2D once
         per superchunk. One pass either way: no prompt token is ever recomputed.
         """
-        ids = ids.reshape(-1).to(self.device, torch.long)
-        n = int(ids.numel())
-        if n == 0:
-            raise ValueError("empty prompt")
-        if self.prefill_mode == "hold":
-            step = max(1, min(PREFILL_HOLD_SUPERCHUNK, self.max_seq))
-        else:
-            step = max(1, self.prefill_chunk)
-        out = None
-        for lo in range(0, n, step):
-            hi = min(lo + step, n)
-            out = self.forward(ids[lo:hi], lo, logits=(hi == n))
-        assert out is not None
+        return self.prefill_from(ids, 0)
+
+    @torch.no_grad()
+    def seal_last(self, token_id: int) -> None:
+        """Write the last sampled token into KV so the next prefill can append.
+
+        Greedy decode emits a token before ``step()`` consumes it, so EOS (and
+        the last ``max_new`` token) sit in ``Generation.tokens`` but not in KV.
+        Chat seals them. ``run --prompt`` does not.
+        """
+        if self.kv.seq_len >= self.max_seq:
+            return
+        self._tok[0] = int(token_id)
+        self.forward(self._tok, self.kv.seq_len, logits=False)
+
+    @torch.no_grad()
+    def decode_from_logits(
+        self,
+        logits: torch.Tensor,
+        max_new_tokens: int,
+        *,
+        prompt_len: int,
+        stop: Sequence[int] = (),
+        on_token: Callable[[int], None] | None = None,
+        should_stop: Callable[[], bool] | None = None,
+        prefill_ms: float = 0.0,
+    ) -> Generation:
+        """Greedy ``step()`` loop without ``reset``/prefill. Used by chat KV."""
+        self._capture_decode_glue()
+        stop_set = frozenset(int(s) for s in stop)
+        out = Generation(
+            prompt_len=int(prompt_len),
+            prefill_chunk=self.prefill_chunk,
+            graph=self.graph_mode,
+        )
+        out.prefill_ms = float(prefill_ms)
+        token = int(logits.argmax())
+        ring = self._ring
+        b0 = 0 if ring is None else ring.total_bytes
+        c0 = 0 if ring is None else ring.total_copies
+        ms0 = 0.0 if ring is None else ring.total_copy_ms
+        f0 = 0 if ring is None else ring.total_forwards
+        if self.device.type == "cuda":
+            torch.cuda.synchronize()
+        t1 = time.perf_counter()
+        for i in range(max_new_tokens):
+            if should_stop is not None and should_stop():
+                out.interrupted = True
+                break
+            out.tokens.append(token)
+            if on_token is not None:
+                on_token(token)
+            if token in stop_set:
+                out.stop_token = token
+                break
+            if i + 1 == max_new_tokens or self.kv.seq_len >= self.max_seq:
+                break
+            logits = self.step(token)
+            out.decode_steps += 1
+            token = int(logits.argmax())
+        if self.device.type == "cuda":
+            torch.cuda.synchronize()
+        out.decode_ms = (time.perf_counter() - t1) * 1000.0
+        if ring is not None:
+            out.h2d_bytes = int(ring.total_bytes - b0)
+            out.h2d_copies = int(ring.total_copies - c0)
+            out.h2d_copy_ms = float(ring.total_copy_ms - ms0)
+            out.h2d_forwards = int(ring.total_forwards - f0)
         return out
 
     @torch.no_grad()
@@ -1079,14 +1161,7 @@ class TokenLoop:
         if draft == "cpu" and drafter is None:
             raise ValueError("draft='cpu' requires drafter (CPU model, not VRAM)")
         self.reset()
-        self._capture_decode_glue()
         ids = prompt_ids.reshape(-1).to(self.device, torch.long)
-        stop_set = frozenset(int(s) for s in stop)
-        out = Generation(
-            prompt_len=int(ids.numel()),
-            prefill_chunk=self.prefill_chunk,
-            graph=self.graph_mode,
-        )
         ring = self._ring
         b0 = 0 if ring is None else ring.total_bytes
         c0 = 0 if ring is None else ring.total_copies
@@ -1096,56 +1171,63 @@ class TokenLoop:
         torch.cuda.synchronize()
         t0 = time.perf_counter()
         logits = self.prefill(ids)
-        token = int(logits.argmax())
         torch.cuda.synchronize()
-        t1 = time.perf_counter()
-        out.prefill_ms = (t1 - t0) * 1000.0
+        prefill_ms = (time.perf_counter() - t0) * 1000.0
 
         if int(speculate) <= 1 or draft == "none":
-            for i in range(max_new_tokens):
-                if should_stop is not None and should_stop():
-                    out.interrupted = True
-                    break
-                out.tokens.append(token)
-                if on_token is not None:
-                    on_token(token)
-                if token in stop_set:
-                    out.stop_token = token
-                    break
-                if i + 1 == max_new_tokens or self.kv.seq_len >= self.max_seq:
-                    break
-                logits = self.step(token)
-                out.decode_steps += 1
-                token = int(logits.argmax())
-        else:
-            from .speculate import lookup_draft, oracle_draft, spec_generate
-
-            if draft == "lookup":
-                draft_fn = lookup_draft
-            elif draft == "oracle":
-                teacher = oracle_ids
-
-                def draft_fn(known, k, _teacher=teacher):
-                    return oracle_draft(known, k, _teacher)
-
-            else:
-                reset = getattr(drafter, "reset", None)
-                if callable(reset):
-                    reset()
-                draft_fn = drafter
-
-            spec_generate(
-                self,
-                out,
-                ids,
+            out = self.decode_from_logits(
                 logits,
                 max_new_tokens,
-                stop_set,
-                on_token,
-                int(speculate),
-                draft_fn,
-                should_stop,
+                prompt_len=int(ids.numel()),
+                stop=stop,
+                on_token=on_token,
+                should_stop=should_stop,
+                prefill_ms=prefill_ms,
             )
+            if ring is not None:
+                out.h2d_bytes = int(ring.total_bytes - b0)
+                out.h2d_copies = int(ring.total_copies - c0)
+                out.h2d_copy_ms = float(ring.total_copy_ms - ms0)
+                out.h2d_forwards = int(ring.total_forwards - f0)
+            return out
+
+        from .speculate import lookup_draft, oracle_draft, spec_generate
+
+        stop_set = frozenset(int(s) for s in stop)
+        out = Generation(
+            prompt_len=int(ids.numel()),
+            prefill_chunk=self.prefill_chunk,
+            graph=self.graph_mode,
+        )
+        out.prefill_ms = prefill_ms
+        if draft == "lookup":
+            draft_fn = lookup_draft
+        elif draft == "oracle":
+            teacher = oracle_ids
+
+            def draft_fn(known, k, _teacher=teacher):
+                return oracle_draft(known, k, _teacher)
+
+        else:
+            reset = getattr(drafter, "reset", None)
+            if callable(reset):
+                reset()
+            draft_fn = drafter
+
+        torch.cuda.synchronize()
+        t1 = time.perf_counter()
+        spec_generate(
+            self,
+            out,
+            ids,
+            logits,
+            max_new_tokens,
+            stop_set,
+            on_token,
+            int(speculate),
+            draft_fn,
+            should_stop,
+        )
         torch.cuda.synchronize()
         out.decode_ms = (time.perf_counter() - t1) * 1000.0
         if ring is not None:

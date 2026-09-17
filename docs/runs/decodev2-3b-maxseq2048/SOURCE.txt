@@ -1,0 +1,5 @@
+Exclusive Decode V2, max_seq=2048, match Q4_K ctx 2048.
+RTX 3080 12 GB idle (~776 MiB) before start. backend=gemv.
+Greedy ids from decodev2-3b-gemv-prefill-20260917 (max_seq=512); first 8 still match.
+Host 196.956 / device-window 198.903 / prefill 86 ms / graph=True.
+Do not merge with TokenLoop 35.2. Same protocol class as Ollama/llama.cpp 3B long ~187.

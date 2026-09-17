@@ -1,7 +1,7 @@
 """Saved ``deepfold chat`` transcripts under ``$DEEPFOLD_HOME/chats``.
 
-History is JSON on disk. The GPU KV cache is not stored: the next turn
-re-prefills the whole conversation from these messages.
+History is JSON on disk. Resume from `/chats` is a full prefill: the GPU
+KV cache is not stored, only the messages.
 """
 
 from __future__ import annotations

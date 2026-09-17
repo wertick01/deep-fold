@@ -83,11 +83,14 @@ CHAT_HELP = (
     "Enter sends. Ctrl+J newline. Ctrl+C stops a reply; "
     "at an empty prompt, twice to quit. "
     "Slash: /help /quit /exit /clear /stats /new /chats /copy /save /agent. "
-    "History is JSON on disk; each turn prefills it (KV is not reused). "
+    "History is JSON on disk; later turns prefill only the new suffix when "
+    "the chat-template prefix matches. "
     "Ctrl+C does not copy; use /copy or the terminal's copy (Ctrl+Shift+C). "
     "Agent mode (--agent or /agent on) can search, read, patch, and run "
     "allowlisted commands in the workspace. Writes/tests ask first "
-    "(--agent-trust). web_search is off unless --agent-web. No general shell. "
+    "(--agent-trust). web_search follows --agent (free Tavily); "
+    "--agent-web / --no-agent-web override. Persist with /agent default on. "
+    "No general shell. "
     "/agent trust ask|write|workspace."
 )
 

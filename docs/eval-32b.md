@@ -164,8 +164,10 @@ batch 1: GPU prefix, CPU Q4_K suffix on the 5950X. Weights stay put.
 H2 still computes every layer on the GPU and streams **96** packed matrices
 (**6885 MiB**) each token. The 2.54 vs 2.53 eval-count longs are CPU-suffix
 time vs PCIe copy time, not NF4 matching Q4_K mmvq. H2 `decode_tok_s` is
-**63** steps after the first token (**2.49**). 3B (fully GPU) is the whole
-TokenLoop path vs Q4_K CUDA: Ollama **187.3** vs H2 **35.2** / **35.8**. A
+**63** steps after the first token (**2.49**). 3B (fully GPU) TokenLoop MMA vs
+Q4_K CUDA is Ollama **187.3** vs H2 **35.2** / **35.8**. Decode V2 on the same
+card is **197** host (`max_seq=2048`) — same buffer size as Q4_K ctx 2048;
+V2 still attends the full axis; see [`docs/decode-v2-lab.md`](decode-v2-lab.md). A
 layer-split hybrid on
 `exp/cpu-hybrid-overflow` was **2.091** long and did not ship here.
 

@@ -30,6 +30,7 @@ setup(
             sources=[
                 str(ROOT / "bindings.cpp"),
                 str(ROOT / "nf4_gemm.cu"),
+                str(ROOT / "nf4_gemv.cu"),
             ],
             include_dirs=[str(INCLUDE)],
             extra_compile_args={"cxx": cxx_flags, "nvcc": nvcc_flags},

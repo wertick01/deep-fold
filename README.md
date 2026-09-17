@@ -261,6 +261,7 @@ There is a corpus NLL adapter. No published WikiText PPL. A local GSM8K slice in
 - Overflow depends on host RAM, pinning, PCIe, and OS sync. Placement and auto-eligibility are conservative heuristics.
 - VQ 2-bit is explicit experimental tooling; the 3B chat canary failed. `--codec auto` picks NF4 or NF4 overflow, never VQ.
 - Newer 3B and competitor claims still need full public artifacts. Broad quality and “faster than 4-bit engines” are not established. Matched 32B longs that share Ollama’s token timer (Ollama **2.54**, llama.cpp auto-fit **2.54**, H2 **2.53**) are tied, not a win; 3B Q4_K is far ahead of this NF4 decode kernel.
+- Decode V2 (`gpu/decodev2`) is an experimental N=1 CUDA-graph decoder. TokenLoop remains the shipped generate path. Lab log: [`docs/decode-v2-lab.md`](docs/decode-v2-lab.md). Do not quote its 3B tok/s as a product switch.
 - A CPU/GPU layer split was tried on `exp/cpu-hybrid-overflow` and missed Ollama (**2.091** vs **2.54**). Default generate is still CopyRing **2.49**. Details stay on that branch.
 
 ## 5. Installation

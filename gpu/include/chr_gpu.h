@@ -84,6 +84,53 @@ int chr_nf4_gemm_ws_max(const chr_nf4_dev_t *w, const void *x, void *y, int32_t 
  * Initial values come from CHR_NF4_PATH / CHR_NF4_SPLIT_K / CHR_NF4_ONE_WAVE. */
 void chr_nf4_set_tuning(int32_t path, int32_t split_k, int32_t one_wave);
 
+/* N=1 CUDA-core GEMV. Does not replace chr_nf4_gemm. x is bf16 [K], y is bf16 [M].
+ * Same packed/scale layout. FP32 LUT*scale*x, fused dequant×vector (mmvq-style).
+ * Large M: several output rows per CTA so x is loaded once per K-tile.
+ * add is optional bf16 [M] (NULL = overwrite y). y and add may alias (residual).
+ * rms_w is optional bf16 [K] (NULL = use x as-is). Dynamic smem is K bf16 when set.
+ * Error codes match chr_nf4_gemm (-1 null, -3 dims, -4 K_pad, -5 align, -6 launch). */
+int chr_nf4_gemv(const chr_nf4_dev_t *w, const void *x, void *y, void *stream,
+                 const void *add, const void *rms_w, float rms_eps);
+
+/* One launch over q.M+k.M+v.M rows. q/k/v share K and K_pad. x is bf16 [K].
+ * yq/yk/yv are bf16 [M]. bq/bk/bv are optional bf16 [M] (NULL = no bias).
+ * Qwen2.5 q/k/v are biased; omitting them wrong-ids from token 0.
+ * rms_w is optional bf16 [K]: apply RMSNorm(x, rms_w, rms_eps) before the dots. */
+int chr_nf4_gemv_qkv(const chr_nf4_dev_t *q, const chr_nf4_dev_t *k,
+                     const chr_nf4_dev_t *v, const void *x, void *yq, void *yk,
+                     void *yv, const void *bq, const void *bk, const void *bv,
+                     void *stream, const void *rms_w, float rms_eps);
+
+/* Several gate+up pairs per CTA when M is large: silu(dequant(gate)@x) *
+ * (dequant(up)@x). gate.M == up.M, same K. y is bf16 [M]. Optional rms_w as in
+ * chr_nf4_gemv_qkv. */
+int chr_nf4_gemv_swiglu(const chr_nf4_dev_t *gate, const chr_nf4_dev_t *up,
+                        const void *x, void *y, void *stream, const void *rms_w,
+                        float rms_eps);
+
+/* In-place rotate-half RoPE on q [n_q,hd] and k [n_kv,hd], then write k and v
+ * into cache [max_seq, n_kv, hd] at device *position (int64). cos/sin are
+ * bf16 [max_seq, hd]. */
+int chr_nf4_rope_kv(void *q, void *k, const void *v, void *k_cache, void *v_cache,
+                    const void *cos, const void *sin, const void *position,
+                    int32_t n_q, int32_t n_kv, int32_t hd, int32_t max_seq,
+                    void *stream);
+
+/* GQA flash-decode. k/v are cache [max_seq, n_kv, hd]. Optional k_act/v_act +
+ * cos/sin/position: rotate-half Q, write rotated K and V into cache at
+ * *position (one CTA per kv head), then attend. Partial splits merge in a
+ * second launch (WDDM cooperative grid sync returned wrong greedy ids). */
+int chr_nf4_attn(const void *q, const void *k, const void *v, void *out,
+                 const void *valid_len, float *ws, int32_t n_q, int32_t n_kv,
+                 int32_t hd, int32_t n_split, float scale, void *stream,
+                 const void *k_act, const void *v_act, const void *cos,
+                 const void *sin, const void *position, int32_t max_seq);
+
+/* y[i] = w[i] * x[i] * rsqrt(mean(x^2) + eps). x/w/y are bf16 [n]. */
+int chr_nf4_rms(const void *x, const void *w, void *y, int32_t n, float eps,
+                void *stream);
+
 /* VQ 2×8. Do not reorder. K_pad = 8 * ceil(K / 8).
  * index: uint8 [M, K_pad/8, 2], last axis = codebook (i1, i2).
  * book: fp16 bits [2, 256, 8]. Reconstruct g = C1[i1] + C2[i2] in float32. */

@@ -30,6 +30,7 @@ _INCLUDE = _REPO / "gpu" / "include"
 _KERNEL_SOURCES = (
     _DIR / "bindings.cpp",
     _DIR / "nf4_gemm.cu",
+    _DIR / "nf4_gemv.cu",
 )
 _SOURCES = _KERNEL_SOURCES + (_INCLUDE / "chr_gpu.h",)
 if str(_REPO) not in sys.path:
@@ -38,6 +39,8 @@ if str(_REPO) not in sys.path:
 from gpu.ampere_gencode import nvcc_cflags  # noqa: E402
 from gpu.ext_bin import find_ext, have_host_compiler  # noqa: E402
 from .plan import LIVE_MAX_N, PLAN_MAX_N  # noqa: E402
+
+ATTN_SPLIT = 32
 
 _ext: Any = None
 
@@ -79,7 +82,7 @@ def _jit_load():
     cxx_flags = ["/O2"] if os.name == "nt" else ["-O3"]
     return load(
         name="chr_nf4_ext",
-        sources=[str(_DIR / "bindings.cpp"), str(_DIR / "nf4_gemm.cu")],
+        sources=[str(_DIR / "bindings.cpp"), str(_DIR / "nf4_gemm.cu"), str(_DIR / "nf4_gemv.cu")],
         extra_include_paths=[str(_INCLUDE)],
         extra_cflags=cxx_flags,
         extra_cuda_cflags=nvcc_cflags(),
@@ -170,6 +173,171 @@ def nf4_gemm(
     return _load_ext().nf4_gemm(
         packed, scale, x, int(M), int(K), int(K_pad), int(cap)
     )
+
+
+def nf4_gemv(
+    packed: torch.Tensor,
+    scale: torch.Tensor,
+    x: torch.Tensor,
+    M: int,
+    K: int,
+    K_pad: int,
+    out: torch.Tensor | None = None,
+    add: torch.Tensor | None = None,
+    rms_w: torch.Tensor | None = None,
+    rms_eps: float = 1e-6,
+) -> torch.Tensor:
+    """CUDA-core N=1 GEMV. ``x`` is BF16 ``[K, 1]`` or ``[K]``; ``y`` is ``[M, 1]``.
+
+    Optional ``out`` is the destination (numel >= M). Optional ``add`` is a
+    residual of numel >= M; ``out`` and ``add`` may alias. Optional ``rms_w``
+    applies RMSNorm(x, rms_w, rms_eps) in the same launch.
+
+    Not the TokenLoop default. Decode V2 may select it via ``CHR_NF4_DECODE=gemv``.
+    """
+    n = 1 if x.dim() == 1 else int(x.size(-1))
+    if n != 1:
+        raise RuntimeError(f"chr_nf4_gemv is N=1 only, got N={n}")
+    return _load_ext().nf4_gemv(
+        packed, scale, x, int(M), int(K), int(K_pad), out, add, rms_w, float(rms_eps)
+    )
+
+
+def nf4_qkv(
+    q_packed: torch.Tensor,
+    q_scale: torch.Tensor,
+    k_packed: torch.Tensor,
+    k_scale: torch.Tensor,
+    v_packed: torch.Tensor,
+    v_scale: torch.Tensor,
+    x: torch.Tensor,
+    Mq: int,
+    Mk: int,
+    Mv: int,
+    K: int,
+    K_pad: int,
+    out_q: torch.Tensor,
+    out_k: torch.Tensor,
+    out_v: torch.Tensor,
+    q_bias: torch.Tensor | None = None,
+    k_bias: torch.Tensor | None = None,
+    v_bias: torch.Tensor | None = None,
+    rms_w: torch.Tensor | None = None,
+    rms_eps: float = 1e-6,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """One launch: q/k/v GEMVs sharing x. Writes ``out_*`` (numel >= M)."""
+    ys = _load_ext().nf4_qkv(
+        q_packed,
+        q_scale,
+        k_packed,
+        k_scale,
+        v_packed,
+        v_scale,
+        x,
+        int(Mq),
+        int(Mk),
+        int(Mv),
+        int(K),
+        int(K_pad),
+        out_q,
+        out_k,
+        out_v,
+        q_bias,
+        k_bias,
+        v_bias,
+        rms_w,
+        float(rms_eps),
+    )
+    return tuple(ys)
+
+
+def nf4_swiglu(
+    g_packed: torch.Tensor,
+    g_scale: torch.Tensor,
+    u_packed: torch.Tensor,
+    u_scale: torch.Tensor,
+    x: torch.Tensor,
+    M: int,
+    K: int,
+    K_pad: int,
+    out: torch.Tensor,
+    rms_w: torch.Tensor | None = None,
+    rms_eps: float = 1e-6,
+) -> torch.Tensor:
+    """One launch: silu(gate @ x) * (up @ x) into ``out``."""
+    return _load_ext().nf4_swiglu(
+        g_packed,
+        g_scale,
+        u_packed,
+        u_scale,
+        x,
+        int(M),
+        int(K),
+        int(K_pad),
+        out,
+        rms_w,
+        float(rms_eps),
+    )
+
+
+def nf4_rope_kv(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    position: torch.Tensor,
+) -> None:
+    """In-place RoPE on q,k; write k,v into cache at device ``position``."""
+    _load_ext().nf4_rope_kv(q, k, v, k_cache, v_cache, cos, sin, position)
+
+
+def nf4_attn(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    out: torch.Tensor,
+    valid_len: torch.Tensor,
+    scale: float,
+    ws: torch.Tensor | None = None,
+    n_split: int = ATTN_SPLIT,
+    k_act: torch.Tensor | None = None,
+    v_act: torch.Tensor | None = None,
+    cos: torch.Tensor | None = None,
+    sin: torch.Tensor | None = None,
+    position: torch.Tensor | None = None,
+) -> None:
+    """GQA flash-decode. ``k``/``v`` are cache ``[max_seq, n_kv, hd]``.
+
+    Optional ``k_act``/``v_act`` + RoPE tables write the current slot and rotate Q.
+    """
+    n_q = int(q.size(1) if q.dim() == 3 else q.size(0))
+    hd = int(q.size(-1))
+    need = n_q * int(n_split) * (hd + 2)
+    if ws is None:
+        ws = torch.empty(need, device=q.device, dtype=torch.float32)
+    _load_ext().nf4_attn(
+        q,
+        k,
+        v,
+        out,
+        valid_len,
+        float(scale),
+        ws,
+        int(n_split),
+        k_act,
+        v_act,
+        cos,
+        sin,
+        position,
+    )
+
+
+def nf4_rms(x: torch.Tensor, w: torch.Tensor, y: torch.Tensor, eps: float) -> None:
+    """``y = w * x * rsqrt(mean(x^2)+eps)``. All numel match."""
+    _load_ext().nf4_rms(x, w, y, float(eps))
 
 
 def nf4_plan(

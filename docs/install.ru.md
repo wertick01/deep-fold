@@ -4,20 +4,29 @@
 метриками): [`quickstart.ru.md`](quickstart.ru.md). Ниже — полный `-h`.
 
 Deepfold — программа **в терминале**: она упаковывает веса модели в один файл
-`.chr` и генерирует текст на NVIDIA Ampere или Ada. Это не сайт, не плагин
+`.chr` и генерирует текст на NVIDIA Ampere, Ada или SM120 (GeForce RTX 50). Это не сайт, не плагин
 Ollama и не чат в браузере.
 
 **Дорабатываются:** TTY / агентный layout. Список команд ниже по-прежнему верный.
 
 Цифры скорости с авторской RTX 3080 **на другой карте не повторятся**.
-Ada (RTX 40xx, `sm_89`) и A100 (`sm_80`) могут генерировать, но `doctor`
-напишет `experimental`. Turing, Hopper, Blackwell, AMD и macOS для generate
-не подходят.
+Ada (RTX 40xx, `sm_89`), A100 (`sm_80`) и SM120 (GeForce RTX 50, первый
+удалённый SKU — RTX 5070 Ti) могут генерировать, но `doctor` напишет
+`experimental`. Turing, Hopper, SM100, AMD и macOS для generate не
+подходят.
+
+**RTX 5070 Ti (первый удалённый SM120 SKU):** `scripts/setup.ps1` / `setup.sh`
+(и `deepfold setup` в уже существующем venv) берут индекс `cu128` и предпочитают
+CUDA Toolkit 12.8, если `nvidia-smi` видит RTX 50. Occupancy как у 3080 (70 SM).
+16 ГБ по-прежнему не держат 32B NF4 (H2). Снимок для пластины:
+`python -m gpu.lab.sm120_remote` — без этой карты это skip, не скопированная
+пластина 3080.
 
 Программа **не ставит** драйвер NVIDIA и Python.
 Если нет `chr`, setup скачивает переносной Go 1.22 с go.dev.
 Если нет ядра NF4, на Windows setup через winget ставит Visual Studio 2022
-Build Tools (C++) и CUDA Toolkit 12.4 и компилирует `gpu/nf4`.
+Build Tools (C++) и CUDA Toolkit 12.4 (Ampere) или 12.8 (RTX 50) и компилирует
+`gpu/nf4`.
 Красный `doctor` — нормальный отказ установки, не баг ядра.
 
 Справка CLI (`-h`) на английском; ниже она вставлена как есть. После
@@ -52,8 +61,10 @@ bash scripts/setup.sh
 source .venv/bin/activate
 ```
 
-Дальше те же `doctor` / `pull` / `chat`. Первый generate на чужой карте может
-минуту собрать CUDA-ядро (JIT). Не обещайте tok/s с 3080.
+Дальше те же `doctor` / `pull` / `chat`. На RTX 50 `doctor` должен написать
+`experimental` и выйти с кодом **0** — это успех, не сломанный install.
+Первый generate на чужой карте может минуту собрать CUDA-ядро (JIT).
+Не обещайте tok/s с 3080.
 
 ---
 
@@ -61,11 +72,11 @@ source .venv/bin/activate
 
 | Что | Зачем | Как проверить |
 |---|---|---|
-| Драйвер NVIDIA (Ampere или Ada) | GPU | `nvidia-smi` печатает имя карты |
+| Драйвер NVIDIA (Ampere, Ada или SM120 / RTX 50) | GPU | `nvidia-smi` печатает имя карты |
 | Python 3.11 или 3.12 | рантайм | Windows: `py -3.11 --version`; Linux: `python3.11 --version` (Ubuntu 22.04: `python3` — это 3.10) |
 | Go 1.22+ (необязательно) | компрессор `chr`; setup сам скачает с go.dev, если его нет | `go version`, либо пропустить — `scripts/setup.*` / `deepfold setup` |
 | Windows: MSVC Build Tools | сборка ядра NF4; setup поставит через winget, если нет | `cl` после `vcvars64.bat` |
-| CUDA Toolkit 12.4 (`nvcc`) | компиляция `.cu`; на Windows setup поставит через winget, на Linux nvcc ставите сами | `nvcc --version`, либо готовый `.pyd`/`.so` в `gpu/nf4` |
+| CUDA Toolkit (`nvcc`) | компиляция `.cu`; 12.4 на Ampere, 12.8 на RTX 50; на Windows setup поставит через winget, на Linux nvcc ставите сами | `nvcc --version`, либо готовый `.pyd`/`.so` в `gpu/nf4` |
 | Linux: `g++` | сборка ядра (setup не делает sudo apt) | `g++ --version` |
 | Место на диске | 3B ≈ 6 ГБ BF16 + потом `.chr` | для дыма хватит 3B |
 
@@ -76,12 +87,13 @@ source .venv/bin/activate
 
 ## 2. Поставить (один раз)
 
-Скрипт создаёт `.venv`, ставит **CUDA**-torch с индекса `cu124` (не обычный
-PyPI: там чаще CPU-колесо), пакет `deepfold[hub,chat]`, собирает `chr`
+Скрипт создаёт `.venv`, ставит **CUDA**-torch с индекса **cu124** (Ampere / Ada)
+или **cu128** (RTX 50 / SM120, если `nvidia-smi` видит карту; override
+`DEEPFOLD_TORCH_INDEX=cu128`), пакет `deepfold[hub,chat]`, собирает `chr`
 (Go 1.22+ с PATH или переносной Go 1.22 с go.dev), при отсутствии `cl`/`nvcc`
-ставит VS Build Tools и CUDA 12.4 через winget, собирает `gpu/nf4` и вызывает
-`doctor`. Winget может показать UAC; для этих двух установщиков надёжнее
-PowerShell от администратора.
+ставит VS Build Tools и CUDA 12.4 (Ampere) или 12.8 затем 12.4 (RTX 50) через
+winget, собирает `gpu/nf4` и вызывает `doctor`. Winget может показать UAC; для
+этих двух установщиков надёжнее PowerShell от администратора.
 
 **Windows (PowerShell):**
 
@@ -113,8 +125,8 @@ WSL2 ходит в тот же WDDM-драйвер Windows, поэтому CopyR
 | **3** | этот класс машины generate не умеет | compress на CPU может работать; generate — нет (Hopper, Turing, macOS, нет NVIDIA) |
 | **1** | не работает ни generate, ни compress | Python / Go / окружение |
 
-Ada и A100 при живом install должны дать **0**, не 3, со строкой
-`generate: experimental`.
+Ada, A100 и SM120 (RTX 50 / 5070 Ti) при живом install должны дать **0**, не 3,
+со строкой `generate: experimental`.
 
 Если venv уже есть, внутри него можно только напечатать план (без `pip`):
 
@@ -180,7 +192,8 @@ usage: deepfold [-h] <command> ...
 
 Packed CHR0 driver (NF4 or VQ 2-bit): weights stay packed in VRAM for the
 whole run. Ampere-family CUDA (sm_86 measured; sm_80/sm_89 experimental).
-Turing / Hopper / Blackwell refuse.
+SM120 (RTX 50, first remote SKU RTX 5070 Ti) is experimental. Turing /
+Hopper / SM100 refuse.
 
 positional arguments:
   <command>
@@ -582,9 +595,9 @@ deepfold chat --model "$DEEPFOLD_MODEL"
 
 | Симптом | Что обычно |
 |---|---|
-| `doctor` код 2, torch cpu | колесо с PyPI; нужен индекс cu124, как в `scripts/setup.*` |
+| `doctor` код 2, torch cpu | колесо с PyPI; Ampere/Ada: cu124, RTX 50: cu128 — как в `scripts/setup.*` |
 | `doctor` код 2, нет chr | Снова `deepfold setup` или `python -m gpu.cli.go_toolchain` (нужен доступ к go.dev). Либо `go build -o chr.exe ./cmd/chr` |
-| `doctor` код 2, нет ядра | Снова `deepfold setup --kernel-only` (winget VS Build Tools + CUDA 12.4, `--source winget`, чтобы сломанный сертификат Microsoft Store не рвал поиск). Либо скопировать подходящий `gpu/nf4/chr_nf4_ext*.pyd` |
+| `doctor` код 2, нет ядра | Снова `deepfold setup --kernel-only` (winget VS Build Tools + CUDA 12.4, на RTX 50 — 12.8, `--source winget`, чтобы сломанный сертификат Microsoft Store не рвал поиск). Либо скопировать подходящий `gpu/nf4/chr_nf4_ext*.pyd` |
 | `doctor` код 3 на Ada | баг старого контракта; после K4 так быть не должно |
 | `chat` «needs a TTY» | запуск из пайпа / IDE без TTY; возьмите окно терминала или `run --prompt` |
 | `chat` просит prompt_toolkit | `pip install "deepfold[chat]"` |

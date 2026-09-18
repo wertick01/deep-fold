@@ -14,7 +14,35 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
 VENV="$REPO/.venv"
 VENV_PY="$VENV/bin/python"
-TORCH_INDEX="https://download.pytorch.org/whl/cu124"
+CU124="https://download.pytorch.org/whl/cu124"
+CU128="https://download.pytorch.org/whl/cu128"
+
+pick_torch_index() {
+  local raw="${DEEPFOLD_TORCH_INDEX:-}"
+  raw="${raw#"${raw%%[![:space:]]*}"}"
+  raw="${raw%"${raw##*[![:space:]]}"}"
+  if [[ "$raw" == http* ]]; then
+    printf '%s\n' "$raw"
+    return 0
+  fi
+  case "${raw,,}" in
+    cu128|cu129|sm120) printf '%s\n' "$CU128"; return 0 ;;
+    cu124|ampere) printf '%s\n' "$CU124"; return 0 ;;
+  esac
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    local row
+    row="$(nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader 2>/dev/null | head -n1 || true)"
+    if [[ "$row" =~ [Rr][Tt][Xx][[:space:]]*50[0-9]{2} ]] || [[ "$row" =~ 12\.[01][[:space:]]*$ ]]; then
+      export DEEPFOLD_PREFER_SM120_NVCC=1
+      export DEEPFOLD_TORCH_INDEX=cu128
+      printf '%s\n' "$CU128"
+      return 0
+    fi
+  fi
+  printf '%s\n' "$CU124"
+}
+
+TORCH_INDEX="$(pick_torch_index)"
 
 py_ok() {
   "$1" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] >= (3, 11) else 1)' >/dev/null 2>&1
@@ -52,6 +80,7 @@ if ! py_ok "$VENV_PY"; then
 fi
 
 echo "Using $VENV_PY"
+echo "torch index: $TORCH_INDEX"
 "$VENV_PY" -m pip install --upgrade pip
 "$VENV_PY" -m pip install torch --index-url "$TORCH_INDEX"
 "$VENV_PY" -m pip install -e ".[hub,chat]"

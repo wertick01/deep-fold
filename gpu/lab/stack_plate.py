@@ -377,7 +377,7 @@ def _gpu_rail(s: _Sheet, y: float) -> float:
     s.text(
         x0 + 0.18,
         y + 0.11,
-        "GPU  —  Ampere sm_86 (RTX 3080 class). Generate is this arch only; Ada / Hopper / Blackwell are refused.",
+        "GPU  —  Ampere sm_86 (RTX 3080 class). Ada / SM120 experimental; Hopper / SM100 Blackwell refused.",
         fs=_T_SMALL,
         va="center",
         weight="bold",
@@ -809,7 +809,7 @@ def _part4(s: _Sheet, y: float) -> float:
         "Phi-3  (phi3_concat)",
         "MoE experts",
         "vision / multimodal",
-        "Ada / Hopper / Blackwell",
+        "Hopper / SM100 Blackwell",
         "GGUF  (never opened)",
         "live Mistral SWA, qk-norm",
     ]

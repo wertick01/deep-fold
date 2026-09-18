@@ -1,0 +1,12 @@
+Exclusive isolated GEMV / SwiGLU ncu, RTX 3080 WDDM, 2026-09-18.
+Not TokenLoop. Not chr_nf4_gemm (that plate is docs/runs/ncu/). Not live tok/s.
+Workload: python -m gpu.nf4.bench_gemv_ncu --kind o_proj|down_proj|swiglu --iters 4 --reps 1 --l2-bytes 25165824
+ncu.exe 2024.2, --kernel-name-base demangled, regex:gemv_splitk / gemv_swiglu.
+o_proj: 8x gemv_splitk<(int)1>, log shows Profiling (re-run after a 0-kernel NVTX miss).
+down_proj / swiglu: 8x same-day, logs 14:45.
+Export: python -m gpu.nf4.ncu_gemv --export
+  one metric per ncu --import (launch__grid_size skipped: bad conversion on RU locale).
+  Kernel names renamed via gpu/nf4/ncu_gemv_renames.yaml (demangled commas).
+Median after dropping ID 0: o 23.45% DRAM / 82.37% occ; down 50.84 / 85.93; swiglu 49.03 / 72.20.
+Tensor pipe 0%. Grid from CSV Grid Size column.
+Do not say faster than Ollama. Do not paste into the README tok/s line.

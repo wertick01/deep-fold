@@ -130,6 +130,24 @@ def test_32b_on_24gb_stays_nf4() -> None:
     check("32B on 24 GB is nf4", d.codec == "nf4" and not d.overflow, d.reason)
 
 
+def test_5070_ti_16gb_budget() -> None:
+    """GB203 16 GB: 3B/14B resident NF4; 32B packed ~16.6 GB still H2 overflow."""
+    from gpu.arch_family import REMOTE_SM120_VRAM_MIB
+
+    vram = REMOTE_SM120_VRAM_MIB
+    d3 = decide(QWEN_3B, vram, requested="auto")
+    d14 = decide(QWEN_14B, vram, requested="auto")
+    d32 = decide(QWEN_32B, vram, requested="auto")
+    check("5070 Ti 3B resident NF4", d3.codec == "nf4" and not d3.overflow, d3.reason)
+    check("5070 Ti 14B resident NF4", d14.codec == "nf4" and not d14.overflow, d14.reason)
+    check("5070 Ti 32B still overflow", d32.codec == "nf4" and d32.overflow, d32.reason)
+    check(
+        "5070 Ti 32B reason H2",
+        "overflow" in d32.reason and "H2" in d32.reason,
+        d32.reason,
+    )
+
+
 def test_detect_vram_reads_nvidia_smi() -> None:
     from gpu.cli import codec as codec_mod
 
@@ -174,6 +192,7 @@ TESTS = [
     test_3b_auto_overflow_on_tiny_vram,
     test_force_vq_on_3b_allowed,
     test_32b_on_24gb_stays_nf4,
+    test_5070_ti_16gb_budget,
     test_detect_vram_reads_nvidia_smi,
     test_70b_refuses_even_vq,
 ]

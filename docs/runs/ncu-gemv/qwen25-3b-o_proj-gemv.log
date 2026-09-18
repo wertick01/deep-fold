@@ -1,0 +1,11 @@
+==PROF== Connected to process 20528 (C:\Users\Professional\anaconda3\envs\torch-gpu\python.exe)
+==PROF== Profiling "void <unnamed>::gemv_splitk<(int)1>(const unsigned char *, const unsigned short *, const __nv_bfloat16 *, __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, int, int, int, float)": 0%....50%....100% - 1 pass
+==PROF== Profiling "void <unnamed>::gemv_splitk<(int)1>(const unsigned char *, const unsigned short *, const __nv_bfloat16 *, __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, int, int, int, float)": 0%....50%....100% - 1 pass
+==PROF== Profiling "void <unnamed>::gemv_splitk<(int)1>(const unsigned char *, const unsigned short *, const __nv_bfloat16 *, __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, int, int, int, float)": 0%....50%....100% - 1 pass
+==PROF== Profiling "void <unnamed>::gemv_splitk<(int)1>(const unsigned char *, const unsigned short *, const __nv_bfloat16 *, __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, int, int, int, float)": 0%....50%....100% - 1 pass
+==PROF== Profiling "void <unnamed>::gemv_splitk<(int)1>(const unsigned char *, const unsigned short *, const __nv_bfloat16 *, __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, int, int, int, float)": 0%....50%....100% - 1 pass
+==PROF== Profiling "void <unnamed>::gemv_splitk<(int)1>(const unsigned char *, const unsigned short *, const __nv_bfloat16 *, __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, int, int, int, float)": 0%....50%....100% - 1 pass
+==PROF== Profiling "void <unnamed>::gemv_splitk<(int)1>(const unsigned char *, const unsigned short *, const __nv_bfloat16 *, __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, int, int, int, float)": 0%....50%....100% - 1 pass
+==PROF== Profiling "void <unnamed>::gemv_splitk<(int)1>(const unsigned char *, const unsigned short *, const __nv_bfloat16 *, __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, int, int, int, float)": 0%....50%....100% - 1 pass
+==PROF== Disconnected from process 20528
+==PROF== Report: c:\dev\deep-fold\docs\runs\ncu-gemv\qwen25-3b-o_proj-gemv.ncu-rep

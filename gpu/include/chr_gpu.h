@@ -80,7 +80,8 @@ int chr_nf4_gemm_ws_max(const chr_nf4_dev_t *w, const void *x, void *y, int32_t 
 /* Tuning override for the microbench, so one process can time old vs new.
  * path: 0 auto, 1 force classic decode tile, 2 force small decode tile.
  * split_k: 0 auto, >0 force that many K splits (clamped to n_ktiles).
- * one_wave: SMs the split-K target is expressed in; 0 = 70 (GA102-200).
+ * one_wave: SMs the split-K target is expressed in; 0 = this GPU's
+ *           multiProcessorCount (fallback 70, which matches 3080 and 5070 Ti).
  * Initial values come from CHR_NF4_PATH / CHR_NF4_SPLIT_K / CHR_NF4_ONE_WAVE. */
 void chr_nf4_set_tuning(int32_t path, int32_t split_k, int32_t one_wave);
 

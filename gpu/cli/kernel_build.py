@@ -118,18 +118,44 @@ def _install_vs() -> int:
     )
 
 
+def _prefer_sm120_tools() -> bool:
+    """Spy seam. 5070 Ti neighbor: install/find CUDA 12.8 when possible."""
+    raw = os.environ.get("DEEPFOLD_PREFER_SM120_NVCC", "").strip().lower()
+    if raw in {"1", "true", "yes", "sm120"}:
+        return True
+    from .smi import visible_gpu_looks_sm120
+
+    return visible_gpu_looks_sm120()
+
+
+def _cuda_winget_ids(*, prefer_sm120: bool) -> tuple[list[str], ...]:
+    cuda_124 = (
+        ["--id", "Nvidia.CUDA", "--version", "12.4.1", "--exact"],
+        ["--id", "Nvidia.CUDA", "--version", "12.4", "--exact"],
+    )
+    cuda_128 = (
+        ["--id", "Nvidia.CUDA", "--version", "12.8.1", "--exact"],
+        ["--id", "Nvidia.CUDA", "--version", "12.8.0", "--exact"],
+        ["--id", "Nvidia.CUDA", "--version", "12.8", "--exact"],
+    )
+    if prefer_sm120:
+        return cuda_128 + cuda_124
+    return cuda_124
+
+
 def _install_cuda() -> int:
-    """Spy seam. CUDA Toolkit 12.4 so nvcc matches torch cu124."""
+    """Spy seam. 3080: CUDA 12.4. SM120 neighbor: 12.8 then 12.4 (PTX fallback)."""
+    prefer = _prefer_sm120_tools()
+    label = "12.8 (fallback 12.4)" if prefer else "12.4"
     print(
-        "Installing NVIDIA CUDA Toolkit 12.4 (nvcc). Several GB; "
+        f"Installing NVIDIA CUDA Toolkit {label} (nvcc). Several GB; "
         "UAC / Administrator may be required. Driver is not installed.",
         flush=True,
     )
+    if prefer:
+        os.environ.setdefault("DEEPFOLD_PREFER_SM120_NVCC", "1")
     last = 1
-    for extra in (
-        ["--id", "Nvidia.CUDA", "--version", "12.4.1", "--exact"],
-        ["--id", "Nvidia.CUDA", "--version", "12.4", "--exact"],
-    ):
+    for extra in _cuda_winget_ids(prefer_sm120=prefer):
         last = _winget_install(extra)
         from gpu.cuda_env import inject_cuda_env
 
@@ -178,14 +204,17 @@ def _ensure_windows_tools(*, install: bool) -> None:
     else:
         print(f"host compiler: {cc}", flush=True)
 
-    from gpu.cuda_env import inject_cuda_env
+    from gpu.cuda_env import PREFER_SM120_NVCC_ENV, inject_cuda_env
 
+    if _prefer_sm120_tools():
+        os.environ.setdefault(PREFER_SM120_NVCC_ENV, "1")
     inject_cuda_env()
     nvcc = _find_nvcc()
     if nvcc is None:
+        toolkit = "CUDA Toolkit 12.8 (or 12.4 for PTX JIT)" if _prefer_sm120_tools() else "CUDA Toolkit 12.4"
         if not install:
             raise KernelBuildError(
-                "nvcc not found. Install CUDA Toolkit 12.4, or re-run without "
+                f"nvcc not found. Install {toolkit}, or re-run without "
                 "--no-install-tools."
             )
         code = _install_cuda()
@@ -193,16 +222,21 @@ def _ensure_windows_tools(*, install: bool) -> None:
         nvcc = _find_nvcc()
         if nvcc is None:
             raise KernelBuildError(
-                "nvcc still missing after CUDA Toolkit 12.4 install "
+                f"nvcc still missing after {toolkit} install "
                 f"(winget exit {code}). This setup does not install an unpinned "
                 "Nvidia.CUDA (that can be 12.6/13.x while torch is cu124). "
-                "Install CUDA 12.4 from NVIDIA, or set CUDA_HOME / CUDA_PATH."
+                "Install CUDA 12.8+ on RTX 50 / 5070 Ti, or CUDA 12.4 on Ampere, "
+                "or set CUDA_HOME / CUDA_PATH."
             )
     else:
         print(f"nvcc: {nvcc}", flush=True)
 
 
 def _ensure_posix_tools() -> None:
+    if _prefer_sm120_tools():
+        from gpu.cuda_env import PREFER_SM120_NVCC_ENV
+
+        os.environ.setdefault(PREFER_SM120_NVCC_ENV, "1")
     cc = _find_host_cc()
     nvcc = _find_nvcc()
     if cc and nvcc:

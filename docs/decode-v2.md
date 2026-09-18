@@ -1,6 +1,6 @@
 # Decode V2 — resident executor (synthetic first)
 
-Lab log (what we tried, plates, CUDA 70–85% open, 14B/20B next):
+Lab log (what we tried, plates, 3B step mix in §4, 14B/20B):
 [`decode-v2-lab.md`](decode-v2-lab.md).
 
 Status: synthetic stack is green. Qwen2.5-3B `.chr` loads into Decode V2.
@@ -14,8 +14,9 @@ host vs Q4_K **11.53 / 11.87** (do not quote 25.6 or 20.7). Do not say faster
 than Ollama. Overlapping Ollama 14B 5.95 is not a number. Hard-12: 3B V2
 **8/12** @ **190.9** vs Ollama **7/12** @ **197.2**; 14B V2 **11/12** @ **54.8**
 vs Ollama **10/12** @ **66.2** (median **62.0**); 20B both **9/12**, V2 **39.0**
-vs Ollama **13.2** (not the 40 plateau). **Coming soon:** llama.cpp hard-12, 3B
-Nsight 70–85%. Figures: [`decodev2-3080.png`](img/decodev2-3080.png),
+vs Ollama **13.2** (not the 40 plateau). **Coming soon:** llama.cpp hard-12.
+3B greedy-step mix (lab log §4): captured graph ~4.8 ms/step; SwiGLU+down
+dominate, `lm_head` ~5–8%. Figures: [`decodev2-3080.png`](img/decodev2-3080.png),
 [`hard-v2-ollama.png`](img/hard-v2-ollama.png).
 
 The ~50 GB/s GEMV wall was a `__constant__` NF4 LUT: every lane hits a
@@ -288,7 +289,7 @@ acceptance gate. Notes and VRAM traps: [lab log §6](decode-v2-lab.md#6-next-uti
 | `load.py` / `run_3b.py` | Qwen2.5-3B `.chr` ids-gate + ignore-EOS |
 | `bench_step.py` | `MEDIUM_LLAMA` MMA vs GEMV, eager + graph |
 | `gpu/nf4/nf4_gemv.cu` / `test_gemv.py` / `bench_gemv.py` | CUDA-core N=1 candidate |
-| [`docs/decode-v2-lab.md`](decode-v2-lab.md) | experiment log; Nsight 70–85% Coming soon |
+| [`docs/decode-v2-lab.md`](decode-v2-lab.md) | experiment log; 3B step mix named |
 
 ```text
 python gpu/decodev2/test_oracle.py
@@ -345,9 +346,13 @@ Live 2026-09-17, `max_seq=512`, ignore-EOS 64, prompt_len=48:
 Greedy ids `[2121, 358, 69431, 389, 419, 11618, 11, 358]` matched. Prefill is
 MMA chunks of 32 (86 ms on 3B / 48 tokens at `max_seq=2048`; 127 ms was
 `max_seq=512`), not the N=1 GEMV graph. Task Manager CUDA 70–85% during 3B is
-**Coming soon** (lab log
-§4): engine idle + skinny RMS/merge + GEMV below HBM peak, not a closed “paint
-one more kernel” story. Flash-decode uses a static `n_q*32` grid of 4-warp
+not occupancy. Lab log §4: captured graph median **4.80 ms/step**; L2-hot mix
+is SwiGLU **26%**, attn 18%, down 16%, `lm_head` **5%** (0.29–0.39 ms). Isolated
+ncu on those GEMV shapes ([`docs/runs/ncu-gemv/`](runs/ncu-gemv/)): occupancy
+**72–86%**, DRAM **~50%** on down/SwiGLU (**23%** on skinny `o_proj`), tensor
+pipe **0%**. Not a tok/s number. The graph is already faster than that
+reconstruction — idle between graph nodes
+is not the hole. Flash-decode uses a static `n_q*32` grid of 4-warp
 CTAs (512×128 threads on 3B). RoPE is no longer a separate 18-CTA launch on
 CUDA. Fusing RMS into the following GEMV looks tempting (one less launch) but
 every CTA repeats the same 2048-wide reduction; on `lm_head` that is ~152k

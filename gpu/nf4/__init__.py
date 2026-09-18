@@ -365,7 +365,8 @@ def nf4_set_tuning(path: int = 0, split_k: int = 0, one_wave: int = 0) -> None:
 
     Default (``path=0``, ``split_k=0``) is the occupancy fix: BM=64 decode tile
     plus split-K. ``path`` 1 = wave-2 BM=128, 2 = BM=64. ``split_k`` 0 = auto,
-    >0 forced. ``one_wave`` 0 = 70 SMs on this card. Also ``CHR_NF4_PATH`` /
-    ``CHR_NF4_SPLIT_K`` / ``CHR_NF4_ONE_WAVE`` before import.
+    >0 forced. ``one_wave`` 0 = this GPU's SM count (70 on 3080 and 5070 Ti).
+    Also ``CHR_NF4_PATH`` / ``CHR_NF4_SPLIT_K`` / ``CHR_NF4_ONE_WAVE`` before
+    import.
     """
     _load_ext().nf4_set_tuning(int(path), int(split_k), int(one_wave))

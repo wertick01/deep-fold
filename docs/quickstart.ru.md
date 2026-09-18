@@ -37,11 +37,13 @@ source .venv/bin/activate
 deepfold doctor
 ```
 
-Нужны заранее: драйвер NVIDIA (Ampere или Ada), Python 3.11 или 3.12
+Нужны заранее: драйвер NVIDIA (Ampere, Ada или SM120 / RTX 50), Python 3.11 или 3.12
 (на Ubuntu 22.04 `python3` — это 3.10, поставьте `python3.11`).
 Go 1.22+ необязателен: setup сам скачает переносной Go с go.dev, если нет
-`chr`. На Windows при отсутствии Build Tools (C++) и CUDA 12.4 setup ставит
-их через winget и компилирует `gpu/nf4`. Скрипт **не** ставит драйвер. Код
+`chr`. На Windows при отсутствии Build Tools (C++) и CUDA (12.4 на Ampere;
+12.8 на RTX 50 / 5070 Ti) setup ставит их через winget и компилирует `gpu/nf4`.
+`setup.ps1` / `setup.sh` берут torch **cu128**, если `nvidia-smi` видит RTX 50
+(можно задать `$env:DEEPFOLD_TORCH_INDEX='cu128'`). Скрипт **не** ставит драйвер. Код
 `doctor`: 0 — можно генерировать; 2 — карта подходящая, install неполный;
 3 — этот класс машины generate не умеет.
 

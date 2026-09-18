@@ -1,0 +1,6 @@
+-
+  - Original: void <unnamed>::gemv_splitk<(int)1>(const unsigned char *, const unsigned short *, const __nv_bfloat16 *, __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, int, int, int, float)
+  - Renamed: gemv_splitk
+-
+  - Original: void <unnamed>::gemv_swiglu<(int)4>(const unsigned char *, const unsigned short *, const unsigned char *, const unsigned short *, const __nv_bfloat16 *, __nv_bfloat16 *, const __nv_bfloat16 *, int, int, int, float)
+  - Renamed: gemv_swiglu

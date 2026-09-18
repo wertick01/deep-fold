@@ -63,12 +63,11 @@ static_assert(sBK % kGroup == 0, "a stage holds whole 64-wide scale groups");
 static_assert(sSmemBytes == 13056, "small decode ring");
 static_assert(sSmemBytes <= 48 * 1024, "small tile must not need opt-in smem");
 
-// GA102-200 (RTX 3080 12 GB) has 70 SMs. This is the unit the split-K target is
-// expressed in, not a tile switch: the planner raises split_k until grid.x *
-// split_k reaches 2 CTAs per SM, then stops because a split with no K tile to
-// walk only writes zeros.
+// GA102-200 (RTX 3080 12 GB) and GB203-200 (RTX 5070 Ti) both have 70 SMs.
+// Fallback when cudaGetDeviceProperties fails. Live split-K uses the device
+// SM count: target CTAs = 2 * multiProcessorCount.
 constexpr int kDefaultOneWave = 70;
-constexpr int kTargetCtas = 140;
+static_assert(kDefaultOneWave * 2 == 140, "70-SM default is 2 CTA/SM");
 // Live chr_nf4_gemm_ws / TokenLoop ceiling. Planner describes up to
 // kPlanMaxN. n64 stays behind this cap. Dispatch is by tile width
 // (N<=8/16/32/64), not by kLiveMaxN.
@@ -1482,27 +1481,46 @@ int env_int(const char *name, int fallback) {
   return static_cast<int>(parsed);
 }
 
+int device_sm_count() {
+  int dev = 0;
+  if (cudaGetDevice(&dev) != cudaSuccess) {
+    return kDefaultOneWave;
+  }
+  cudaDeviceProp prop{};
+  if (cudaGetDeviceProperties(&prop, dev) != cudaSuccess ||
+      prop.multiProcessorCount < 1) {
+    return kDefaultOneWave;
+  }
+  return prop.multiProcessorCount;
+}
+
 Tuning &tuning() {
   static Tuning t = [] {
     Tuning init{};
     init.path = env_int("CHR_NF4_PATH", 0);
     init.split_k = env_int("CHR_NF4_SPLIT_K", 0);
-    init.one_wave = env_int("CHR_NF4_ONE_WAVE", kDefaultOneWave);
+    // 0 = probe multiProcessorCount at plan time (5070 Ti is also 70 SMs).
+    init.one_wave = env_int("CHR_NF4_ONE_WAVE", 0);
     if (init.path < 0 || init.path > 2) {
       init.path = 0;
     }
     if (init.split_k < 0) {
       init.split_k = 0;
     }
-    if (init.one_wave < 1) {
-      init.one_wave = kDefaultOneWave;
+    if (init.one_wave < 0) {
+      init.one_wave = 0;
     }
     return init;
   }();
   return t;
 }
 
-// split_k so that grid_x * split_k reaches kTargetCtas, capped at n_ktiles
+int resolved_one_wave() {
+  const int w = tuning().one_wave;
+  return w > 0 ? w : device_sm_count();
+}
+
+// split_k so that grid_x * split_k reaches 2 * one_wave, capped at n_ktiles
 // (a split with no K tiles to walk is a CTA that only writes zeros). The
 // returned split is recomputed from tiles_per_split so the two always agree.
 void pick_split(int grid_x, int n_ktiles, int have_ws, int *split,
@@ -1510,7 +1528,7 @@ void pick_split(int grid_x, int n_ktiles, int have_ws, int *split,
   const Tuning &t = tuning();
   int want = 1;
   if (have_ws) {
-    const int target = t.one_wave * 2 > kTargetCtas ? t.one_wave * 2 : kTargetCtas;
+    const int target = resolved_one_wave() * 2;
     want = t.split_k > 0 ? t.split_k : ceil_div(target, grid_x);
   }
   if (want < 1) {
@@ -1632,7 +1650,7 @@ extern "C" void chr_nf4_set_tuning(int32_t path, int32_t split_k,
   Tuning &t = tuning();
   t.path = (path >= 0 && path <= 2) ? path : 0;
   t.split_k = split_k > 0 ? split_k : 0;
-  t.one_wave = one_wave > 0 ? one_wave : kDefaultOneWave;
+  t.one_wave = one_wave > 0 ? one_wave : 0;
 }
 
 extern "C" int chr_nf4_gemm_plan(const chr_nf4_dev_t *w, int32_t N,

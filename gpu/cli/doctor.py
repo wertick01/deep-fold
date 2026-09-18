@@ -2,8 +2,9 @@
 
 Doctor is the only public chooser of prebuilt-versus-JIT and of whether this
 GPU may generate at all. ``sm_86`` is the measured ship. Other Ampere-family
-cards (sm_80 / sm_87 / sm_89) generate as **experimental** (allowed, not the
-3080 plate). Turing, Hopper, Blackwell, ROCm, macOS, CPU torch refuse.
+cards (sm_80 / sm_87 / sm_89) and SM120 (GeForce RTX 50, remote SKU
+RTX 5070 Ti) generate as **experimental**. Turing, Hopper, SM100, ROCm,
+macOS, CPU torch refuse.
 
 :func:`probe` is the only function that touches torch, the driver, or the
 filesystem; :func:`verdict` / :func:`checks` / :func:`exit_code` are pure
@@ -25,18 +26,19 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from gpu.ampere_gencode import FAMILY_CAPABILITIES, KERNEL_GENCODE, MEASURED_CAPABILITY
+from gpu.ampere_gencode import kernel_gencode
+from gpu.arch_family import MEASURED_CAPABILITY, family_of
 from gpu.ext_bin import is_native, list_ext, matches_abi
 
 from . import messages
 from .paths import REPO, find_chr_bin
 from .smi import used_mib as _smi_query_used
 
-SHIP_CAPABILITY = MEASURED_CAPABILITY
 OVERRIDE_ENV = "DEEPFOLD_ALLOW_UNMEASURED_ARCH"
+SHIP_CAPABILITY = MEASURED_CAPABILITY
 
 # An arch class whose only problem is the install, not the hardware.
-FIXABLE = frozenset({"ship", "experimental", "cpu-torch", "no-torch"})
+FIXABLE = frozenset({"ship", "experimental", "sm120", "cpu-torch", "no-torch"})
 
 _NF4_DIR = REPO / "gpu" / "nf4"
 _KERNEL_SOURCES = ("nf4_gemm.cu", "bindings.cpp")
@@ -60,6 +62,7 @@ class Machine:
     capability: tuple[int, int] | None = None
     device_name: str | None = None
     vram_total_mib: int | None = None
+    sm_count: int | None = None
     smi_used_mib: int | None = None
     mps: bool = False
     nf4_ext: Path | None = None
@@ -173,6 +176,24 @@ def _smi_used_mib() -> int | None:
     return _smi_query_used()
 
 
+def _sm_count(props: object) -> int | None:
+    """SM count from torch device properties.
+
+    PyTorch 2.5 exposes ``multi_processor_count``. Some CUDA bindings use
+    ``multiProcessorCount``. A miss must not wipe an already-read capability.
+    """
+    for name in ("multi_processor_count", "multiProcessorCount"):
+        raw = getattr(props, name, None)
+        if raw is None:
+            continue
+        try:
+            n = int(raw)
+        except (TypeError, ValueError):
+            continue
+        return n or None
+    return None
+
+
 def _chr_runs(chr_bin: Path) -> bool:
     """``chr -h`` exits 0 and names its three subcommands."""
     try:
@@ -199,6 +220,7 @@ def probe(*, chr_bin: str | None = None, extras_for: str | None = None) -> Machi
     cuda_available = False
     capability = device_name = None
     vram_total = None
+    sm_count = None
     mps = False
 
     try:
@@ -215,17 +237,36 @@ def probe(*, chr_bin: str | None = None, extras_for: str | None = None) -> Machi
             cuda_available = False
         if cuda_available:
             try:
-                capability = tuple(torch.cuda.get_device_capability(0))  # type: ignore[assignment]
-                device_name = torch.cuda.get_device_name(0)
-                vram_total = int(
-                    torch.cuda.get_device_properties(0).total_memory / (1024 * 1024)
-                )
+                capability = tuple(int(x) for x in torch.cuda.get_device_capability(0))
             except Exception:  # noqa: BLE001
                 capability = None
+            try:
+                device_name = torch.cuda.get_device_name(0)
+            except Exception:  # noqa: BLE001
+                device_name = None
+            try:
+                props = torch.cuda.get_device_properties(0)
+                vram_total = int(props.total_memory / (1024 * 1024))
+                sm_count = _sm_count(props)
+            except Exception:  # noqa: BLE001
+                pass
+            if capability is None:
+                from .smi import compute_cap as _smi_cap
+
+                capability = _smi_cap()
+            if vram_total is None:
+                from .smi import total_mib as _smi_total
+
+                vram_total = _smi_total()
         try:
             mps = bool(torch.backends.mps.is_available())
         except Exception:  # noqa: BLE001
             mps = False
+
+    if device_name is None:
+        from .smi import gpu_name as _smi_gpu_name
+
+        device_name = _smi_gpu_name()
 
     nf4_ext, stale, abi_ok = _nf4_artifact()
     resolved_chr = find_chr_bin(chr_bin)
@@ -248,6 +289,7 @@ def probe(*, chr_bin: str | None = None, extras_for: str | None = None) -> Machi
         capability=capability,
         device_name=device_name,
         vram_total_mib=vram_total,
+        sm_count=sm_count,
         smi_used_mib=_smi_used_mib(),
         mps=mps,
         nf4_ext=nf4_ext,
@@ -300,7 +342,8 @@ def verdict(m: Machine, *, override: bool | None = None) -> Verdict:
     True``, so HIP is checked before CUDA.
 
     ``override`` is kept so old call sites still type-check. Ampere-family
-    cards generate as experimental without ``DEEPFOLD_ALLOW_UNMEASURED_ARCH``.
+    and SM120 cards generate as experimental without
+    ``DEEPFOLD_ALLOW_UNMEASURED_ARCH``.
     """
     _ = override
 
@@ -308,7 +351,9 @@ def verdict(m: Machine, *, override: bool | None = None) -> Verdict:
         return Verdict("no", "darwin", messages.GENERATE_APPLE, messages.MACOS_RUN)
 
     if m.torch is None:
-        return Verdict("no", "no-torch", messages.GENERATE_NO_TORCH, messages.NO_TORCH)
+        return Verdict(
+            "no", "no-torch", messages.GENERATE_NO_TORCH, messages.no_torch_help(m.device_name)
+        )
 
     if m.torch_hip:
         return Verdict("no", "rocm", messages.GENERATE_ROCM, messages.GENERATE_ROCM)
@@ -317,7 +362,12 @@ def verdict(m: Machine, *, override: bool | None = None) -> Verdict:
         if m.mps:
             return Verdict("no", "darwin", messages.GENERATE_APPLE, messages.MACOS_RUN)
         if m.torch_cuda is None:
-            return Verdict("no", "cpu-torch", messages.GENERATE_CPU, messages.CPU_TORCH)
+            return Verdict(
+                "no",
+                "cpu-torch",
+                messages.GENERATE_CPU,
+                messages.cpu_torch_help(m.device_name),
+            )
         return Verdict(
             "no",
             "cpu-only",
@@ -337,13 +387,17 @@ def verdict(m: Machine, *, override: bool | None = None) -> Verdict:
         )
 
     cap = tuple(m.capability)
-    if cap == SHIP_CAPABILITY:
+    kind = family_of(cap)
+    if kind == "ship":
         return Verdict("yes", "ship", messages.GENERATE_SHIP)
 
-    if cap in FAMILY_CAPABILITIES:
+    if kind == "experimental":
         return Verdict("experimental", "experimental", messages.GENERATE_EXPERIMENTAL)
 
-    if cap == (7, 5):
+    if kind == "sm120":
+        return Verdict("experimental", "sm120", messages.generate_sm120(cap))
+
+    if kind == "turing":
         return Verdict(
             "no", "turing", messages.GENERATE_TURING, messages.wrong_capability(cap)
         )
@@ -409,13 +463,47 @@ def checks(m: Machine, v: Verdict) -> list[Check]:
 
     if m.capability is not None:
         detail = m.device_name or ""
+        extras: list[str] = []
         if m.vram_total_mib:
-            detail = f"{detail} ({m.vram_total_mib} MiB)".strip()
-        tag = "ok" if v.arch in ("ship", "experimental") else "fail"
+            extras.append(f"{m.vram_total_mib} MiB")
+        if m.sm_count:
+            extras.append(f"{m.sm_count} SMs")
+        if extras:
+            detail = f"{detail} ({', '.join(extras)})".strip()
+        tag = "ok" if v.allowed else "fail"
         out.append(Check(tag, f"GPU {m.sm}", detail))
     else:
         out.append(Check("fail", "GPU capability", "no CUDA device to ask"))
-    out.append(Check("ok", "kernel target Ampere-family", f"(gencode {KERNEL_GENCODE})"))
+    out.append(Check("ok", "kernel gencode", f"({kernel_gencode()})"))
+    if v.arch == "sm120":
+        from gpu.cuda_env import nvcc_supports_sm120, nvcc_version
+
+        if nvcc_supports_sm120():
+            ver = nvcc_version()
+            shown = f"{ver[0]}.{ver[1]}" if ver else "12.8+"
+            out.append(Check("ok", "native sm_120 cubin", f"nvcc {shown}"))
+        else:
+            out.append(
+                Check(
+                    "warn",
+                    "native sm_120 cubin",
+                    "nvcc < 12.8; PTX compute_80 JIT (first generate ~1 min). "
+                    "CUDA Toolkit 12.8+ emits cubin. 3080 lab stays on 12.4.",
+                )
+            )
+        runtime = m.torch_cuda or ""
+        parts = runtime.split(".")
+        sm120_runtime = False
+        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+            sm120_runtime = (int(parts[0]), int(parts[1])) >= (12, 8)
+        if runtime and not sm120_runtime:
+            out.append(
+                Check(
+                    "warn",
+                    "torch CUDA runtime",
+                    f"{runtime}; RTX 5070 Ti neighbor profile is cu128+",
+                )
+            )
 
     if m.chr_bin is None:
         out.append(Check("fail", "chr", "not found"))

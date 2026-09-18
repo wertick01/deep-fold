@@ -284,7 +284,7 @@ def test_wide_family_is_plan_only() -> None:
     src = Path(__file__).resolve().parents[1] / "loop" / "generate.py"
     text = src.read_text(encoding="utf-8")
     check(
-        "nf4_max_n(LIVE_MAX_N)" in text,
+        "linear_max_n(self._groups[0].gemms[0].codec, LIVE_MAX_N)" in text,
         "TokenLoop.prefill_chunk still probes LIVE_MAX_N (not 64)",
     )
 
@@ -302,6 +302,24 @@ def test_wide_family_is_plan_only() -> None:
         wide_ok,
         f"wide N workspace is still split_k x M x N and at most dense W "
         f"(largest {worst_ws / 1024:.0f} KiB; k_proj N=64 ties BF16 W bytes)",
+    )
+
+
+def test_5070_ti_matches_3080_occupancy() -> None:
+    """Public 5070 Ti silicon is 70 SMs, same occupancy unit as the 3080 plate.
+
+    5080 is 84 SMs: split-K may grow. Do not freeze 5080 counts here.
+    """
+    q70 = plan(2048, 2048, 1, one_wave=70)
+    k70 = plan(256, 2048, 1, one_wave=70)
+    q84 = plan(2048, 2048, 1, one_wave=84)
+    check(
+        q70.ctas == 128 and k70.ctas == 64,
+        f"5070 Ti / 3080 (70 SM) q_proj={q70.ctas} k_proj={k70.ctas}",
+    )
+    check(
+        q84.ctas >= q70.ctas,
+        f"5080 (84 SM) q_proj {q84.ctas} >= 70-SM {q70.ctas}",
     )
 
 
@@ -335,7 +353,7 @@ def test_matches_extension() -> None:
     except Exception as exc:  # noqa: BLE001 - no torch / no card is not a failure
         skip(f"C planner cross-check: {type(exc).__name__}: {exc}")
     try:
-        nf4_set_tuning(path=0, split_k=0, one_wave=0)
+        nf4_set_tuning(path=0, split_k=0, one_wave=70)
         probe = nf4_plan(2048, 2048, 1)
     except Exception as exc:  # noqa: BLE001
         skip(f"C planner cross-check: {type(exc).__name__}: {exc}")
@@ -377,6 +395,7 @@ def main() -> int:
         test_rejects,
         test_decode_cta_freeze,
         test_wide_family_is_plan_only,
+        test_5070_ti_matches_3080_occupancy,
         test_matches_extension,
     ):
         try:

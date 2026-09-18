@@ -37,12 +37,14 @@ source .venv/bin/activate
 deepfold doctor
 ```
 
-You already need: NVIDIA driver (Ampere or Ada), Python 3.11 or 3.12
+You already need: NVIDIA driver (Ampere, Ada, or SM120 / RTX 50), Python 3.11 or 3.12
 (Ubuntu 22.04 `python3` is 3.10 — install `python3.11`).
 Go 1.22+ is optional — setup fetches a portable copy from go.dev when `chr`
 is missing. On Windows, missing Visual Studio Build Tools (C++) and CUDA
-Toolkit 12.4 are installed via winget, then `gpu/nf4` is compiled. The
-script does **not** install the NVIDIA driver. `doctor` 0 = generate possible; 2 =
+Toolkit (12.4 on Ampere; 12.8 on RTX 50 / 5070 Ti) are installed via winget,
+then `gpu/nf4` is compiled. `setup.ps1` / `setup.sh` pick torch **cu128** when
+`nvidia-smi` sees an RTX 50 (override: `$env:DEEPFOLD_TORCH_INDEX='cu128'`).
+The script does **not** install the NVIDIA driver. `doctor` 0 = generate possible; 2 =
 this card could run, install incomplete; 3 = this machine class cannot generate.
 
 ---

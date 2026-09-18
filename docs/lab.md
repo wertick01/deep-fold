@@ -233,8 +233,8 @@ archives (rotated SVG labels, two separate stories). Use `03_codec_lab.ipynb`.
 
 ## How to run
 
-Generate (no notebook; Ampere-family CUDA: **sm_86 measured**, A100/Ada
-experimental; Turing/Hopper/Blackwell refused; GGUF refused; sibling `.chr`
+Generate (no notebook; Ampere-family CUDA: **sm_86 measured**, A100/Ada/SM120
+experimental; Turing/Hopper/SM100 refused; GGUF refused; sibling `.chr`
 matched by CHR0 header):
 
 ```powershell

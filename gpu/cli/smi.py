@@ -12,7 +12,17 @@ import shutil
 import subprocess
 from pathlib import Path
 
-__all__ = ["device_id", "executable", "query_mib", "total_mib", "used_mib"]
+__all__ = [
+    "compute_cap",
+    "device_id",
+    "executable",
+    "gpu_name",
+    "query_field",
+    "query_mib",
+    "total_mib",
+    "used_mib",
+    "visible_gpu_looks_sm120",
+]
 
 
 def device_id() -> str:
@@ -43,7 +53,8 @@ def executable() -> str | None:
     return None
 
 
-def query_mib(field: str) -> int | None:
+def query_field(field: str) -> str | None:
+    """One nvidia-smi CSV cell for the visible GPU, or None."""
     exe = executable()
     if exe is None:
         return None
@@ -64,9 +75,44 @@ def query_mib(field: str) -> int | None:
     if out.returncode != 0:
         return None
     try:
-        return int(out.stdout.strip().splitlines()[0])
-    except (ValueError, IndexError):
+        line = out.stdout.strip().splitlines()[0].strip()
+    except IndexError:
         return None
+    if not line or line.lower() in {"[n/a]", "n/a"}:
+        return None
+    return line
+
+
+def query_mib(field: str) -> int | None:
+    raw = query_field(field)
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def gpu_name() -> str | None:
+    return query_field("name")
+
+
+def compute_cap() -> tuple[int, int] | None:
+    """Driver-reported compute capability, e.g. ``(12, 0)`` on a 5070 Ti."""
+    raw = query_field("compute_cap")
+    if raw is None:
+        return None
+    parts = raw.replace(",", ".").split(".")
+    if len(parts) < 2 or not parts[0].isdigit() or not parts[1].isdigit():
+        return None
+    return int(parts[0]), int(parts[1])
+
+
+def visible_gpu_looks_sm120() -> bool:
+    """nvidia-smi only. Used by setup before torch is installed."""
+    from gpu.arch_family import looks_sm120
+
+    return looks_sm120(capability=compute_cap(), device_name=gpu_name())
 
 
 def total_mib() -> int | None:

@@ -66,6 +66,8 @@ number; quote both.
 | Python bindings | `gpu/nf4/bindings.cpp`, `gpu/nf4/__init__.py` |
 | Prefill (eager, not graphed) | `gpu/decodev2/prefill.py` |
 | Isolated GEMV bench | `python gpu/nf4/bench_gemv.py` |
+| Isolated GEMV ncu | `python -m gpu.nf4.ncu_gemv --export` |
+| 3B greedy-step mix | `python gpu/decodev2/profile_step.py --backend gemv` |
 | 3B plate | `python gpu/decodev2/run_3b.py --backend gemv` |
 
 ### Live kernel rules (GEMV)
@@ -89,8 +91,11 @@ python gpu/decodev2/test_state.py
 python gpu/decodev2/test_step.py
 python gpu/decodev2/test_graph.py
 python gpu/decodev2/test_prefill.py
+python gpu/decodev2/test_profile_step.py
 python gpu/nf4/test_gemv.py
+python -m gpu.nf4.test_ncu_gemv
 python gpu/decodev2/run_3b.py --backend gemv
+python gpu/decodev2/profile_step.py --backend gemv --max-seq 2048
 ```
 
 Python: `C:\Users\Professional\anaconda3\envs\torch-gpu\python.exe`. JIT rebuilds
@@ -196,7 +201,7 @@ from an isolated GEMV.
     TokenLoop prefill was 86 ms. Decode graph unchanged (~196 / 200). Do not
     capture prefill. CopyRing still out of scope.
 
-## 4. CUDA 70–85% — open, not closed
+## 4. CUDA 70–85% — named, not occupancy
 
 Task Manager CUDA util while 3B Decode V2 was generating, same card:
 
@@ -207,25 +212,81 @@ Task Manager CUDA util while 3B Decode V2 was generating, same card:
 | after NR=4 `lm_head` | **70–85%** |
 
 That is **not** SM occupancy from Nsight, and it is **not** “15% more CUDA ⇒
-15% more tok/s”. WDDM’s CUDA % mixes engine idle, copy, and compute. A
-1-CTA RMS and a 16-CTA merge look like holes next to a fat GEMV wave; they
-are also cheap compared with `lm_head`. Painting more skinny kernels did not
-move the device window (RMS-in-GEMV made it worse).
+15% more tok/s”. WDDM’s CUDA % mixes engine idle, copy, and compute.
 
-What we believe, unmeasured until the next session:
+Nsight Systems is **not installed**. `ncu.BAT` (Nsight Compute 2024.2) is.
+Isolated CUDA-core GEMV / SwiGLU counters: [`docs/runs/ncu-gemv/`](runs/ncu-gemv/).
+The GEMM plate [`docs/runs/ncu/`](runs/ncu/) is `chr_nf4_gemm`, not this.
+Kineto on a CUDA graph replay listed only `aten::fill_`. `cudaEventElapsedTime`
+on events captured inside the greedy graph is `invalid argument` on this WDDM
+stack. Production `greedy_decode` stays untimed.
 
-- During GEMV the SMs are busy. Remaining holes are **between** graph nodes
-  (RMS ×2/layer, attn merge, maybe WDDM graph replay) plus **weight bandwidth**
-  inside GEMV (170–421 GB/s vs ~760 peak).
-- 201 vs 206 is ~0.12 ms/token. `lm_head` is ~0.39 ms of a ~5.0 ms step.
-  Eating the last skinny launches cannot be the whole 5 tok/s unless Nsight
-  shows they actually stall the engine that long.
-- Next instrument is **Nsight Systems on one captured greedy step** (or
-  CUDA graph node timestamps), not another “one more 1-CTA fuse”. Skip
-  WikiText. Full Nsight only when we sit down for this.
+Live instrument (`profile_step.py`, exclusive 3B, `max_seq=2048`, gemv,
+2026-09-18): [`docs/runs/decodev2-3b-step-profile/`](runs/decodev2-3b-step-profile/).
 
-Do not optimize from Task Manager alone. Use it as a “holes still exist”
-flag, then measure which nodes are idle.
+| clock | ms/step | tok/s | notes |
+|---|---:|---:|---|
+| captured graph (4×32, CUDA event, no `.item()`) | **4.24–5.31**, median **4.80** | 188–236, median **208** | WDDM scatter; windows did not grow with pos 58→154 |
+| host-read graph | 4.74 | **211** | one `.item()` per token |
+| ignore-EOS plate | ~5.1 | **197 / 199** | quote that for product, not 208 |
+| eager greedy | 4.75 (earlier pass) / 7.20 (this pass) | — | Python launch + WDDM; not the graph |
+| L2-hot kernels × 36 | 5.68 | — | graph is **faster** (gap −0.88 ms) |
+
+Graph ≤ reconstructed means the captured step is already kernel-bound.
+Idle *between* graph nodes is not a 15% hole we can name and paint over.
+The first eager-event pass (13.6 ms, RMS 21%) was Python launch tax inside
+each span; discarded.
+
+L2-hot mix (once × layers; skinny ops are launch-inflated):
+
+| piece | once | ×36 scaled | share of 5.68 ms |
+|---|---:|---:|---:|
+| SwiGLU (gate+up) | 42 µs | **1.50 ms** | **26%** |
+| flash-decode attn | 28 µs | 0.99 ms | 18% |
+| down GEMV | 26 µs | 0.93 ms | 16% |
+| RMS (73 launches) | 9 µs | 0.67 ms | 12% |
+| o_proj | 15 µs | 0.55 ms | 10% |
+| QKV | 14 µs | 0.52 ms | 9% |
+| lm_head + argmax | **289 µs** | 0.29 ms | **5%** |
+| embed gather | 223 µs | 0.22 ms | 4% |
+| commit | 5 µs | 0.01 ms | ~0% |
+
+MLP (SwiGLU + down) is **43%** even L2-hot. All N=1 GEMV-class work
+(QKV + o + SwiGLU + down + lm_head) is **67%**. Isolated `bench_gemv.py`
+(colder, L2-rotated) still has 3B `down` **69 µs** and `lm_head` **393 µs** —
+the live mixed graph sits between those and the L2-hot loop, not below them.
+
+What this rules out:
+
+- Doubling `lm_head` GB/s is ~0.3–0.4 ms of a ~4.8 ms step (**~8%**), not 2× tok/s.
+- RMS-in-GEMV (already missed at 111 tok/s): 73× 1-CTA RMS is cheap next to
+  SwiGLU; putting it inside 152k `lm_head` CTAs was the wrong fuse.
+- Another 1-CTA merge / graph-node idle hunt will not close Task Manager
+  70–85%. The engine looks gappy because skinny RMS/attn-merge grids sit next
+  to fat GEMV waves; the *time* is the waves.
+- Attn is second, not first. Windows did not climb with `valid_len`.
+
+Isolated Nsight Compute, L2-rotated 3B shapes, same cubin as Decode V2
+(`python -m gpu.nf4.ncu_gemv --export`, 2026-09-18). Median of 7 launches
+after dropping ID 0. Not live tok/s.
+
+| shape | kernel | DRAM% | tensor% | occ% | regs | grid |
+|---|---|---:|---:|---:|---:|---:|
+| `o_proj` 2048×2048 | `gemv_splitk<1>` | **23.5** | 0 | **82.4** | 40 | 2048 |
+| `down_proj` 2048×11008 | `gemv_splitk<1>` | **50.8** | 0 | **85.9** | 40 | 2048 |
+| SwiGLU 11008×2048 | `gemv_swiglu<4>` | **49.0** | 0 | **72.2** | 48 | 2752 |
+
+DRAM bytes match the packed weights (`o` 2.29 MiB, `down` 12.27 MiB, SwiGLU
+24.04 MiB). Occupancy is **not** the Task Manager 15%. Tensor pipe is zero
+(CUDA-core). `o_proj` DRAM% is lower because K is 4× shorter at the same
+2048 CTAs — more dequant per byte, not a miss. Isolated `chr_nf4_gemm` ncu
+(3–7% DRAM) is a different kernel.
+
+What remains, without guessing a fuse: **SwiGLU + down weight traffic**
+(`M=11008` / `K=11008` on 3B) is still 43% of the L2-hot step. NR=4 already
+applies when `M>=4096`; 3B `down`/`o`/`q` stay one row because NR=2/4 *timed*
+slower on this card, not because NR=1 is occupancy-starved (it is not).
+Do not edit `nf4_gemm.cu`. Do not say faster than Ollama.
 
 ## 5. Conclusions we will not re-litigate
 
@@ -243,19 +304,12 @@ flag, then measure which nodes are idle.
   Token-at-a-time prefill is not a TTFT claim.
 - Isolated GEMV GB/s is not end-to-end tok/s.
 
-## 6. 14B and 20B plates; Nsight is Coming soon
+## 6. 14B and 20B plates
 
 14B and 20B Decode V2 GEMV are measured at `max_seq=2048` (below).
-**Coming soon:** why 3B CUDA sits at 70–85% (Nsight). CLI `--executor auto`
+3B greedy-step mix is §4. CLI `--executor auto`
 uses Decode V2 on resident NF4. Do not start a plate while another GPU job is
 running — overlapping 20B writes are not numbers.
-
-### Utilization (3B, Coming soon)
-
-- Nsight Systems (or CUPTI / graph node times) on fuse9’s captured greedy
-  step. Name the idle gaps. Then decide whether the lever is launch/graph,
-  merge, RMS, or GEMV weight throughput — not another guess.
-- Keep `CHR_NF4_GEMV_NR` for A/B on the same tensors.
 
 ### 14B (Qwen2.5-14B-Instruct) — 2026-09-17
 
@@ -334,7 +388,7 @@ Default `deepfold run` / `chat` is `--executor auto`: resident NF4
 (3B/14B/20B) uses `gpu/decodev2/session.py`; overflow / VQ / CopyRing stay
 on TokenLoop. Force MMA with `--executor tokenloop`; force V2 (or refuse)
 with `--executor decodev2`. **In progress:** TTY chrome / agent layout
-(neighbor chat). Packed embed is the 20B hard path. Nsight is still later.
+(neighbor chat). Packed embed is the 20B hard path. 3B step mix is §4.
 Do not start a GPU plate from this wiring.
 
 ### Hard-12 vs Ollama (2026-09-18)
@@ -358,7 +412,7 @@ Ollama tok/s is the mean of 12 `decode_tok_s` in `plate.json` (3B median **184.5
 ### Coming soon
 
 - llama.cpp hard-12 (3B / 14B / 20B)
-- 3B Nsight utilization 70–85%
+- Nsight Systems (not installed) for a graph timeline — occupancy is already measured
 
 ### In progress
 
@@ -370,5 +424,5 @@ Ollama tok/s is the mean of 12 `decode_tok_s` in `plate.json` (3B median **184.5
 - Editing `nf4_gemm.cu`
 - llama.cpp / GGUF dual path
 - Quoting overlapping 20B jobs or 20B device-window 25.6 / 20.7 as decode
-- WikiText / full Nsight until we sit on 3B utilization
+- WikiText / installing Nsight Systems unless a later message says so
 - `demo.py` in git

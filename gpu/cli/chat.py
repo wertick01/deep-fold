@@ -18,6 +18,7 @@ from . import transcript as store
 __all__ = [
     "apply_session_prefill",
     "chat",
+    "chat_prompt_bindings",
     "classify_slash",
     "format_status",
     "format_tool_block",
@@ -29,6 +30,7 @@ __all__ = [
     "run_session_generate",
     "seal_and_prefix",
     "session_capable",
+    "slash_completer",
     "toolbar_text",
     "turn_stop",
 ]
@@ -73,6 +75,116 @@ def classify_slash(line: str) -> str | None:
     if cmd == "/agent":
         return "agent"
     return "unknown"
+
+
+_SLASH_WORDS = (
+    "/help",
+    "/quit",
+    "/exit",
+    "/clear",
+    "/stats",
+    "/new",
+    "/chats",
+    "/copy",
+    "/save",
+    "/agent",
+    "/agent on",
+    "/agent off",
+    "/agent web on",
+    "/agent web off",
+    "/agent default on",
+    "/agent default off",
+    "/agent trust ask",
+    "/agent trust write",
+    "/agent trust workspace",
+)
+
+
+def slash_completer():
+    """Tab-complete slash commands only. Do not steal keys from ordinary text."""
+    from prompt_toolkit.completion import Completer, Completion
+
+    class SlashCompleter(Completer):
+        def get_completions(self, document, complete_event):  # type: ignore[no-untyped-def]
+            text = document.text_before_cursor
+            if not text.startswith("/"):
+                return
+            low = text.lower()
+            for word in _SLASH_WORDS:
+                if word.startswith(low):
+                    yield Completion(word, start_position=-len(text))
+
+    return SlashCompleter()
+
+
+def chat_prompt_bindings():
+    """Enter submits. Ctrl+J is a newline. Arrows and Backspace edit the line.
+
+    Windows maps Backspace to ``c-h`` (the same key as prompt_toolkit's
+    ``backspace`` alias). Completions on an empty line used to eat Left/Right.
+    These bindings are eager so they win over that menu.
+    """
+    from prompt_toolkit.key_binding import KeyBindings
+
+    bindings = KeyBindings()
+
+    @bindings.add("enter")
+    def _submit(event) -> None:  # type: ignore[no-untyped-def]
+        event.current_buffer.validate_and_handle()
+
+    @bindings.add("c-j")
+    def _newline(event) -> None:  # type: ignore[no-untyped-def]
+        event.current_buffer.newline()
+
+    @bindings.add("c-c")
+    def _ctrl_c(event) -> None:  # type: ignore[no-untyped-def]
+        buf = event.current_buffer
+        if buf.text:
+            buf.reset()
+            return
+        event.app.exit(exception=KeyboardInterrupt())
+
+    @bindings.add("c-h", eager=True)
+    def _backspace(event) -> None:  # type: ignore[no-untyped-def]
+        event.current_buffer.delete_before_cursor(count=event.arg)
+
+    @bindings.add("delete", eager=True)
+    def _delete(event) -> None:  # type: ignore[no-untyped-def]
+        event.current_buffer.delete(count=event.arg)
+
+    @bindings.add("left", eager=True)
+    def _left(event) -> None:  # type: ignore[no-untyped-def]
+        event.current_buffer.cursor_left(count=event.arg)
+
+    @bindings.add("right", eager=True)
+    def _right(event) -> None:  # type: ignore[no-untyped-def]
+        event.current_buffer.cursor_right(count=event.arg)
+
+    @bindings.add("c-left", eager=True)
+    def _word_left(event) -> None:  # type: ignore[no-untyped-def]
+        buf = event.current_buffer
+        pos = buf.document.find_previous_word_beginning(count=event.arg)
+        if pos:
+            buf.cursor_position += pos
+
+    @bindings.add("c-right", eager=True)
+    def _word_right(event) -> None:  # type: ignore[no-untyped-def]
+        buf = event.current_buffer
+        pos = buf.document.find_next_word_ending(count=event.arg)
+        if pos:
+            buf.cursor_position += pos
+
+    @bindings.add("home", eager=True)
+    def _home(event) -> None:  # type: ignore[no-untyped-def]
+        buf = event.current_buffer
+        buf.cursor_position += buf.document.get_start_of_line_position()
+
+    @bindings.add("end", eager=True)
+    def _end(event) -> None:  # type: ignore[no-untyped-def]
+        buf = event.current_buffer
+        buf.cursor_position += buf.document.get_end_of_line_position()
+
+    return bindings
 
 
 def _is_tty() -> bool:
@@ -578,7 +690,6 @@ def chat(args: Namespace) -> int:
         return 1
     try:
         from prompt_toolkit import PromptSession
-        from prompt_toolkit.completion import WordCompleter
         from prompt_toolkit.history import InMemoryHistory
         from prompt_toolkit.key_binding import KeyBindings
     except ImportError:
@@ -690,23 +801,8 @@ def chat(args: Namespace) -> int:
     if not bool(getattr(args, "warmup", True)):
         _err(_dim("warmup skipped: the first reply can stall; omit --no-warmup", color=color))
 
-    bindings = KeyBindings()
-
-    @bindings.add("enter")
-    def _submit(event) -> None:  # type: ignore[no-untyped-def]
-        event.current_buffer.validate_and_handle()
-
-    @bindings.add("c-j")
-    def _newline(event) -> None:  # type: ignore[no-untyped-def]
-        event.current_buffer.insert_text("\n")
-
-    @bindings.add("c-c")
-    def _ctrl_c(event) -> None:  # type: ignore[no-untyped-def]
-        buf = event.current_buffer
-        if buf.text:
-            buf.reset()
-            return
-        event.app.exit(exception=KeyboardInterrupt())
+    os.environ.setdefault("PROMPT_TOOLKIT_NO_CPR", "1")
+    bindings = chat_prompt_bindings()
 
     last_out = None
     prefix_ids: list[int] | None = None
@@ -715,32 +811,9 @@ def chat(args: Namespace) -> int:
     session = PromptSession(
         key_bindings=bindings,
         multiline=True,
+        complete_while_typing=False,
         history=InMemoryHistory(),
-        completer=WordCompleter(
-            [
-                "/help",
-                "/quit",
-                "/exit",
-                "/clear",
-                "/stats",
-                "/new",
-                "/chats",
-                "/copy",
-                "/save",
-                "/agent",
-                "/agent on",
-                "/agent off",
-                "/agent web on",
-                "/agent web off",
-                "/agent default on",
-                "/agent default off",
-                "/agent trust ask",
-                "/agent trust write",
-                "/agent trust workspace",
-            ],
-            ignore_case=True,
-            sentence=True,
-        ),
+        completer=slash_completer(),
         bottom_toolbar=lambda: toolbar_text(
             leaf=leaf,
             sm=sm,

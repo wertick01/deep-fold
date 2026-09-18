@@ -24,8 +24,10 @@ Also shipped: `setup` (venv catch-up; refuses conda `torch-gpu`), `pull`
 never `~/.ollama`, never GGUF). Generate ships on Ampere-family CUDA:
 **sm_86 is the measured plate** (RTX 3080).
 A100 (`sm_80`) and Ada (`sm_89`) **generate as experimental** — allowed, not the
-3080 tok/s. Turing, Hopper, Blackwell, ROCm, macOS generate, and CPU torch are
-**refused**. The kernel image is `sm_80/sm_86/sm_89` plus PTX `compute_80`.
+3080 tok/s. SM120 (GeForce RTX 50, first remote SKU RTX 5070 Ti) is the same
+class. Turing, Hopper, SM100, ROCm, macOS generate, and CPU torch are
+**refused**. The kernel image is `sm_80/sm_86/sm_89` plus PTX `compute_80`
+(native `sm_120` when nvcc is 12.8+).
 
 The lab comparison plate is separate: `python -m gpu.lab.run`, or
 `gpu.host.load_model` + `gpu.loop.TokenLoop` by hand. Resident CLI generate
@@ -141,10 +143,11 @@ doctor is the installer working, not a product bug.
 
 `python -m gpu.cli doctor` exit codes: **0** run is possible; **2** this box
 could run but the install is broken; **3** generate is refused by this
-machine's class (no NVIDIA GPU, macOS, Turing, Hopper, Blackwell, ROCm)
+machine's class (no NVIDIA GPU, macOS, Turing, Hopper, SM100, ROCm)
 while `chr compress` still works; **1** neither. **3 is not green generate.**
-Ada (`sm_89`) and A100 (`sm_80`) are **experimental generate** (exit 0 if
-the rest of the install works), not class-3.
+Ada (`sm_89`), A100 (`sm_80`), and SM120 (RTX 50 / 5070 Ti) are
+**experimental generate** (exit 0 if the rest of the install works), not
+class-3.
 
 On macOS `chr compress` is real and `python -m gpu.cli run` exits 1: there
 is no CUDA kernel there. A Mac can pack a `.chr` for a CUDA Ampere/Ada

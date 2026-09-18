@@ -45,10 +45,12 @@ PREFILL_N64 = 4
 
 GROUP_SIZE = 64
 
-#: SMs on GA102-200 (RTX 3080 12 GB). A decode grid below this is the wave-2 bug,
-#: and the unit the split-K target is expressed in.
+#: SMs on GA102-200 (RTX 3080 12 GB) and on GB203-200 (RTX 5070 Ti).
+#: A decode grid below this is the wave-2 bug, and the unit the split-K
+#: target is expressed in when the caller does not pass ``one_wave``.
 ONE_WAVE = 70
-#: Two CTAs per SM, which is what ``__launch_bounds__`` asks for.
+#: Two CTAs per SM on that 70-SM default. Live C planner uses
+#: ``2 * cudaDeviceProp.multiProcessorCount``.
 TARGET_CTAS = 140
 
 #: Live ``chr_nf4_gemm`` / TokenLoop ceiling. Raising this is the unfreeze.
@@ -141,14 +143,15 @@ def _pick_split(grid_x: int, n_ktiles: int, have_ws: bool, force_split: int,
                 one_wave: int) -> tuple[int, int]:
     """``(split, tiles_per_split)``.
 
-    Aim ``grid_x * split`` at the CTA target, then cap the split at
+    Aim ``grid_x * split`` at ``2 * one_wave`` CTAs, then cap the split at
     ``n_ktiles``: a split with no K tiles to walk is a CTA that writes zeros.
     ``split`` is recomputed from ``tiles_per_split`` so the pair always agrees
-    with what the kernel indexes.
+    with what the kernel indexes. Default ``one_wave`` is 70 (RTX 3080 and
+    RTX 5070 Ti).
     """
     want = 1
     if have_ws:
-        target = max(TARGET_CTAS, one_wave * 2)
+        target = max(1, int(one_wave) * 2)
         want = force_split if force_split > 0 else _ceil_div(target, grid_x)
     want = max(1, min(want, n_ktiles))
     tiles_per_split = _ceil_div(n_ktiles, want)

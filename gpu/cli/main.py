@@ -114,7 +114,8 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Packed CHR0 driver (NF4 or VQ 2-bit): weights stay packed in "
             "VRAM for the whole run. Ampere-family CUDA (sm_86 measured; "
-            "sm_80/sm_89 experimental). Turing / Hopper / Blackwell refuse."
+            "sm_80/sm_89 experimental). SM120 (RTX 50, first remote SKU "
+            "RTX 5070 Ti) is experimental. Turing / Hopper / SM100 refuse."
         ),
     )
     sub = ap.add_subparsers(dest="command", metavar="<command>")
@@ -288,7 +289,7 @@ def build_parser() -> argparse.ArgumentParser:
             "A neighbor PC should run scripts/setup.ps1 or scripts/setup.sh first. "
             "If chr is missing, fetches portable Go 1.22 from go.dev and builds it. "
             "If the NF4 kernel is missing, installs VS Build Tools + CUDA 12.4 "
-            "via winget when needed and compiles gpu/nf4."
+            "(12.8 on RTX 50) via winget when needed and compiles gpu/nf4."
         ),
     )
     boot.add_argument("--chr-bin", help="path to the Go chr binary")
@@ -300,7 +301,7 @@ def build_parser() -> argparse.ArgumentParser:
     boot.add_argument(
         "--kernel-only",
         action="store_true",
-        help="build gpu/nf4 (install VS Build Tools + CUDA 12.4 on Windows if needed)",
+        help="build gpu/nf4 (install VS Build Tools + CUDA 12.4, or 12.8 on RTX 50, if needed)",
     )
     boot.add_argument(
         "--no-install-tools",

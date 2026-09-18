@@ -1,0 +1,106 @@
+{
+  "schema": "decodev2.step_profile.v1",
+  "slug": "qwen25-3b",
+  "backend": "gemv",
+  "max_seq": 2048,
+  "prompt_len": 48,
+  "valid_len_after_prefill": 48,
+  "prefill_ms": 260.91,
+  "nsys": "",
+  "ncu_on_path": "C:\\Program Files\\NVIDIA Corporation\\Nsight Compute 2024.2.0\\ncu.BAT",
+  "graph_windows": [
+    {
+      "i": 0,
+      "position": 58,
+      "window_ms": 169.791,
+      "ms_per_step": 5.306,
+      "tok_s": 188.47
+    },
+    {
+      "i": 1,
+      "position": 90,
+      "window_ms": 168.576,
+      "ms_per_step": 5.268,
+      "tok_s": 189.83
+    },
+    {
+      "i": 2,
+      "position": 122,
+      "window_ms": 135.65,
+      "ms_per_step": 4.2391,
+      "tok_s": 235.9
+    },
+    {
+      "i": 3,
+      "position": 154,
+      "window_ms": 138.74,
+      "ms_per_step": 4.3356,
+      "tok_s": 230.65
+    }
+  ],
+  "graph_ms_per_step": 4.8018,
+  "graph_tok_s": 208.26,
+  "eager_ms_per_step": 7.1978,
+  "eager_tok_s": 138.93,
+  "reconstruct": {
+    "once_ms": {
+      "embed": 0.2232,
+      "rms_once": 0.0091,
+      "qkv": 0.0143,
+      "attn": 0.0276,
+      "o_proj": 0.0154,
+      "swiglu": 0.0416,
+      "down": 0.0259,
+      "lm_head": 0.2886,
+      "commit": 0.0051
+    },
+    "scaled_ms": {
+      "embed": 0.2232,
+      "rms": 0.6658,
+      "qkv": 0.5161,
+      "attn": 0.993,
+      "o_proj": 0.5541,
+      "swiglu": 1.4975,
+      "down": 0.9331,
+      "lm_head": 0.2886,
+      "commit": 0.0051
+    },
+    "reconstructed_ms": 5.6766,
+    "n_layers": 36,
+    "valid_len": 218,
+    "note": "Tight-loop on live tensors (L2-hot). Graph replay can be slower (weight cache thrash + inter-node idle) or similar."
+  },
+  "graph_minus_reconstructed_ms": -0.8748,
+  "host_read_ms_per_step": 4.7372,
+  "host_read_tok_s": 211.1,
+  "cupti": {
+    "ok": false,
+    "reason": "nsys missing. CUDA graph events cannot elapsed_time on this WDDM stack. Kineto does not list kernels inside graph replay. Categories are live kernel windows on the loaded 3B tensors, scaled by n_layers."
+  },
+  "vram": [
+    {
+      "tag": "after_decodev2_load",
+      "allocated_mib": 1699.4,
+      "reserved_mib": 1716.0,
+      "peak_allocated_mib": 1699.4
+    },
+    {
+      "tag": "after_profile",
+      "allocated_mib": 1699.4,
+      "reserved_mib": 1722.0,
+      "peak_allocated_mib": 1703.2
+    }
+  ],
+  "spec": {
+    "family": "llama_swiglu",
+    "n_layers": 36,
+    "hidden": 2048,
+    "n_q": 16,
+    "n_kv": 2,
+    "head_dim": 128,
+    "intermediate": 11008,
+    "vocab": 151936
+  },
+  "embed_kind": "nf4-rows",
+  "note": "nsys missing. Graph-captured cudaEvent elapsed_time is invalid on this WDDM stack. Categories are L2-hot live kernel windows scaled by n_layers. Production greedy_decode is untimed."
+}

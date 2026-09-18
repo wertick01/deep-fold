@@ -5,7 +5,8 @@ Without installing: ``python -m gpu.cli doctor``,
 and ``python -m gpu.cli from-ollama``.
 After ``pip install -e .`` the same entry point is ``deepfold`` on PATH.
 
-Generate is Ampere-family CUDA (sm_86 measured; sm_80/sm_89 experimental).
+Generate is Ampere-family CUDA (sm_86 measured; sm_80/sm_89 experimental)
+plus SM120 (GeForce RTX 50, experimental; first remote SKU RTX 5070 Ti).
 GGUF is refused (the path is never opened). A sibling ``.chr`` is used only
 when the CHR0 header matches this model's ``config.json``.
 ``pull`` is an allowlist, not a general Hub client. ``chat`` needs a TTY.

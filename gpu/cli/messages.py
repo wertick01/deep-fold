@@ -8,6 +8,14 @@ non-UTF-8 code page prints them.
 
 from __future__ import annotations
 
+# 3080 lab. SM120 neighbor (RTX 5070 Ti) uses the cu128 index.
+TORCH_INDEX_CU124 = "https://download.pytorch.org/whl/cu124"
+TORCH_INDEX_CU128 = "https://download.pytorch.org/whl/cu128"
+
+
+def torch_index_url(*, sm120: bool = False) -> str:
+    return TORCH_INDEX_CU128 if sm120 else TORCH_INDEX_CU124
+
 # --------------------------------------------------------------------------- #
 # wave7-ux.md §8
 # --------------------------------------------------------------------------- #
@@ -61,7 +69,8 @@ def unknown_hf_id(hf_id: str, table: tuple[str, ...]) -> str:
 
 
 CHAT_NEED_TTY = (
-    "deepfold chat needs a TTY. For scripts and pipes: deepfold run --prompt ..."
+    "deepfold chat needs a TTY. For scripts and pipes: "
+    "python -m gpu.cli run --prompt ..."
 )
 
 CHAT_NEED_TOOLKIT = """\
@@ -147,8 +156,8 @@ The .chr is weights only; it is not a full model file."""
 
 NO_COMPILER = """\
 NF4 kernel is not built. Run deepfold setup --kernel-only (winget-installs
-Visual Studio 2022 Build Tools (C++) and CUDA Toolkit 12.4 if missing), or
-build gpu/nf4 with vcvars64.bat. Jupyter is not required."""
+Visual Studio 2022 Build Tools (C++) and CUDA Toolkit 12.4, or 12.8 on RTX 50,
+if missing), or build gpu/nf4 with vcvars64.bat. Jupyter is not required."""
 
 NO_COMPILER_POSIX = """\
 NF4 kernel is not built. Install the CUDA toolkit (nvcc) and a C++ compiler
@@ -170,22 +179,56 @@ NF4 pays off when the 16-bit model does not fit (14B, 20B)."""
 # wave8-install.md §8
 # --------------------------------------------------------------------------- #
 
-CPU_TORCH = """\
-PyTorch has no CUDA. Deepfold's kernel is Ampere-family CUDA (sm_80/86/89), not CPU.
+CPU_TORCH = f"""\
+PyTorch has no CUDA. Deepfold's kernel is Ampere-family CUDA (sm_80/86/89)
+plus SM120 via PTX, not CPU.
 Default "pip install torch" is often the CPU wheel.
 Install a CUDA 12.4 wheel, then re-run doctor:
 
-  pip install torch --index-url https://download.pytorch.org/whl/cu124
+  pip install torch --index-url {TORCH_INDEX_CU124}
 
 Deepfold does not install the NVIDIA driver."""
 
-NO_TORCH = """\
+CPU_TORCH_SM120 = f"""\
+PyTorch has no CUDA. This looks like GeForce RTX 50 / SM120 (first remote
+SKU RTX 5070 Ti). Install a CUDA 12.8+ wheel, then re-run doctor:
+
+  pip install torch --index-url {TORCH_INDEX_CU128}
+
+CUDA Toolkit 12.8+ emits native sm_120 cubin; 12.4 falls back to PTX JIT.
+Deepfold does not install the NVIDIA driver."""
+
+NO_TORCH = f"""\
 PyTorch is not installed in this interpreter. Deepfold's kernel is Ampere
 CUDA (sm_86 ship; sm_80/sm_89 experimental); the CUDA wheel is not on the default PyPI index:
 
-  pip install torch --index-url https://download.pytorch.org/whl/cu124
+  pip install torch --index-url {TORCH_INDEX_CU124}
 
 Deepfold does not install the NVIDIA driver."""
+
+NO_TORCH_SM120 = f"""\
+PyTorch is not installed in this interpreter. This looks like GeForce RTX 50
+/ SM120 (first remote SKU RTX 5070 Ti). The CUDA wheel is not on default PyPI:
+
+  pip install torch --index-url {TORCH_INDEX_CU128}
+
+Deepfold does not install the NVIDIA driver."""
+
+
+def cpu_torch_help(device_name: str | None = None) -> str:
+    from gpu.arch_family import looks_sm120
+
+    if looks_sm120(device_name=device_name):
+        return CPU_TORCH_SM120
+    return CPU_TORCH
+
+
+def no_torch_help(device_name: str | None = None) -> str:
+    from gpu.arch_family import looks_sm120
+
+    if looks_sm120(device_name=device_name):
+        return NO_TORCH_SM120
+    return NO_TORCH
 
 
 def wrong_capability(capability: tuple[int, int] | None) -> str:
@@ -193,15 +236,16 @@ def wrong_capability(capability: tuple[int, int] | None) -> str:
     sm = f"sm_{capability[0]}{capability[1]}" if capability else "unknown"
     return (
         f"This GPU is {sm}. The NF4 kernel ships as an Ampere-family fatbinary\n"
-        f"(sm_80 / sm_86 / sm_89 + PTX compute_80).\n"
-        "Measured machine: RTX 3080 (sm_86). Turing / Hopper / Blackwell are "
+        f"(sm_80 / sm_86 / sm_89 + PTX compute_80; native sm_120 when nvcc is 12.8+).\n"
+        "Measured machine: RTX 3080 (sm_86). SM120 (GeForce RTX 50, first remote "
+        "SKU RTX 5070 Ti) is experimental generate. Turing / Hopper / SM100 are "
         "refused, not a silent fallback."
     )
 
 
 MACOS_RUN = """\
 deepfold run needs the Ampere CUDA kernel. There is no CUDA kernel on macOS.
-chr compress on this Mac is supported; copy the .chr to a CUDA Ampere/Ada machine."""
+chr compress on this Mac is supported; copy the .chr to a CUDA Ampere/Ada/SM120 machine."""
 
 MISSING_CHR = """\
 chr (Go compressor) was not found. Deepfold does not pack weights in Python.
@@ -268,6 +312,14 @@ GENERATE_EXPERIMENTAL = (
 )
 
 
+def generate_sm120(capability: tuple[int, int]) -> str:
+    sm = f"sm_{capability[0]}{capability[1]}"
+    return (
+        f"generate: experimental ({sm} SM120 / GeForce RTX 50; unmeasured. "
+        "Plate is RTX 3080 sm_86. First remote SKU: RTX 5070 Ti, 70 SMs / 16 GB.)"
+    )
+
+
 def generate_unmeasured(capability: tuple[int, int]) -> str:
     sm = f"sm_{capability[0]}{capability[1]}"
     return (
@@ -292,15 +344,15 @@ GENERATE_APPLE = (
 )
 
 GENERATE_ROCM = (
-    "generate: no -- ROCm is not implemented. NVIDIA CUDA Ampere-family only."
+    "generate: no -- ROCm is not implemented. NVIDIA CUDA Ampere-family and SM120 only."
 )
 
 
 def generate_unsupported(capability: tuple[int, int]) -> str:
     sm = f"sm_{capability[0]}{capability[1]}"
     return (
-        f"generate: no -- this GPU is {sm}; Ampere-family is sm_80/86/89. "
-        "Hopper / Blackwell are refused (D1)."
+        f"generate: no -- this GPU is {sm}; generate families are Ampere "
+        "sm_80/86/89 and SM120. Hopper / SM100 are refused (D1)."
     )
 
 

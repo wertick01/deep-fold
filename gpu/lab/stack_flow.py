@@ -275,7 +275,7 @@ def stack_flow() -> Any:
     ax.text(
         2.4,
         25.25,
-        "GPU  ·  Ampere sm_86  ·  Ada / Hopper / Blackwell refused",
+        "GPU  ·  Ampere sm_86  ·  Ada / SM120 experimental · Hopper / SM100 Blackwell refused",
         fontsize=8.2,
         fontweight="bold",
         color=INK,

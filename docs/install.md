@@ -4,20 +4,28 @@ Short command list (install, pull, compress, tests, chat, neighbor plate):
 [`quickstart.md`](quickstart.md). Full `-h` dumps follow.
 
 Deepfold is a **terminal** program: it packs model weights into one `.chr`
-file and generates text on NVIDIA Ampere or Ada. It is not a website, not an
+file and generates text on NVIDIA Ampere, Ada, or SM120 (GeForce RTX 50). It is not a website, not an
 Ollama plugin, and not a browser chat.
 
 **In progress:** TTY chrome / agent layout. Command list below still applies.
 
 Measured tok/s from the author’s RTX 3080 **do not transfer**. Ada (RTX 40xx,
-`sm_89`) and A100 (`sm_80`) may generate; `doctor` will say `experimental`.
-Turing, Hopper, Blackwell, AMD, and macOS generate are refused.
+`sm_89`), A100 (`sm_80`), and SM120 (GeForce RTX 50, first remote SKU
+RTX 5070 Ti) may generate; `doctor` will say `experimental`.
+Turing, Hopper, SM100, AMD, and macOS generate are refused.
+
+**RTX 5070 Ti (first remote SM120 SKU):** `scripts/setup.ps1` / `setup.sh`
+(and `deepfold setup` in an existing venv) select the `cu128` torch index and
+prefer CUDA Toolkit 12.8 when `nvidia-smi` sees an RTX 50. Occupancy matches
+the 3080 (70 SMs). 16 GB still overflows 32B NF4 (H2). Dump a neighbor bundle
+with `python -m gpu.lab.sm120_remote` — a skip without that GPU, never a
+copied 3080 plate.
 
 Deepfold does **not** install the NVIDIA driver or Python.
 If `chr` is missing, setup downloads a portable Go 1.22 toolchain from go.dev.
 If the NF4 kernel is missing on Windows, setup uses winget to install Visual
-Studio 2022 Build Tools (C++) and CUDA Toolkit 12.4 when needed, then compiles
-`gpu/nf4`. A red `doctor` is a normal install refusal, not a kernel bug.
+Studio 2022 Build Tools (C++) and CUDA Toolkit 12.4 (Ampere) or 12.8 (RTX 50),
+then compiles `gpu/nf4`. A red `doctor` is a normal install refusal, not a kernel bug.
 
 After `pip install -e .`, `deepfold` and `python -m gpu.cli` are the same.
 If `deepfold` is not on PATH yet, use `python -m gpu.cli`. The author’s
@@ -52,8 +60,10 @@ bash scripts/setup.sh
 source .venv/bin/activate
 ```
 
-Then the same `doctor` / `pull` / `chat`. The first generate on a neighbor
-card may JIT the CUDA kernel (~1 min). Do not promise 3080 tok/s.
+Then the same `doctor` / `pull` / `chat`. On RTX 50 `doctor` must say
+`experimental` and exit **0** — that is success, not a broken install. The
+first generate on a neighbor card may JIT the CUDA kernel (~1 min). Do not
+promise 3080 tok/s.
 
 ---
 
@@ -61,11 +71,11 @@ card may JIT the CUDA kernel (~1 min). Do not promise 3080 tok/s.
 
 | Need | Why | Check |
 |---|---|---|
-| NVIDIA driver (Ampere or Ada) | GPU | `nvidia-smi` prints the card name |
+| NVIDIA driver (Ampere, Ada, or SM120 / RTX 50) | GPU | `nvidia-smi` prints the card name |
 | Python 3.11 or 3.12 | runtime | Windows: `py -3.11 --version`; Linux: `python3.11 --version` (Ubuntu 22.04 `python3` is 3.10) |
 | Go 1.22+ (optional) | `chr` compressor; setup fetches this from go.dev if missing | `go version`, or skip — `scripts/setup.*` / `deepfold setup` |
 | Windows: MSVC Build Tools | compile NF4 kernel; setup winget-installs if missing | `cl` after `vcvars64.bat` |
-| CUDA Toolkit 12.4 (`nvcc`) | compile `.cu`; Windows setup winget-installs if missing; Linux you install nvcc yourself | `nvcc --version`, or skip if a matching `.pyd`/`.so` is already in `gpu/nf4` |
+| CUDA Toolkit (`nvcc`) | compile `.cu`; 12.4 on Ampere, 12.8 on RTX 50; Windows setup winget-installs if missing; Linux you install nvcc yourself | `nvcc --version`, or skip if a matching `.pyd`/`.so` is already in `gpu/nf4` |
 | Linux: `g++` | compile NF4 kernel (setup does not sudo apt) | `g++ --version` |
 | Disk | 3B ≈ 6 GB BF16, then a `.chr` | 3B is enough for smoke |
 
@@ -76,12 +86,13 @@ interpreter. Neighbors get a repo-local `.venv`.
 
 ## 2. Install once
 
-The script creates `.venv`, installs **CUDA** torch from the `cu124` index
-(default PyPI is usually a CPU wheel), `deepfold[hub,chat]`, builds `chr`
+The script creates `.venv`, installs **CUDA** torch from **cu124** (Ampere / Ada)
+or **cu128** (RTX 50 / SM120, when `nvidia-smi` sees the card; override
+`DEEPFOLD_TORCH_INDEX=cu128`), `deepfold[hub,chat]`, builds `chr`
 (PATH Go 1.22+ or a portable Go 1.22 zip from go.dev), installs VS Build Tools
-and CUDA 12.4 via winget if `cl`/`nvcc` are missing, compiles `gpu/nf4`, then
-runs `doctor`. Winget may prompt UAC; an Administrator PowerShell is the
-reliable path for those two installers.
+and CUDA 12.4 (Ampere) or 12.8 then 12.4 (RTX 50) via winget if `cl`/`nvcc`
+are missing, compiles `gpu/nf4`, then runs `doctor`. Winget may prompt UAC;
+an Administrator PowerShell is the reliable path for those two installers.
 
 **Windows (PowerShell):**
 
@@ -112,8 +123,8 @@ WSL2 uses the Windows GPU driver, so CopyRing joins H2D like WDDM
 | **3** | this machine class cannot generate | compress on CPU may still work (Hopper, Turing, macOS, no NVIDIA) |
 | **1** | neither generate nor compress | Python / Go / environment |
 
-Ada and A100 with a live install must be **0**, not 3, with
-`generate: experimental`.
+Ada, A100, and SM120 (RTX 50 / 5070 Ti) with a live install must be **0**,
+not 3, with `generate: experimental`.
 
 If the venv already exists, print the plan without `pip`:
 
@@ -176,7 +187,8 @@ usage: deepfold [-h] <command> ...
 
 Packed CHR0 driver (NF4 or VQ 2-bit): weights stay packed in VRAM for the
 whole run. Ampere-family CUDA (sm_86 measured; sm_80/sm_89 experimental).
-Turing / Hopper / Blackwell refuse.
+SM120 (RTX 50, first remote SKU RTX 5070 Ti) is experimental. Turing /
+Hopper / SM100 refuse.
 
 positional arguments:
   <command>
@@ -580,9 +592,9 @@ deepfold chat --model "$DEEPFOLD_MODEL"
 
 | Symptom | Usual cause |
 |---|---|
-| `doctor` exit 2, torch cpu | PyPI wheel; need the cu124 index as in `scripts/setup.*` |
+| `doctor` exit 2, torch cpu | PyPI wheel; Ampere/Ada: cu124, RTX 50: cu128 — as in `scripts/setup.*` |
 | `doctor` exit 2, no chr | Re-run `deepfold setup` or `python -m gpu.cli.go_toolchain` (needs network to go.dev). Or `go build -o chr.exe ./cmd/chr` |
-| `doctor` exit 2, no kernel | Re-run `deepfold setup --kernel-only` (winget VS Build Tools + CUDA 12.4, `--source winget` so a broken Microsoft Store cert cannot abort the search). Or copy a matching `gpu/nf4/chr_nf4_ext*.pyd` |
+| `doctor` exit 2, no kernel | Re-run `deepfold setup --kernel-only` (winget VS Build Tools + CUDA 12.4, or 12.8 on RTX 50, `--source winget` so a broken Microsoft Store cert cannot abort the search). Or copy a matching `gpu/nf4/chr_nf4_ext*.pyd` |
 | `doctor` exit 3 on Ada | old contract bug; after K4 this must not happen |
 | `chat` “needs a TTY” | pipe / IDE without a TTY; use a terminal window or `run --prompt` |
 | `chat` asks for prompt_toolkit | `pip install "deepfold[chat]"` |

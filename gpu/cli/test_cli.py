@@ -14,8 +14,9 @@ doctor verdict is a pure function of a hand-built :class:`Machine`:
    family it can name (gemma_gelu, phi3_concat, MoE, vision), and *defers* an
    unrecognised model_type to the walker instead of guessing either way;
 2. GGUF and Ollama blob paths are refused **without being opened**;
-3. generate is *experimental* on sm_80 / sm_89 (Ampere-family, unmeasured plate),
-   refused on sm_75 (no BF16 tensor cores), Hopper, ROCm, macOS, CPU torch and a
+3. generate is *experimental* on sm_80 / sm_89 (Ampere-family, unmeasured plate)
+   and on sm_120 (GeForce RTX 50; first remote SKU RTX 5070 Ti),
+   refused on sm_75 (no BF16 tensor cores), Hopper, SM100, ROCm, macOS, CPU torch and a
    missing torch -- each with its own copy;
 4. sm_89 is never ``ship``; the 3080 plate stays sm_86;
 5. doctor exit codes separate a broken install (2) from a machine whose class
@@ -444,6 +445,61 @@ def test_experimental_never_becomes_ship() -> None:
     assert v.generate != "yes", "Ada must not claim the 3080 plate"
 
 
+def test_sm120_5070_ti_is_experimental_and_exit_zero() -> None:
+    m = _ship(
+        capability=(12, 0),
+        device_name="NVIDIA GeForce RTX 5070 Ti",
+        vram_total_mib=16384,
+        sm_count=70,
+    )
+    v = verdict(m, override=False)
+    assert v.allowed and v.arch == "sm120"
+    assert v.generate == "experimental"
+    assert "5070 Ti" in v.line
+    assert _code(m) == 0
+    names = {c.name: c for c in checks(m, v)}
+    assert "70 SMs" in names["GPU sm_120"].detail
+    assert "16384 MiB" in names["GPU sm_120"].detail
+    cubin = names["native sm_120 cubin"]
+    assert cubin.tag in {"ok", "warn"}
+    if m.torch_cuda == "12.4":
+        assert names["torch CUDA runtime"].tag == "warn"
+
+
+def test_looks_sm120_is_5070_not_3050() -> None:
+    from gpu.arch_family import looks_sm120
+
+    assert looks_sm120(capability=(12, 0))
+    assert looks_sm120(device_name="NVIDIA GeForce RTX 5070 Ti")
+    assert looks_sm120(device_name="GeForce RTX 5090")
+    assert not looks_sm120(device_name="NVIDIA GeForce RTX 3080")
+    assert not looks_sm120(device_name="NVIDIA GeForce RTX 3050")
+    assert not looks_sm120(capability=(8, 6), device_name="NVIDIA GeForce RTX 3080")
+
+
+def test_cpu_torch_on_5070_ti_points_at_cu128() -> None:
+    v = verdict(
+        _ship(
+            torch="2.5.1+cpu",
+            torch_cuda=None,
+            cuda_available=False,
+            capability=None,
+            device_name="NVIDIA GeForce RTX 5070 Ti",
+        ),
+        override=False,
+    )
+    assert v.arch == "cpu-torch"
+    assert "download.pytorch.org/whl/cu128" in v.refusal
+    assert "cu124" not in v.refusal
+
+
+def test_sm100_datacenter_blackwell_is_refused() -> None:
+    v = verdict(_ship(capability=(10, 0), device_name="B200"), override=False)
+    assert v.generate == "no" and v.arch == "unsupported"
+    assert "sm_100" in v.line
+    assert "SM100" in v.line or "Hopper" in v.line
+
+
 def test_turing_is_refused_for_the_right_reason() -> None:
     v = verdict(_ship(capability=(7, 5), device_name="RTX 2080"), override=False)
     assert v.generate == "no" and v.arch == "turing"
@@ -496,15 +552,30 @@ def test_newer_nvidia_arch_is_out_of_the_matrix() -> None:
 
 
 def test_kernel_gencode_is_ampere_family_fatbinary() -> None:
-    from gpu.ampere_gencode import KERNEL_GENCODE, NVCC_GENCODE_FLAGS, nvcc_cflags
+    from gpu.ampere_gencode import (
+        KERNEL_GENCODE,
+        NVCC_GENCODE_FLAGS,
+        kernel_gencode,
+        nvcc_cflags,
+        nvcc_gencode_flags,
+    )
 
     flags = " ".join(NVCC_GENCODE_FLAGS)
     assert "sm_80" in flags and "sm_86" in flags and "sm_89" in flags
     assert "compute_80" in flags
-    assert "sm_90" not in flags and "sm_75" not in flags
+    assert "sm_90" not in flags and "sm_75" not in flags and "sm_100" not in flags
     assert "PTX" in KERNEL_GENCODE
     cflags = " ".join(nvcc_cflags())
+    live = " ".join(nvcc_gencode_flags())
     assert flags in cflags
+    assert "sm_100" not in cflags
+    assert "sm_90" not in live
+    gencode = kernel_gencode()
+    assert "compute_80" in gencode or "PTX" in gencode
+    if "sm_120" in live:
+        assert "sm_120" in gencode
+    else:
+        assert "sm_120" not in flags
 
 
 # --------------------------------------------------------------------------- #
@@ -527,6 +598,14 @@ def test_doctor_two_is_a_broken_install_on_a_card_that_could_run() -> None:
     assert _code(_ship(torch=None)) == 2, "no torch at all"
     assert _code(_ship(torch="2.5.1+cpu", torch_cuda=None, cuda_available=False,
                        capability=None)) == 2, "CPU torch"
+    ti = _ship(
+        capability=(12, 0),
+        device_name="NVIDIA GeForce RTX 5070 Ti",
+        chr_bin=None,
+        chr_runs=False,
+        sm_count=70,
+    )
+    assert _code(ti) == 2, "SM120 without chr is a broken install, not class-3"
 
 
 def test_doctor_jit_without_nvcc_is_not_green() -> None:
@@ -799,6 +878,40 @@ def test_run_allows_ada_experimental() -> None:
     assert code == 0
     assert "experimental" in err.getvalue()
     assert generate_spy.calls, "Ada must reach generate, not the class-3 refuse"
+
+
+def test_run_allows_sm120_experimental() -> None:
+    """RTX 5070 Ti (sm_120) is generate-allowed; doctor exit 3 is Hopper/SM100."""
+    with tempfile.TemporaryDirectory() as tmp:
+        model = _fake_model(Path(tmp), "qwen2")
+        fake_chr = Path(tmp) / "x.nf4.chr"
+        fake_chr.write_bytes(b"CHR0")
+        err = io.StringIO()
+        original_probe = run_mod.probe
+        original_resolve = run_mod._resolve_weights
+        original_generate = run_mod._generate
+        resolve_spy = _Spy((fake_chr, 0))
+        generate_spy = _Spy(0)
+        run_mod.probe = _Spy(  # type: ignore[assignment]
+            _ship(
+                capability=(12, 0),
+                device_name="NVIDIA GeForce RTX 5070 Ti",
+                vram_total_mib=16384,
+                sm_count=70,
+            )
+        )
+        run_mod._resolve_weights = resolve_spy  # type: ignore[assignment]
+        run_mod._generate = generate_spy  # type: ignore[assignment]
+        try:
+            with redirect_stderr(err):
+                code = run_mod.run(_RunArgs(model=str(model)))
+        finally:
+            run_mod.probe = original_probe  # type: ignore[assignment]
+            run_mod._resolve_weights = original_resolve  # type: ignore[assignment]
+            run_mod._generate = original_generate  # type: ignore[assignment]
+    assert code == 0
+    assert "experimental" in err.getvalue() or "SM120" in err.getvalue()
+    assert generate_spy.calls, "SM120 must reach generate, not the class-3 refuse"
 
 
 def test_both_fit_only_when_a_bf16_copy_would_also_fit() -> None:
@@ -1357,6 +1470,46 @@ def test_pick_max_seq_and_overflow() -> None:
     assert chat_mod.pick_max_seq(None, agent=True, vram_mib=8192, overflow=False) == 2048
     assert chat_mod.pick_max_seq(None, agent=True, vram_mib=12288, overflow=True) == 2048
     assert chat_mod.pick_max_seq(None, agent=True, vram_mib=None, overflow=False) == 2048
+
+
+def test_doctor_exports_ship_capability() -> None:
+    from gpu.arch_family import MEASURED_CAPABILITY
+    from gpu.cli.doctor import SHIP_CAPABILITY
+
+    assert SHIP_CAPABILITY == MEASURED_CAPABILITY == (8, 6)
+
+
+def test_sm_count_accepts_torch_and_cuda_names() -> None:
+    from gpu.cli.doctor import _sm_count
+
+    assert _sm_count(SimpleNamespace(multi_processor_count=70)) == 70
+    assert _sm_count(SimpleNamespace(multiProcessorCount=70)) == 70
+    assert _sm_count(SimpleNamespace()) is None
+    assert _sm_count(SimpleNamespace(multi_processor_count=0)) is None
+
+
+def test_chat_prompt_bindings_edit_keys() -> None:
+    kb = chat_mod.chat_prompt_bindings()
+    names = {
+        tuple(getattr(k, "value", k) for k in b.keys) for b in kb.bindings
+    }
+    assert ("c-h",) in names
+    assert ("left",) in names
+    assert ("right",) in names
+    assert ("delete",) in names
+    assert ("c-m",) in names
+
+
+def test_slash_completer_only_on_slash() -> None:
+    from prompt_toolkit.completion import CompleteEvent
+    from prompt_toolkit.document import Document
+
+    c = chat_mod.slash_completer()
+    idle = CompleteEvent()
+    assert list(c.get_completions(Document("hello"), idle)) == []
+    assert list(c.get_completions(Document(""), idle)) == []
+    hits = [h.text for h in c.get_completions(Document("/he"), idle)]
+    assert "/help" in hits
 
 
 def test_format_status_session_suffix() -> None:
@@ -2073,7 +2226,7 @@ def test_setup_dry_run_does_not_pip() -> None:
     assert code == 0
     assert called == []
     text = out.getvalue() + err.getvalue()
-    assert "torch" in text and "download.pytorch.org/whl/cu124" in text
+    assert "torch" in text and setup_mod.torch_wheel_index() in text
     assert '".[hub,chat]"' in text or ".[hub,chat]" in text
     assert "setup --chr-only" in text
     assert "setup --kernel-only" in text
@@ -2506,6 +2659,37 @@ def test_nvcc_rank_prefers_cuda_124() -> None:
     c = Path("/cuda/v11.8/bin/nvcc")
     assert _nvcc_rank(a) < _nvcc_rank(b)
     assert _nvcc_rank(a) < _nvcc_rank(c)
+
+
+def test_nvcc_rank_sm120_prefers_128_over_124() -> None:
+    from gpu.cuda_env import _nvcc_rank
+
+    a = Path("/cuda/v12.4/bin/nvcc")
+    b = Path("/cuda/v12.8/bin/nvcc")
+    assert _nvcc_rank(b, prefer_sm120=True) < _nvcc_rank(a, prefer_sm120=True)
+    assert _nvcc_rank(a) < _nvcc_rank(b)
+
+
+def test_setup_sm120_env_selects_cu128() -> None:
+    os.environ["DEEPFOLD_TORCH_INDEX"] = "cu128"
+    try:
+        lines = "\n".join(setup_mod.plan_lines())
+        assert "whl/cu128" in lines
+        assert "whl/cu124" not in lines
+    finally:
+        os.environ.pop("DEEPFOLD_TORCH_INDEX", None)
+
+
+def test_neighbor_setup_scripts_can_select_cu128() -> None:
+    """Friend's path is scripts/setup.*, not deepfold setup. Must not pin only cu124."""
+    ps1 = (_REPO / "scripts" / "setup.ps1").read_text(encoding="utf-8")
+    sh = (_REPO / "scripts" / "setup.sh").read_text(encoding="utf-8")
+    for text, name in ((ps1, "setup.ps1"), (sh, "setup.sh")):
+        assert "whl/cu124" in text, name
+        assert "whl/cu128" in text, name
+        assert "nvidia-smi" in text, name
+        assert "DEEPFOLD_PREFER_SM120_NVCC" in text, name
+        assert "50[0-9]" in text or "rtx" in text.lower(), name
 
 
 def test_pull_unknown_id_does_not_open_files() -> None:

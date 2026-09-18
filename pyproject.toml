@@ -9,10 +9,12 @@
 # which cannot run this kernel, so declaring it would install a lie:
 #
 #   pip install torch --index-url https://download.pytorch.org/whl/cu124
+#   pip install torch --index-url https://download.pytorch.org/whl/cu128
 #
 # We do not install the NVIDIA driver. Missing `chr` is built with a portable
 # Go from go.dev. Missing NF4 kernel: Windows setup uses winget for VS 2022
-# Build Tools (C++) and CUDA 12.4, then compiles `gpu/nf4`.
+# Build Tools (C++) and CUDA 12.4 (Ampere) or 12.8 (RTX 50), then compiles
+# `gpu/nf4`. `scripts/setup.*` pick the torch index from nvidia-smi.
 
 [build-system]
 requires = ["setuptools>=68"]

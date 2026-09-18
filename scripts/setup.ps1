@@ -2,7 +2,7 @@
 # Does not touch conda env torch-gpu. Does not install the NVIDIA driver.
 # If chr is missing, Python fetches portable Go 1.22 from go.dev (not MSI).
 # If the NF4 kernel is missing, winget-installs VS 2022 Build Tools (C++) and
-# CUDA Toolkit 12.4 when needed, then compiles gpu/nf4.
+# CUDA Toolkit (12.4 on Ampere; 12.8 then 12.4 on RTX 50 / 5070 Ti).
 #
 #   Set-ExecutionPolicy -Scope Process Bypass
 #   powershell -File scripts/setup.ps1
@@ -15,12 +15,56 @@ function Test-Python311([string]$Exe) {
     return ($LASTEXITCODE -eq 0)
 }
 
+function Get-TorchIndex {
+    $cu124 = "https://download.pytorch.org/whl/cu124"
+    $cu128 = "https://download.pytorch.org/whl/cu128"
+    $raw = [string]$env:DEEPFOLD_TORCH_INDEX
+    if ($raw) {
+        $raw = $raw.Trim()
+        if ($raw -like "http*") { return $raw }
+        $key = $raw.ToLowerInvariant()
+        if ($key -in @("cu128", "cu129", "sm120")) { return $cu128 }
+        if ($key -in @("cu124", "ampere")) { return $cu124 }
+    }
+    $smiExe = $null
+    $hit = Get-Command nvidia-smi -ErrorAction SilentlyContinue
+    if ($hit) {
+        $smiExe = $hit.Source
+    } else {
+        $sys = Join-Path $env:SystemRoot "System32\nvidia-smi.exe"
+        if (Test-Path $sys) { $smiExe = $sys }
+    }
+    if ($smiExe) {
+        $row = $null
+        try {
+            $row = & $smiExe --query-gpu=name,compute_cap --format=csv,noheader 2>$null |
+                Select-Object -First 1
+        } catch {
+            $row = $null
+        }
+        if (-not $row) {
+            try {
+                $row = & $smiExe --query-gpu=name --format=csv,noheader 2>$null |
+                    Select-Object -First 1
+            } catch {
+                $row = $null
+            }
+        }
+        if ($row -match "(?i)rtx\s*50[0-9]{2}" -or $row -match "(?:,\s*)?12\.[01]\s*$") {
+            $env:DEEPFOLD_PREFER_SM120_NVCC = "1"
+            $env:DEEPFOLD_TORCH_INDEX = "cu128"
+            return $cu128
+        }
+    }
+    return $cu124
+}
+
 $Repo = Split-Path -Parent $PSScriptRoot
 Set-Location $Repo
 
 $Venv = Join-Path $Repo ".venv"
 $VenvPy = Join-Path $Venv "Scripts\python.exe"
-$TorchIndex = "https://download.pytorch.org/whl/cu124"
+$TorchIndex = Get-TorchIndex
 
 if (-not (Test-Path $VenvPy)) {
     Write-Host "Creating venv at $Venv"
@@ -47,6 +91,7 @@ if (-not (Test-Python311 $VenvPy)) {
 }
 
 Write-Host "Using $VenvPy"
+Write-Host "torch index: $TorchIndex"
 & $VenvPy -m pip install --upgrade pip
 if ($LASTEXITCODE -ne 0) { throw "pip upgrade failed (exit $LASTEXITCODE)" }
 & $VenvPy -m pip install torch --index-url $TorchIndex
@@ -60,7 +105,7 @@ Write-Host "Building chr (PATH Go 1.22+ or portable Go 1.22 from go.dev)"
 & $VenvPy -m gpu.cli setup --chr-only
 if ($LASTEXITCODE -ne 0) { throw "chr build failed (exit $LASTEXITCODE)" }
 
-Write-Host "NF4 kernel: VS Build Tools (C++) + CUDA 12.4 nvcc if missing, then compile"
+Write-Host "NF4 kernel: VS Build Tools (C++) + CUDA nvcc if missing, then compile"
 & $VenvPy -m gpu.cli setup --kernel-only
 if ($LASTEXITCODE -ne 0) { throw "nf4 kernel build failed (exit $LASTEXITCODE)" }
 

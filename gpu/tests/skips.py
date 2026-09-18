@@ -8,6 +8,7 @@ records a function that returns as **passed** -- a green tick for a check that
 never ran is worse than a red one.
 
 The kernel ships as an Ampere-family fatbinary (sm_80 / sm_86 / sm_89 + PTX).
+SM120 (GeForce RTX 50) launches that image via native cubin or PTX JIT.
 "CUDA is available" and "this card can launch the shipped kernel" are two
 different questions.
 
@@ -20,7 +21,7 @@ from __future__ import annotations
 import importlib.util
 from typing import NoReturn
 
-from gpu.ampere_gencode import FAMILY_CAPABILITIES, KERNEL_GENCODE, MEASURED_CAPABILITY
+from gpu.ampere_gencode import GENERATE_CAPABILITIES, KERNEL_GENCODE, MEASURED_CAPABILITY
 
 __all__ = [
     "Skip",
@@ -77,10 +78,10 @@ def ampere_reason() -> str | None:
         cap = tuple(torch.cuda.get_device_capability(0))
     except Exception as exc:  # noqa: BLE001
         return f"device capability unreadable: {type(exc).__name__}: {exc}"
-    if cap not in FAMILY_CAPABILITIES:
+    if cap not in GENERATE_CAPABILITIES:
         return (
             f"this GPU is sm_{cap[0]}{cap[1]}; the shipped kernel is Ampere-family "
-            f"({KERNEL_GENCODE})"
+            f"plus SM120 ({KERNEL_GENCODE})"
         )
     return None
 

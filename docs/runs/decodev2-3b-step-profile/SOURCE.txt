@@ -1,0 +1,10 @@
+Exclusive Decode V2 3B greedy-step profile, 2026-09-18.
+nsys not installed. ncu.BAT is Nsight Compute 2024.2 (isolated GEMM already under docs/runs/ncu).
+CUDA graph-captured events cannot elapsed_time on this WDDM stack (invalid argument).
+Kineto/torch.profiler on graph replay listed only aten::fill_.
+Live run: python gpu/decodev2/profile_step.py --slug qwen25-3b --backend gemv --max-seq 2048
+C:\dev\models\runs\decodev2-qwen25-3b-step-profile-20260918-141331
+Graph CUDA-event windows (32 steps, no .item()): 5.306, 5.268, 4.239, 4.336 ms/step; median 4.802 (208 tok/s). Host-read 4.737 (211 tok/s). WDDM scatter; ignore-EOS plate remains 197/199.
+L2-hot live kernels x 36 layers reconstruct 5.677 ms (graph is faster: gap -0.875). Mix: SwiGLU 1.50 (26%), attn 0.99 (18%), down 0.93 (16%), RMS 0.67 (12%, launch-inflated), o 0.55, qkv 0.52, lm_head 0.29 (5%), embed 0.22.
+Once: rms 9.1µs, qkv 14.3, attn 27.6, o 15.4, swiglu 41.6, down 25.9, lm_head 288.6. Isolated bench_gemv down 69µs / lm_head 393µs are the colder shapes.
+Do not treat Task Manager 70-85% as occupancy. Do not say faster than Ollama.

@@ -14,6 +14,7 @@ import torch
 
 from gpu.tests.nf4_oracle import decode_nf4, matmul_f32
 
+from .embed import PackedEmbed, bind_embed
 from .plan import ArchSpec
 from .synth import Nf4Matrix, SynthLayer, SynthModel
 
@@ -21,6 +22,7 @@ __all__ = [
     "DeviceLinear",
     "DeviceLayer",
     "DeviceWeights",
+    "PackedEmbed",
     "linear_backend",
     "nf4_linear",
     "set_linear_backend",
@@ -151,7 +153,7 @@ class DeviceLayer:
 @dataclass
 class DeviceWeights:
     spec: ArchSpec
-    embed: torch.Tensor
+    embed: torch.Tensor | PackedEmbed
     final_norm: torch.Tensor
     lm_head: DeviceLinear
     layers: list[DeviceLayer]
@@ -192,7 +194,10 @@ class DeviceWeights:
 
     @classmethod
     def from_loaded(cls, model, spec: ArchSpec, dtype: torch.dtype = torch.bfloat16) -> "DeviceWeights":
-        """Bind Decode V2 linears to a ``load_model`` tree. Packed buffers are views."""
+        """Bind Decode V2 linears to a ``load_model`` tree. Packed buffers are views.
+
+        Embed stays NF4 rows (``PackedEmbed``). There is no dense vocab table.
+        """
         plan = getattr(model, "deepfold_plan", None)
         if plan is None:
             raise RuntimeError("model has no deepfold_plan; call gpu.host.load_model first")
@@ -219,7 +224,7 @@ class DeviceWeights:
                     down=lin(g["down"]),
                 )
             )
-        embed = _materialize_embed(get(plan.embed), spec, dtype)
+        embed = bind_embed(get(plan.embed), spec, dtype)
         final_norm = get(plan.final_norm).weight.to(dtype=dtype)
         return cls(
             spec=spec,
@@ -228,28 +233,3 @@ class DeviceWeights:
             lm_head=lin(plan.lm_head),
             layers=layers,
         )
-
-
-def _materialize_embed(mod, spec: ArchSpec, dtype: torch.dtype) -> torch.Tensor:
-    """Dense ``[vocab, hidden]`` for graph-safe gather. 3B NF4 embed is ~594 MiB."""
-    packed = getattr(mod, "packed", None)
-    scale = getattr(mod, "scale", None)
-    if packed is not None and int(packed.numel()) > 0:
-        from types import SimpleNamespace
-
-        from gpu.host.embedding import dequant_table
-
-        m = int(getattr(mod, "num_embeddings", spec.vocab))
-        k = int(getattr(mod, "embedding_dim", spec.hidden))
-        if (m, k) != (spec.vocab, spec.hidden):
-            raise ValueError(f"embed [{m},{k}] != spec [{spec.vocab},{spec.hidden}]")
-        return dequant_table(
-            SimpleNamespace(packed=packed, scale=scale, M=m, K=k), dtype=dtype
-        )
-    weight = getattr(mod, "weight", None)
-    if weight is None or int(weight.numel()) == 0:
-        raise RuntimeError("embed has neither NF4 packed rows nor a dense weight")
-    table = weight.to(dtype=dtype)
-    if tuple(table.shape) != (spec.vocab, spec.hidden):
-        raise ValueError(f"embed weight {tuple(table.shape)} != {(spec.vocab, spec.hidden)}")
-    return table

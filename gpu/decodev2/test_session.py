@@ -189,6 +189,15 @@ def test_from_model_needs_plan() -> None:
     raise AssertionError("missing plan must refuse")
 
 
+def test_bind_needs_plan() -> None:
+    try:
+        DecodeV2Loop.bind(SimpleNamespace(config=None), max_seq=8)
+    except RuntimeError as exc:
+        assert str(exc).startswith("decodev2:")
+        return
+    raise AssertionError("bind without plan must refuse")
+
+
 TESTS = [
     value
     for name, value in sorted(globals().items())

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import torch
 
 from .arena import Arena
+from .embed import PackedEmbed
 from .kv import GraphSafeKV
 from .plan import ArchSpec
 from .rope import rope_tables_torch
@@ -26,26 +27,34 @@ class DecodeState:
     arena: Arena
     cos: torch.Tensor
     sin: torch.Tensor
-    embed: torch.Tensor
+    embed: torch.Tensor | PackedEmbed
     eos_id: torch.Tensor
 
     @classmethod
     def allocate(
         cls,
         spec: ArchSpec,
-        embed: torch.Tensor,
+        embed: torch.Tensor | PackedEmbed,
         *,
         device: torch.device | str | None = None,
         dtype: torch.dtype = torch.bfloat16,
         cos: torch.Tensor | None = None,
         sin: torch.Tensor | None = None,
     ) -> "DecodeState":
-        if embed.ndim != 2 or embed.shape != (spec.vocab, spec.hidden):
-            raise ValueError(f"embed shape {tuple(embed.shape)} != {(spec.vocab, spec.hidden)}")
-        if device is None:
-            device = embed.device
+        if isinstance(embed, PackedEmbed):
+            if embed.shape != (spec.vocab, spec.hidden):
+                raise ValueError(f"embed shape {embed.shape} != {(spec.vocab, spec.hidden)}")
+            if device is None:
+                device = embed.device
+            held: torch.Tensor | PackedEmbed = embed
+        else:
+            if embed.ndim != 2 or embed.shape != (spec.vocab, spec.hidden):
+                raise ValueError(f"embed shape {tuple(embed.shape)} != {(spec.vocab, spec.hidden)}")
+            if device is None:
+                device = embed.device
+            device = torch.device(device)
+            held = embed.to(device=device, dtype=dtype)
         device = torch.device(device)
-        embed = embed.to(device=device, dtype=dtype)
         valid_len = torch.zeros((), dtype=torch.int32, device=device)
         kv = GraphSafeKV(spec, device=device, dtype=dtype, valid_len=valid_len)
         arena = Arena.allocate(spec, device=device, dtype=dtype)
@@ -67,7 +76,7 @@ class DecodeState:
             arena=arena,
             cos=cos,
             sin=sin,
-            embed=embed,
+            embed=held,
             eos_id=torch.tensor(spec.eos_id, dtype=torch.int64, device=device),
         )
 

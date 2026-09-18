@@ -53,11 +53,14 @@ def gate_no_torch() -> None:
 def gate_tokens() -> None:
     from gpu.lab.decodev2_plate import (
         COMING_SOON,
+        OLLAMA_14B_HARD,
+        OLLAMA_14B_HARD_TOK,
         OLLAMA_20B_HARD,
         OLLAMA_20B_HARD_TOK,
         OLLAMA_3B_HARD,
         OLLAMA_3B_HARD_TOK,
         V2_14B_HARD,
+        V2_14B_HARD_TOK,
         V2_20B_HARD,
         V2_20B_HARD_TOK,
         V2_3B_HARD,
@@ -66,10 +69,12 @@ def gate_tokens() -> None:
 
     check("V2 3B hard is 8/12 at 190.9", V2_3B_HARD == "8/12" and V2_3B_HARD_TOK == 190.9, "")
     check("V2 14B hard is 11/12", V2_14B_HARD == "11/12", V2_14B_HARD)
-    check("V2 20B hard is 9/12 at 35.2", V2_20B_HARD == "9/12" and V2_20B_HARD_TOK == 35.2, "")
+    check("V2 20B hard is 9/12 at 39.0", V2_20B_HARD == "9/12" and V2_20B_HARD_TOK == 39.0, "")
     check("Ollama 3B hard is 7/12 at 197.2", OLLAMA_3B_HARD == "7/12" and OLLAMA_3B_HARD_TOK == 197.2, "")
+    check("Ollama 14B hard is 10/12 at 66.2", OLLAMA_14B_HARD == "10/12" and OLLAMA_14B_HARD_TOK == 66.2, "")
     check("Ollama 20B hard is 9/12 at 13.2", OLLAMA_20B_HARD == "9/12" and OLLAMA_20B_HARD_TOK == 13.2, "")
     check("3B V2 hard is not faster than Ollama", V2_3B_HARD_TOK < OLLAMA_3B_HARD_TOK, "")
+    check("14B V2 hard is not faster than Ollama", V2_14B_HARD_TOK < OLLAMA_14B_HARD_TOK, "")
     check("Coming soon label is frozen", COMING_SOON == "Coming soon", COMING_SOON)
 
 
@@ -85,9 +90,9 @@ def gate_honesty() -> None:
     check("quotes 8/12 and 7/12", "8/12" in text and "7/12" in text, "")
     check("quotes 11/12 and both 9/12", "11/12" in text and "9/12" in text, "")
     check("quotes V2 190.9 and Ollama 197.2", "190.9" in text and "197.2" in text, "")
-    check("quotes V2 54.8", "54.8" in text, "")
-    check("quotes V2 35.2 and Ollama 13.2", "35.2" in text and "13.2" in text, "")
-    check("14B Ollama is Coming soon", "Coming soon" in text, "")
+    check("quotes V2 54.8 and Ollama 66.2", "54.8" in text and "66.2" in text, "")
+    check("quotes Ollama 14B 10/12", "10/12" in text, "")
+    check("quotes V2 39.0 and Ollama 13.2", "39.0" in text and "13.2" in text, "")
     check("mentions median 184.5", "184.5" in text, "")
     check("does not say faster than Ollama", "faster than Ollama" not in text.lower(), "")
     check("20B V2 is not ignore-EOS 40", "not ignore-EOS 40" in text, "")

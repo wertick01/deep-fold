@@ -270,8 +270,9 @@ quote the overlapping Ollama dump **5.95**. 14B V2 is not faster than Ollama
 or llama.cpp. 20B: Ollama **11.53** / llama.cpp **11.87** (ctx 2048) vs Decode
 V2 **40** (`max_seq=2048`) vs TokenLoop long **4.59**. Do not quote 20B
 device-window **25.6** / **20.7** or overlapping 20B jobs. Hard-12 20B mean
-**35.2** is not that plateau. **Coming soon:** Ollama 14B hard-12, llama.cpp
-hard-12, 3B Nsight 70–85%.
+**39.0** is not that plateau. Hard-12 14B: V2 **11/12** @ **54.8** vs Ollama
+**10/12** @ **66.2** (median **62.0**). **Coming soon:** llama.cpp hard-12, 3B
+Nsight 70–85%.
 
 Nsight snippets under `docs/runs/ncu/` are still `chr_nf4_gemm` occupancy,
 not a Decode V2 forward.

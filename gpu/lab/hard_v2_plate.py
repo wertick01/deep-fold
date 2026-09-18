@@ -5,7 +5,7 @@ Same visual language as :mod:`gpu.lab.decodev2_plate`. Matplotlib Agg. No torch.
     python -m gpu.lab.hard_v2_plate --redraw
 
 Writes ``docs/img/hard-v2-ollama.png``. Numbers are WAVE-frozen in
-:mod:`gpu.lab.decodev2_plate`. llama.cpp hard-12 and Ollama 14B stay Coming soon.
+:mod:`gpu.lab.decodev2_plate`. llama.cpp hard-12 stays Coming soon.
 """
 
 from __future__ import annotations
@@ -22,6 +22,9 @@ import matplotlib.pyplot as plt
 from .decodev2_plate import (
     COMING_SOON,
     OLLAMA,
+    OLLAMA_14B_HARD,
+    OLLAMA_14B_HARD_MEDIAN,
+    OLLAMA_14B_HARD_TOK,
     OLLAMA_20B_HARD,
     OLLAMA_20B_HARD_MEDIAN,
     OLLAMA_20B_HARD_TOK,
@@ -77,7 +80,7 @@ def default_png(repo: str | Path | None = None) -> Path:
 
 
 def _fig_h() -> float:
-    return _M_TOP + 0.92 + 0.10 + 2.95 + 0.10 + 1.72 + _M_BOTTOM
+    return _M_TOP + 0.92 + 0.10 + 2.95 + 0.10 + 1.88 + _M_BOTTOM
 
 
 def _header(s: _Sheet, y: float) -> float:
@@ -89,9 +92,9 @@ def _header(s: _Sheet, y: float) -> float:
     s.text(
         x0 + 0.14,
         y + 0.42,
-        "Independent turns  ·  256 new tokens  ·  ctx / max_seq 2048  ·  greedy  ·  mean tok/s over 12 items\n"
+        f"Independent turns  ·  256 new tokens  ·  ctx / max_seq 2048  ·  greedy  ·  mean tok/s over 12 items\n"
         "Decode V2 is CHR0 NF4 GEMV. Ollama 0.34.0 is Q4_K_M. llama.cpp hard-12 is Coming soon.\n"
-        "Not the ignore-EOS 64 plateau. 20B V2 first-item TTFT is WDDM, not 40 tok/s.",
+        f"Not the ignore-EOS 64 plateau. Packed 20B hard mean {V2_20B_HARD_TOK:.1f}; item-1 TTFT 434 ms (was 294 s at the cap).",
         fs=T_SUB,
         color=INK_SOFT,
         spacing=1.28,
@@ -108,7 +111,7 @@ def _table(s: _Sheet, y: float) -> float:
     s.text(
         x0 + 0.12,
         y + 0.28,
-        "Same 12-item fixture. tok/s is the mean of per-item decode_tok_s. 14B Ollama is Coming soon.",
+        "Same 12-item fixture. tok/s is the mean of per-item decode_tok_s. llama.cpp hard-12 is Coming soon.",
         fs=T_TINY,
         color=INK_SOFT,
     )
@@ -152,8 +155,8 @@ def _table(s: _Sheet, y: float) -> float:
             "Qwen2.5-14B",
             V2_14B_HARD,
             f"{V2_14B_HARD_TOK:.1f}",
-            COMING_SOON,
-            COMING_SOON,
+            OLLAMA_14B_HARD,
+            f"{OLLAMA_14B_HARD_TOK:.1f}",
         ),
         (
             "InternLM2.5-20B",
@@ -200,7 +203,7 @@ def _table(s: _Sheet, y: float) -> float:
 def _footer(s: _Sheet, y: float) -> float:
     x0 = _M_LEFT
     w = FIG_W - _M_LEFT - _M_RIGHT
-    h = 1.72
+    h = 1.88
     s.rect(x0, y, w, h, fc=BAND, ec=RULE, lw=0.6)
     s.text(x0 + 0.12, y + 0.08, "Honesty  ·  this sheet", fs=T_CLAIM, weight="bold")
     s.text(
@@ -208,10 +211,11 @@ def _footer(s: _Sheet, y: float) -> float:
         y + 0.30,
         f"Ollama 3B mean {OLLAMA_3B_HARD_TOK:.1f} is pulled up by logic-yesno (2 tokens, 330 tok/s); median {OLLAMA_3B_HARD_MEDIAN:.1f}. "
         f"V2 3B {V2_3B_HARD_TOK:.1f} is the same 12-item mean.\n"
-        f"3B V2 {V2_3B_HARD} vs Ollama {OLLAMA_3B_HARD}. 20B quality is tied {V2_20B_HARD}; V2 {V2_20B_HARD_TOK:.1f} vs Ollama {OLLAMA_20B_HARD_TOK:.1f} (median {OLLAMA_20B_HARD_MEDIAN:.1f}).\n"
+        f"3B V2 {V2_3B_HARD} vs Ollama {OLLAMA_3B_HARD}. 14B V2 {V2_14B_HARD} · {V2_14B_HARD_TOK:.1f} vs Ollama {OLLAMA_14B_HARD} · {OLLAMA_14B_HARD_TOK:.1f} (median {OLLAMA_14B_HARD_MEDIAN:.1f}).\n"
+        f"20B quality is tied {V2_20B_HARD}; V2 {V2_20B_HARD_TOK:.1f} vs Ollama {OLLAMA_20B_HARD_TOK:.1f} (median {OLLAMA_20B_HARD_MEDIAN:.1f}).\n"
         f"20B V2 {V2_20B_HARD_TOK:.1f} is not ignore-EOS 40. Do not say faster than Ollama.\n"
-        f"{COMING_SOON}: Ollama 14B hard-12, llama.cpp hard-12 (3B / 14B / 20B), 3B Nsight 70–85%.\n"
-        "Evidence: docs/runs/hard-decodev2-3b|14b|20b/ and docs/runs/ollama-hard-3b|20b/. "
+        f"{COMING_SOON}: llama.cpp hard-12 (3B / 14B / 20B), 3B Nsight 70–85%.\n"
+        "Evidence: docs/runs/hard-decodev2-3b|14b|20b/ and docs/runs/ollama-hard-3b|14b|20b/. "
         "Redraw: python -m gpu.lab.hard_v2_plate --redraw",
         fs=T_TINY,
         color=INK,

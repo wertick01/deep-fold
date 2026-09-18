@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import torch
 
+from .embed import gather_embed
 from .linear import DeviceLayer, DeviceLinear, DeviceWeights, linear_backend, nf4_linear
 from .ops import attend, rms, rope_qkv, split_qkv, swiglu
 from .state import DecodeState
@@ -161,7 +162,7 @@ def _mlp_down_in(state: DecodeState, layer: DeviceLayer, h: torch.Tensor) -> Non
 def forward_decode(state: DecodeState, weights: DeviceWeights) -> None:
     spec = state.spec
     ar = state.arena
-    x = _into(ar.x, weights.embed.index_select(0, state.token.reshape(1)))
+    x = _into(ar.x, gather_embed(weights.embed, state.token.reshape(1), dtype=ar.x.dtype))
     for li, layer in enumerate(weights.layers):
         h = _rms_into(x, layer.norm1, spec.rms_eps, ar.h)
         _qkv_into_arena(state, layer, h)

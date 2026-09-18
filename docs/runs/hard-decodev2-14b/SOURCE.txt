@@ -1,5 +1,5 @@
 Exclusive Decode V2 hard-12, one process. Two overlapping 14B workers were killed first.
 Independent turns, max_seq=2048, max_new=256. GPU idle ~449 MiB before start.
 Accuracy 11/12 (92%). Mean decode 54.8 tok/s. Mean TTFT 693 ms.
-TokenLoop NF4 hard was 10/12 at 6.59 tok/s. Ollama 14B hard not run yet.
+TokenLoop NF4 hard was 10/12 at 6.59 tok/s. Ollama 14B hard is 10/12 at 66.2.
 Do not quote the overlapping double-worker dump.

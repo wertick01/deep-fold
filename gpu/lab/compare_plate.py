@@ -161,11 +161,12 @@ def _hbar(
     color: str,
     name: str,
     caption: str,
+    label_w: float = 1.72,
 ) -> None:
     s.text(x, y + 0.02, name, fs=T_SMALL, weight="bold")
     s.text(x, y + 0.20, caption, fs=T_TINY, color=INK_SOFT)
-    bar_x = x + 1.72
-    bar_w = w - 2.55
+    bar_x = x + label_w
+    bar_w = w - label_w - 0.83
     s.rect(bar_x, y + 0.06, bar_w, 0.22, fc=CHIP, ec=RULE, lw=0.45)
     fill = max(0.04, bar_w * (value / vmax))
     s.rect(bar_x, y + 0.06, fill, 0.22, fc=color, ec=color, lw=0.0)

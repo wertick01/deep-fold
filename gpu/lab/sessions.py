@@ -10,15 +10,19 @@ Hard constraints, enforced by the shape of this module:
 * **Never both models resident.** ``run_both`` finishes the BF16 session --
   including unload -- before the NF4 load starts, and refuses to start NF4 on a
   card that is still full.
-* ``torch.cuda.empty_cache()`` lives in :func:`unload`, which runs *between*
-  sessions. It is never called inside a token loop.
+* ``torch.cuda.empty_cache()`` lives in :func:`unload` (between sessions).
+  Decode V2 ``finish(reclaim=True)`` only ``gc.collect()``s after the HF tree
+  is dropped, before KV. ``empty_cache`` there unmapped the 20B working set
+  on WDDM. It is never called inside a token loop.
 * **Independent turns.** Every message is a fresh single-user conversation with
   the KV cache reset, so every TTFT is a clean prefill and the two codecs stay
   comparable. Recorded in ``summary.notes``.
 
 Timing is split the same way on both paths: ``prefill_ms`` is the time to the
 first generated token, ``decode_tok_s`` counts only the tokens after it. Prefill
-is never averaged into tok/s.
+is never averaged into tok/s. On the NF4 path ``load_s`` is CHR load,
+``warmup_ms`` is the eager probe plus graph capture (not a user request), and
+those must not be folded into tok/s.
 """
 
 from __future__ import annotations
@@ -59,6 +63,16 @@ _REPO = Path(__file__).resolve().parents[2]
 # still be holding a model.
 RELEASED_BELOW_PEAK_MIB = 1500.0
 IDLE_HEADROOM_MIB = 600.0
+
+
+def _card_mib() -> int:
+    """nvidia-smi total, else the 3080 12 GB card of record."""
+    try:
+        from gpu.cli.codec import detect_vram_mib
+
+        return int(detect_vram_mib())
+    except Exception:
+        return 12288
 
 
 @dataclass
@@ -841,6 +855,7 @@ def run_nf4(
     tokenizer = None
     loop = None
     load_s = None
+    warm_ms = None
     vram_after_smi = None
     vram_after_torch = None
     weight_mib = None
@@ -876,16 +891,23 @@ def run_nf4(
         )
 
         chosen, why = pick_executor(
-            executor, report, getattr(model, "deepfold_plan", None)
+            executor,
+            report,
+            getattr(model, "deepfold_plan", None),
+            max_seq=int(max_seq),
+            vram_mib=_card_mib(),
+            config=getattr(model, "config", None),
         )
         if str(executor) == "decodev2" and why is not None:
             raise RuntimeError(why)
         if chosen == "decodev2":
-            loop = DecodeV2Loop.from_model(model, max_seq=max_seq)
-            # Packed NF4 stays aliased on DeviceWeights. Drop the HF module so
-            # 20B is not packed-embed + dense-embed + KV at the 12 GB cap.
+            bound = DecodeV2Loop.bind(model, max_seq=max_seq)
+            # Packed aliases stay on BoundV2. Drop the HF tree *before* KV
+            # (384 MiB at max_seq=2048). gc.collect only — empty_cache at the
+            # 12 GB cap paged the NF4 working set out to WDDM.
             model = None
             gc.collect()
+            loop = DecodeV2Loop.finish(bound, reclaim=True)
         else:
             from gpu.loop import TokenLoop
 
@@ -985,9 +1007,12 @@ def run_nf4(
             kv_mib=kv_mib,
             notes=(
                 f"gpu.host.load_model + {engine}, executor={executor}, "
-                f"graph={graph_mode}, "
+                f"graph={graph_mode}, warmup_ms={warm_ms:.0f}, "
                 f"max_seq={max_seq}, prefill_chunk={prefill_chunk}; {_turns_note(conversation)}; "
-                "ttft = prefill of the whole prompt; no from_pretrained, no transformers.generate"
+                "load_s is chr load; warmup_ms is eager probe + graph capture, not a user TTFT; "
+                "message prefill_ms is that turn's first token; decode_tok_s is steps after first; "
+                "embed stays NF4 rows (no dense vocab table); "
+                "no from_pretrained, no transformers.generate"
             ),
         )
         return finished if out_dir is None else _write_single(finished, out_dir)

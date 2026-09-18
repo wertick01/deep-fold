@@ -23,7 +23,9 @@ Python does tokenize and I/O. One greedy decode token is a CUDA graph replay
 against static arena pointers. Position and KV length live in GPU buffers, not
 Python ints captured into the graph.
 
-CHR/NF4 weights stay packed. N=1 linears are CUDA-core GEMV (`chr_nf4_gemv`),
+CHR/NF4 weights stay packed. Embed gather decodes only the looked-up rows
+(`dequant_nf4_rows`); Decode V2 does not densify a `[vocab, hidden]` table.
+N=1 linears are CUDA-core GEMV (`chr_nf4_gemv`),
 not tensor-core GEMM. MMA remains available (`CHR_NF4_DECODE=mma`) and is what
 TokenLoop uses.
 
@@ -319,6 +321,11 @@ does not fit; ids dumped first (`--tokenloop-ids-only`).
   load-only `decodev2-internlm20b-load-20260917`.
 - Overlapping reruns (7.37/8.81, 0.90/1.49, 10.5/14.6, 7.7/8.8) are WDDM
   paging. Do not quote them.
+- Hard-12 packed NF4 rows (2026-09-18 reheat, `--interval 0`): **9/12**,
+  mean **39.0** tok/s, item-1 TTFT **434 ms** / **39.3** tok/s, mean TTFT
+  **552 ms**, warmup **585 ms**. `empty_cache` after drop HF is forbidden at
+  this cap. Evidence: [`docs/runs/hard-decodev2-20b/`](runs/hard-decodev2-20b/).
+  The dense-embed plate (35.2 tok/s, item-1 294 s) is not current decode.
 - Not a product switch. Do not start BF16 20B/32B.
 
 ### CLI (`--executor auto`) — 2026-09-17
@@ -327,8 +334,8 @@ Default `deepfold run` / `chat` is `--executor auto`: resident NF4
 (3B/14B/20B) uses `gpu/decodev2/session.py`; overflow / VQ / CopyRing stay
 on TokenLoop. Force MMA with `--executor tokenloop`; force V2 (or refuse)
 with `--executor decodev2`. **In progress:** TTY chrome / agent layout
-(neighbor chat). Packed embed and Nsight are still later. Do not start a GPU
-plate from this wiring.
+(neighbor chat). Packed embed is the 20B hard path. Nsight is still later.
+Do not start a GPU plate from this wiring.
 
 ### Hard-12 vs Ollama (2026-09-18)
 
@@ -338,18 +345,18 @@ Independent turns, `max_new=256`, `max_seq=2048`, same fixture as
 | Model | Decode V2 | Ollama Q4_K | llama.cpp |
 |---|---|---|---|
 | 3B | **8/12** · **190.9** tok/s · TTFT **175** ms | **7/12** · **197.2** tok/s | Coming soon |
-| 14B | **11/12** · **54.8** tok/s · TTFT **693** ms | Coming soon | Coming soon |
-| 20B | **9/12** · **35.2** tok/s | **9/12** · **13.2** tok/s | Coming soon |
+| 14B | **11/12** · **54.8** tok/s · TTFT **693** ms | **10/12** · **66.2** tok/s | Coming soon |
+| 20B | **9/12** · **39.0** tok/s · TTFT **552** ms | **9/12** · **13.2** tok/s | Coming soon |
 
-Ollama tok/s is the mean of 12 `decode_tok_s` in `plate.json` (3B median **184.5**, 20B median **11.6**). 20B V2 **35.2** is not ignore-EOS **40**. Table: [`docs/img/hard-v2-ollama.png`](img/hard-v2-ollama.png). Evidence: [`docs/runs/hard-decodev2-3b/`](runs/hard-decodev2-3b/),
+Ollama tok/s is the mean of 12 `decode_tok_s` in `plate.json` (3B median **184.5**, 14B median **62.0**, 20B median **11.6**). 14B V2 **54.8** sits under Ollama **66.2**. 20B V2 **39.0** (packed NF4 rows; item-1 TTFT **434 ms**) is not ignore-EOS **40**. The old 35.2 / 294 s plate was dense embed at the cap. Table: [`docs/img/hard-v2-ollama.png`](img/hard-v2-ollama.png). Evidence: [`docs/runs/hard-decodev2-3b/`](runs/hard-decodev2-3b/),
 [`docs/runs/hard-decodev2-14b/`](runs/hard-decodev2-14b/),
 [`docs/runs/hard-decodev2-20b/`](runs/hard-decodev2-20b/),
 [`docs/runs/ollama-hard-3b/`](runs/ollama-hard-3b/),
+[`docs/runs/ollama-hard-14b/`](runs/ollama-hard-14b/),
 [`docs/runs/ollama-hard-20b/`](runs/ollama-hard-20b/).
 
 ### Coming soon
 
-- Ollama 14B hard-12
 - llama.cpp hard-12 (3B / 14B / 20B)
 - 3B Nsight utilization 70–85%
 

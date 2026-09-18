@@ -11,6 +11,7 @@ import torch.nn.functional as F
 
 from gpu.nf4.plan import LIVE_MAX_N
 
+from .embed import gather_embed
 from .linear import DeviceWeights, nf4_linear
 from .ops import rms, split_qkv, swiglu
 from .plan import ArchSpec
@@ -114,7 +115,7 @@ def forward_prefill(
     if seq > state.spec.max_seq:
         raise ValueError(f"prefill {start}..{seq} exceeds max_seq={state.spec.max_seq}")
     spec = state.spec
-    x = weights.embed.index_select(0, ids)
+    x = gather_embed(weights.embed, ids, dtype=state.arena.x.dtype)
     cos = state.cos[start:seq]
     sin = state.sin[start:seq]
     mask = _causal_mask(start, n, seq, state.device)

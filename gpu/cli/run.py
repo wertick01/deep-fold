@@ -463,18 +463,29 @@ def _open_loop(
         from gpu.decodev2.session import pick_executor
 
         chosen, why = pick_executor(
-            executor, report, getattr(loaded, "deepfold_plan", None)
+            executor,
+            report,
+            getattr(loaded, "deepfold_plan", None),
+            max_seq=int(getattr(args, "max_seq", 2048) or 2048),
+            vram_mib=int(vram_mib) if vram_mib else None,
+            config=getattr(loaded, "config", None),
         )
         if executor == "decodev2" and why is not None:
             raise RuntimeError(why)
     if chosen == "decodev2":
         from gpu.decodev2.session import DecodeV2Loop
 
-        loop = DecodeV2Loop.from_model(loaded, max_seq=args.max_seq)
+        bound = DecodeV2Loop.bind(loaded, max_seq=args.max_seq)
+        loaded = None
+        # gc only; empty_cache at the 12 GB cap pages the working set out.
+        loop = DecodeV2Loop.finish(bound, reclaim=True)
         how = "auto" if executor == "auto" else "flag"
+        emb = loop.weights.embed
+        embed_mib = emb.nbytes / MIB
         _err(
             f"executor=decodev2 ({how}) family={loop.plan.family} "
-            f"prefill_chunk={loop.prefill_chunk}"
+            f"prefill_chunk={loop.prefill_chunk} "
+            f"embed={type(emb).__name__} {embed_mib:.0f} MiB"
         )
     else:
         loop = TokenLoop(loaded, max_seq=args.max_seq)

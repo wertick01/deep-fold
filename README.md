@@ -145,7 +145,7 @@ These are repo measurements, not an outside replication. The evidence column say
 |---|---:|---:|---:|---|
 | Qwen2.5-3B, BF16 — historical pair | 5,886 | 52 | 23.15 | [CSV](docs/runs/qwen25-3b/summary.csv) |
 | Qwen2.5-3B, NF4 TokenLoop — historical pair | 1,563 | 212 | 17.00 | [CSV](docs/runs/qwen25-3b/summary.csv) |
-| Qwen2.5-3B, NF4 Decode V2 | packed + dense embed | **86** | **197** host / **199** device | [lab](docs/decode-v2-lab.md) |
+| Qwen2.5-3B, NF4 Decode V2 | packed NF4 rows | **86** | **197** host / **199** device | [lab](docs/decode-v2-lab.md) |
 | Qwen2.5-14B, NF4 TokenLoop | 7,483 | 759 | 6.56 | [CSV](docs/runs/qwen25-14b/summary.csv) |
 | Qwen2.5-14B, NF4 Decode V2 | 7,483 packed | **322** | **57.5** | [lab](docs/decode-v2-lab.md) |
 | InternLM2.5-20B, NF4 TokenLoop | 10,062 | 605 | 5.01 | [CSV](docs/runs/internlm20b/summary.csv) |
@@ -240,7 +240,7 @@ this Windows box, not an isolated kernel bake-off.
 
 *Figure 2. Committed 14B comparison. Dedicated GPU use and PyTorch allocator counters are not the same thing. The figure’s “working set” / “shared” labels need that split.*
 
-**20B.** BF16 load was recorded. Generation failed: the model’s remote generate code did not match the installed Transformers. No BF16 tokens/s. That is an environment miss, not proof a BF16 baseline is impossible. TokenLoop NF4: **5.01 tok/s**, **605 ms**. Decode V2 exclusive ignore-EOS: **40 tok/s** host, **220 ms** prefill (`max_seq=2048`). Do not quote the 25.6 / 20.7 device-windows (second 64-token pass at VRAM cap) or overlapping 20B jobs. Hard-12 on the same weights is **9/12** at **35.2 tok/s**, not the 40 plateau.
+**20B.** BF16 load was recorded. Generation failed: the model’s remote generate code did not match the installed Transformers. No BF16 tokens/s. That is an environment miss, not proof a BF16 baseline is impossible. TokenLoop NF4: **5.01 tok/s**, **605 ms**. Decode V2 exclusive ignore-EOS: **40 tok/s** host, **220 ms** prefill (`max_seq=2048`). Do not quote the 25.6 / 20.7 device-windows (second 64-token pass at VRAM cap) or overlapping 20B jobs. Hard-12 on the same weights is **9/12** at **39.0 tok/s** (item-1 TTFT **434 ms**), not the ignore-EOS 40 plateau.
 
 **32B overflow.** All three smoke replies passed. Serial copy of the host tail calibrates at about **277 ms/token** (~**3.6 tokens/s** if the wall were copy-only). Measured generation is about **432 ms/token**. The copy figure is a transfer reference, not model throughput. No BF16 32B baseline. TokenLoop 32B NF4 hard-12 is **12/12** (mean **2.12 tok/s**). Ollama 32B on the same fixture is **11/12** (mean **3.1 tok/s**, miss `gsm8k-stickers`); Ollama 3B is **7/12** at **197.2** tok/s.
 
@@ -255,7 +255,7 @@ timer. Not enough to rank them.
 
 ![Decode V2 resident 3B/14B/20B on one RTX 3080](docs/img/decodev2-3080.png)
 
-*Figure 4. Decode V2 GEMV graph + MMA prefill-32. Headline V2 (`max_seq=2048`): 3B **197**, 14B **57.5**, 20B **40**. Exclusive Q4_K long (ctx 2048): 14B llama.cpp **69.9** / Ollama **58.9**; 20B Ollama **11.53** / llama.cpp **11.87**. V2 still attends the full axis. Overlapping 14B 5.95 and 20B 25.6 / 20.7 are not decode. Hard-12 panel now includes Ollama 3B **197.2** / 20B **13.2** tok/s. Redraw: `python -m gpu.lab.decodev2_plate --redraw`.*
+*Figure 4. Decode V2 GEMV graph + MMA prefill-32. Headline V2 (`max_seq=2048`): 3B **197**, 14B **57.5**, 20B **40**. Exclusive Q4_K long (ctx 2048): 14B llama.cpp **69.9** / Ollama **58.9**; 20B Ollama **11.53** / llama.cpp **11.87**. Hard-12 panel is tok/s vs model size (3B / 14B / 20B), not caption cards. V2 still attends the full axis. Overlapping 14B 5.95 and 20B 25.6 / 20.7 are not decode. Redraw: `python -m gpu.lab.decodev2_plate --redraw`.*
 
 ### 3.3 Decode V2 (2026-09-18, `max_seq=2048`)
 
@@ -274,16 +274,16 @@ Hard-12 (independent turns, 256 new tokens, same fixture as Ollama):
 | Model | Decode V2 | Ollama Q4_K | llama.cpp Q4_K |
 |---|---|---|---|
 | Qwen2.5-3B | **8/12** · **190.9** tok/s | **7/12** · **197.2** tok/s | Coming soon |
-| Qwen2.5-14B | **11/12** · **54.8** tok/s | Coming soon | Coming soon |
-| InternLM2.5-20B | **9/12** · **35.2** tok/s | **9/12** · **13.2** tok/s | Coming soon |
+| Qwen2.5-14B | **11/12** · **54.8** tok/s | **10/12** · **66.2** tok/s | Coming soon |
+| InternLM2.5-20B | **9/12** · **39.0** tok/s | **9/12** · **13.2** tok/s | Coming soon |
 
-Ollama tok/s is the mean of the 12 `decode_tok_s` already in `plate.json`. 3B mean **197.2** vs median **184.5** (`logic-yesno` is 2 tokens). 20B hard-12 **35.2** is not the ignore-EOS **40**. Evidence: [3B](docs/runs/hard-decodev2-3b/), [14B](docs/runs/hard-decodev2-14b/), [20B](docs/runs/hard-decodev2-20b/), [Ollama 3B](docs/runs/ollama-hard-3b/), [Ollama 20B](docs/runs/ollama-hard-20b/). Table: [`docs/img/hard-v2-ollama.png`](docs/img/hard-v2-ollama.png).
+Ollama tok/s is the mean of the 12 `decode_tok_s` already in `plate.json`. 3B mean **197.2** vs median **184.5** (`logic-yesno` is 2 tokens). 14B mean **66.2** vs median **62.0**. 20B hard-12 **39.0** is not the ignore-EOS **40**. Evidence: [3B](docs/runs/hard-decodev2-3b/), [14B](docs/runs/hard-decodev2-14b/), [20B](docs/runs/hard-decodev2-20b/), [Ollama 3B](docs/runs/ollama-hard-3b/), [Ollama 14B](docs/runs/ollama-hard-14b/), [Ollama 20B](docs/runs/ollama-hard-20b/). Table: [`docs/img/hard-v2-ollama.png`](docs/img/hard-v2-ollama.png).
 
 ![Hard-12 Decode V2 vs Ollama: correct answers and mean tok/s](docs/img/hard-v2-ollama.png)
 
-*Figure 5. Same 12-item fixture. Decode V2 vs Ollama quality and mean decode tok/s. 14B Ollama and llama.cpp hard-12 are Coming soon. 3B V2 **190.9** is not faster than Ollama **197.2**. Redraw: `python -m gpu.lab.hard_v2_plate --redraw`.*
+*Figure 5. Same 12-item fixture. Decode V2 vs Ollama quality and mean decode tok/s. 14B V2 **54.8** sits under Ollama **66.2**. llama.cpp hard-12 is Coming soon. 3B V2 **190.9** is not faster than Ollama **197.2**. Redraw: `python -m gpu.lab.hard_v2_plate --redraw`.*
 
-**Coming soon:** Ollama 14B hard-12; llama.cpp hard-12 (3B / 14B / 20B); 3B Nsight CUDA 70–85%. **In progress:** CLI TTY chrome / agent layout.
+**Coming soon:** llama.cpp hard-12 (3B / 14B / 20B); 3B Nsight CUDA 70–85%. **In progress:** CLI TTY chrome / agent layout.
 
 The 2026-09-14 paired 3B BF16 vs TokenLoop NF4 (48 ms / 24.8 vs 92 ms / 28.7) is a different stack. bitsandbytes NF4 smoke: **22.2 tok/s / 60 ms**. AWQ / GPTQ / ExLlamaV2 / vLLM stay SKIP.
 
@@ -322,8 +322,8 @@ There is a corpus NLL adapter. No published WikiText PPL. A local GSM8K slice in
 - Overflow depends on host RAM, pinning, PCIe, and OS sync. Placement and auto-eligibility are conservative heuristics.
 - VQ 2-bit is explicit experimental tooling; the 3B chat canary failed. `--codec auto` picks NF4 or NF4 overflow, never VQ.
 - Newer 3B and competitor claims still need full public artifacts. Broad quality and “faster than 4-bit engines” are not established. Matched 32B longs that share Ollama’s token timer (Ollama **2.54**, llama.cpp auto-fit **2.54**, H2 **2.53**) are tied, not a win. 3B Decode V2 **197** (`max_seq=2048`) and Q4_K **~187** (ctx 2048) are the same capacity class; V2 still attends the full buffer. TokenLoop MMA **35.2** is the old resident path. 14B V2 **57.5** is not faster than Ollama **58.9** or llama.cpp **69.9**.
-- Decode V2 (`gpu/decodev2`) is the CLI default on resident NF4 (`--executor auto`). Overflow / VQ / 32B stay TokenLoop. Lab log: [`docs/decode-v2-lab.md`](docs/decode-v2-lab.md). Do not quote overlapping 20B jobs or the 25.6 / 20.7 device-windows as 20B decode. Hard-12 20B **35.2** is not ignore-EOS **40**.
-- **Coming soon:** Ollama 14B hard-12; llama.cpp hard-12 (3B / 14B / 20B); 3B Nsight CUDA 70–85%. **In progress:** CLI TTY chrome / agent layout.
+- Decode V2 (`gpu/decodev2`) is the CLI default on resident NF4 (`--executor auto`). Overflow / VQ / 32B stay TokenLoop. Lab log: [`docs/decode-v2-lab.md`](docs/decode-v2-lab.md). Do not quote overlapping 20B jobs or the 25.6 / 20.7 device-windows as 20B decode. Hard-12 20B **39.0** is not ignore-EOS **40**.
+- **Coming soon:** llama.cpp hard-12 (3B / 14B / 20B); 3B Nsight CUDA 70–85%. **In progress:** CLI TTY chrome / agent layout.
 - A CPU/GPU layer split was tried on `exp/cpu-hybrid-overflow` and missed Ollama (**2.091** vs **2.54**). Default generate is still CopyRing **2.49**. Details stay on that branch.
 
 ## 5. Installation

@@ -1,0 +1,9 @@
+Ollama 0.34.1 qwen2.5:14b independent hard-12 (same fixture as TokenLoop / V2).
+10/12. Mean decode 66.2 tok/s (median 62.0). Misses: gsm8k-machines 3 vs 108,
+gsm8k-stickers 4 vs 48. logic-yesno is 2 tokens at 108.8 and pulls the mean up.
+Do not quote item-1 client_ttft_ms 11.5 s (library load). Decode V2 on the same
+Instruct is 11/12 at 54.8 (miss gsm8k-train). Do not say faster than Ollama.
+Not the ignore-EOS long 58.9.
+
+Live: C:\dev\models\runs\ollama-hard-14b-20260918
+Command: python -m gpu.lab.ollama_hard --model qwen2.5:14b

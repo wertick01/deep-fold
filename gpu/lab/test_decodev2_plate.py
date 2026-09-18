@@ -60,6 +60,7 @@ def gate_tokens() -> None:
         OLLAMA_20B_LONG,
         OLLAMA_3B,
         OLLAMA_3B_HARD_TOK,
+        OLLAMA_14B_HARD_TOK,
         OLLAMA_20B_HARD_TOK,
         TL_14B,
         TL_20B,
@@ -67,6 +68,7 @@ def gate_tokens() -> None:
         TL_3B_LONG,
         V2_14B_HOST,
         V2_14B_HOST_512,
+        V2_14B_HARD_TOK,
         V2_20B_DEVICE_SECOND,
         V2_20B_HOST,
         V2_20B_HOST_512,
@@ -91,10 +93,12 @@ def gate_tokens() -> None:
     check("Ollama 20B long is 11.53", OLLAMA_20B_LONG == 11.53, str(OLLAMA_20B_LONG))
     check("llama.cpp 20B long is 11.87", LLAMA_20B_LONG == 11.87, str(LLAMA_20B_LONG))
     check("14B V2 is not faster than exclusive Ollama", V2_14B_HOST < OLLAMA_14B_LONG, "")
+    check("14B V2 hard sits under Ollama hard", V2_14B_HARD_TOK < OLLAMA_14B_HARD_TOK, "")
     check("14B V2 is not faster than exclusive llama.cpp", V2_14B_HOST < LLAMA_14B_LONG, "")
     check("20B second-pass 25.6 is labeled, not the bar", V2_20B_DEVICE_SECOND == 25.6, "")
     check("does not treat 25.6 as faster than 40", V2_20B_DEVICE_SECOND < V2_20B_HOST, "")
     check("Ollama 3B hard tok/s is 197.2", OLLAMA_3B_HARD_TOK == 197.2, str(OLLAMA_3B_HARD_TOK))
+    check("Ollama 14B hard tok/s is 66.2", OLLAMA_14B_HARD_TOK == 66.2, str(OLLAMA_14B_HARD_TOK))
     check("Ollama 20B hard tok/s is 13.2", OLLAMA_20B_HARD_TOK == 13.2, str(OLLAMA_20B_HARD_TOK))
 
 
@@ -104,7 +108,9 @@ def gate_honesty() -> None:
     figure = decodev2_plate()
     text = _plate_text(figure)
     import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
 
+    series = [artist.get_label() for artist in figure.findobj(Line2D) if artist.get_label() in {"Decode V2", "Ollama Q4_K", "TokenLoop MMA"}]
     plt.close(figure)
     check("names Decode V2", "Decode V2" in text, "")
     check("quotes 197 and 57.5 and 40", "197" in text and "57.5" in text and "40" in text, "")
@@ -126,12 +132,19 @@ def gate_honesty() -> None:
     check("hard-12 14B is 11/12", "11/12" in text, "")
     check("hard-12 20B is 9/12", "9/12" in text, "")
     check("quotes Ollama hard 197.2 and 13.2", "197.2" in text and "13.2" in text, "")
-    check("20B hard mean is 35.2", "35.2" in text, "")
-    check("Ollama 14B hard is Coming soon", "Coming soon" in text and "Ollama 14B hard-12" in text, "")
+    check("quotes Ollama 14B hard 66.2", "66.2" in text, "")
+    check("20B hard mean is 39.0", "39.0" in text, "")
+    check("Ollama 14B hard is published", "10/12" in text and "66.2" in text, "")
+    check("hard-12 chart is tok/s vs model size", "tok/s vs model size" in text, "")
+    check("hard-12 axis is model size", "model size" in text.lower(), "")
+    check("hard-12 chart includes 32B CopyRing", "32B" in text and "2.12" in text and "3.1" in text, "")
+    check("32B hard is not Decode V2", "not Decode V2" in text, "")
+    check("Ollama 14B hard-12 is not Coming soon", "Ollama 14B hard-12" not in text, "")
     check("llama.cpp hard-12 is Coming soon", "llama.cpp hard-12" in text and "Coming soon" in text, "")
     check("Nsight 70–85 is Coming soon", "Nsight" in text and "70–85" in text, "")
     check("CLI chrome is in progress", "in progress" in text.lower(), "")
     check("V2 still attends the full buffer", "full buffer" in text or "full axis" in text, "")
+    check("hard-12 chart has V2, Ollama, TokenLoop", set(series) == {"Decode V2", "Ollama Q4_K", "TokenLoop MMA"}, str(series))
 
 
 def main() -> int:

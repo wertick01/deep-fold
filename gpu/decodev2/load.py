@@ -33,7 +33,7 @@ def load_chr(
     trust_remote_code: bool = False,
     dtype: torch.dtype = torch.bfloat16,
 ) -> LoadedDecode:
-    """``load_model`` + alias packed linears. Materializes a dense embed table."""
+    """``load_model`` + alias packed linears. Embed stays NF4 rows."""
     model, report = load_model(
         model_dir,
         chr_path,

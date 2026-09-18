@@ -13,9 +13,9 @@ exclusive Q4_K long Ollama **58.9** / llama.cpp **69.9**. 20B exclusive **40**
 host vs Q4_K **11.53 / 11.87** (do not quote 25.6 or 20.7). Do not say faster
 than Ollama. Overlapping Ollama 14B 5.95 is not a number. Hard-12: 3B V2
 **8/12** @ **190.9** vs Ollama **7/12** @ **197.2**; 14B V2 **11/12** @ **54.8**
-(Ollama Coming soon); 20B both **9/12**, V2 **35.2** vs Ollama **13.2** (not the
-40 plateau). **Coming soon:** Ollama 14B hard-12, llama.cpp hard-12, 3B Nsight
-70–85%. Figures: [`decodev2-3080.png`](img/decodev2-3080.png),
+vs Ollama **10/12** @ **66.2** (median **62.0**); 20B both **9/12**, V2 **39.0**
+vs Ollama **13.2** (not the 40 plateau). **Coming soon:** llama.cpp hard-12, 3B
+Nsight 70–85%. Figures: [`decodev2-3080.png`](img/decodev2-3080.png),
 [`hard-v2-ollama.png`](img/hard-v2-ollama.png).
 
 The ~50 GB/s GEMV wall was a `__constant__` NF4 LUT: every lane hits a
@@ -283,6 +283,8 @@ acceptance gate. Notes and VRAM traps: [lab log §6](decode-v2-lab.md#6-next-uti
 | `graph.py` / `runner.py` / `test_graph.py` | full greedy CUDA graph |
 | `prefill.py` / `test_prefill.py` | MMA chunked prompt (not in the decode graph) |
 | `session.py` / `test_session.py` | CLI `DecodeV2Loop`; `--executor auto` picks it on resident NF4 |
+| `embed.py` / `test_embed.py` | packed NF4 embed rows; no dense vocab table |
+| `budget.py` / `test_budget.py` | V2 VRAM estimate before `auto` (KV + arena + graph + WDDM) |
 | `load.py` / `run_3b.py` | Qwen2.5-3B `.chr` ids-gate + ignore-EOS |
 | `bench_step.py` | `MEDIUM_LLAMA` MMA vs GEMV, eager + graph |
 | `gpu/nf4/nf4_gemv.cu` / `test_gemv.py` / `bench_gemv.py` | CUDA-core N=1 candidate |
@@ -295,6 +297,8 @@ python gpu/decodev2/test_step.py
 python gpu/decodev2/test_graph.py
 python gpu/decodev2/test_prefill.py
 python gpu/decodev2/test_session.py
+python gpu/decodev2/test_embed.py
+python gpu/decodev2/test_budget.py
 python gpu/nf4/test_gemv.py
 python gpu/decodev2/run_3b.py
 ```
@@ -302,9 +306,19 @@ python gpu/decodev2/run_3b.py
 ## 10. Qwen2.5-3B (first checkpoint)
 
 `python gpu/decodev2/run_3b.py`. Loads `qwen25-3b.nf4.chr` via `load_model`,
-aliases packed linears, materializes a dense embed table (~594 MiB) so gather
-is graph-safe. RoPE tables come from the same `rotary_emb` TokenLoop uses.
-`tied_embed` is allowed; `lm_head` is still the NF4 linear (shared packed).
+aliases packed linears, and keeps embed as NF4 rows (`PackedEmbed` /
+`dequant_nf4_rows` into the arena). There is no dense `[vocab, hidden]` table
+(~594 MiB on 3B, ~1485 MiB on 14B, ~1084 MiB on 20B). `--executor auto` estimates
+packed + KV(`max_seq`) + arena + graph + WDDM reserve and falls back to
+TokenLoop when that misses the card. Lab timers stay split: `load_s` is CHR
+load, `warmup_ms` is eager probe + graph capture, message `prefill_ms` is that
+turn's first token, `decode_tok_s` is steps after first. Dense-embed 20B
+hard-12 item-1 TTFT **294 s** was the 12 GB cap (vocab table plus HF still
+live while KV allocated). Packed NF4 rows, `bind` / drop HF / `finish(reclaim)`
+without `empty_cache`: hard-12 **9/12** @ **39.0** tok/s, item-1 TTFT **434 ms**.
+Do not `empty_cache` at that cap — WDDM unmapped the working set. RoPE tables come from
+the same `rotary_emb` TokenLoop uses. `tied_embed` is allowed; `lm_head` is
+still the NF4 linear (shared packed).
 
 Live 2026-09-17, `max_seq=512`, ignore-EOS 64, prompt_len=48:
 

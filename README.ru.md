@@ -334,7 +334,7 @@ Q4_K: [`docs/runs/ollama-h2-14b/`](docs/runs/ollama-h2-14b/),
 выдаёт 5,01 токена в секунду и проходит проверку. Decode V2 exclusive на тех же
 весах: **40 ток/с**, префилл **220 мс** (`max_seq=2048`). Q4_K long, ctx 2048: Ollama **11,53**,
 llama.cpp **11,87**. Не цитировать device-window 25,6 / 20,7. Hard-12 на тех же
-весах — **9/12** при **35,2 ток/с**, это не плато 40.
+весах — **9/12** при **39,0 ток/с**, это не плато 40.
 
 Позже на тех же весах NF4 прогнали трудный eval из 12 пунктов, только NF4:
 **8/12** (промахи: train, machines, sheep, bat-and-ball). Среднее время до
@@ -407,14 +407,15 @@ H2 **2,49** шагов / **2,53** сгенерированных токенов;
 *Рисунок. Decode V2 GEMV + префилл MMA-32. V2 (`max_seq=2048`): 3B **197**, 14B **57,5**, 20B **40**.
 Exclusive Q4_K long (ctx 2048): 14B llama.cpp **69,9** / Ollama **58,9**; 20B Ollama **11,53** / llama.cpp **11,87**.
 V2 смотрит на весь буфер. Пересекающийся 14B 5,95 и 20B 25,6 / 20,7 — не decode.
-Hard-12: 3B V2 **8/12 · 190,9** / Ollama **7/12 · 197,2**; 14B V2 **11/12 · 54,8**; 20B оба **9/12**, V2 **35,2** / Ollama **13,2**.
-**Скоро будет выполнено:** Ollama 14B hard-12, llama.cpp hard-12, Nsight 70–85%.
+Hard-12 на этой пластине — график ток/с от размера (3B / 14B / 20B), не карточки.
+Hard-12: 3B V2 **8/12 · 190,9** / Ollama **7/12 · 197,2**; 14B V2 **11/12 · 54,8** / Ollama **10/12 · 66,2**; 20B оба **9/12**, V2 **39,0** / Ollama **13,2**.
+**Скоро будет выполнено:** llama.cpp hard-12, Nsight 70–85%.
 **Дорабатываются:** TTY / агентный layout.
 Перерисовать: `python -m gpu.lab.decodev2_plate --redraw`.*
 
 ![Hard-12 Decode V2 против Ollama: правильность и средние ток/с](docs/img/hard-v2-ollama.png)
 
-*Рисунок. Та же 12-пунктовая фикстура. 3B V2 **190,9** не быстрее Ollama **197,2**. 14B Ollama и llama.cpp hard-12 — **скоро будет выполнено**.
+*Рисунок. Та же 12-пунктовая фикстура. 3B V2 **190,9** не быстрее Ollama **197,2**. 14B V2 **54,8** ниже Ollama **66,2**. llama.cpp hard-12 — **скоро будет выполнено**.
 Перерисовать: `python -m gpu.lab.hard_v2_plate --redraw`.*
 
 <table>
@@ -484,7 +485,7 @@ H2 **2,49** шагов / **2,53** сгенерированных токенов 
 разных потолка (PCIe 6885 МиБ/ток против CPU-хвоста), не победа ядра.
 Слойный гибрид пробовали на `exp/cpu-hybrid-overflow` (long **2,091**);
 Ollama не обогнали, в `main` этот код не сливали. На 3B Q4_K ~187 ток/с (ctx 2048), TokenLoop MMA 35,2 / 35,8, Decode V2 **197**
-(`max_seq=2048`). V2 смотрит на весь буфер. Не сливать таймеры в «обогнали llama.cpp». **Скоро будет выполнено:** Ollama 14B hard-12, llama.cpp hard-12, Nsight 70–85%. Пластины:
+(`max_seq=2048`). V2 смотрит на весь буфер. Не сливать таймеры в «обогнали llama.cpp». **Скоро будет выполнено:** llama.cpp hard-12, Nsight 70–85%. Пластины:
 [`docs/img/compare-3080.png`](docs/img/compare-3080.png),
 [`docs/img/decodev2-3080.png`](docs/img/decodev2-3080.png). Протокол:
 [`docs/eval-32b.md`](docs/eval-32b.md),
@@ -781,7 +782,7 @@ python -m gpu.lab.h2_trace --no-timing
 | Агентный режим (инструменты и session KV в CLI) — **дорабатываются** | [docs/spec/agent.md](docs/spec/agent.md) |
 | Веб-поиск агента (бесплатный Tavily, без карты) | [docs/web-search.ru.md](docs/web-search.ru.md) |
 | Трудный eval (вопросы, ответы, время 3B/14B) | [docs/eval-hard-qwen25.md](docs/eval-hard-qwen25.md) |
-| Дым 32B; Ollama / llama.cpp auto-fit 2,54; H2 2,49 шагов / 2,53 eval; `-ngl 99` = 1,52; Decode V2 3B = 197 (`max_seq=2048`); 14B Q4_K = 58,9 / 69,9; **скоро:** Ollama 14B hard-12, llama.cpp hard-12, Nsight | [docs/eval-32b.md](docs/eval-32b.md), [docs/compare-3080.md](docs/compare-3080.md), [docs/decode-v2-lab.md](docs/decode-v2-lab.md) |
+| Дым 32B; Ollama / llama.cpp auto-fit 2,54; H2 2,49 шагов / 2,53 eval; `-ngl 99` = 1,52; Decode V2 3B = 197 (`max_seq=2048`); 14B Q4_K = 58,9 / 69,9; 14B hard-12 Ollama 10/12 · 66,2; **скоро:** llama.cpp hard-12, Nsight | [docs/eval-32b.md](docs/eval-32b.md), [docs/compare-3080.md](docs/compare-3080.md), [docs/decode-v2-lab.md](docs/decode-v2-lab.md) |
 | Кольцо overflow H2 | [docs/plan-h2-ring.md](docs/plan-h2-ring.md) |
 | Счётчики Nsight GEMM (не tok/s) | [docs/runs/ncu/](docs/runs/ncu/) |
 | Матрица 4-битных конкурентов (3B SKIP кроме bnb; 32B Ollama/llama.cpp сняты) | [docs/runs/competitor-qwen25-3b/](docs/runs/competitor-qwen25-3b/), [docs/runs/compare-3080/](docs/runs/compare-3080/) |

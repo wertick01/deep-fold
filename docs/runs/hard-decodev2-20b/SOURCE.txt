@@ -1,6 +1,5 @@
-Exclusive Decode V2 hard-12 internlm20b, same protocol as Ollama (12 items, 256 new, max_seq=2048).
-Harness only: nvidia-smi poll off (--interval 0), HF module dropped after DecodeV2Loop.from_model.
-Accuracy 9/12 (75%), same misses as the smi-poll plate: money, machines, batball.
-Mean decode 35.2 tok/s (was 29.8 with smi poll). Steady items ~34–38. Item 1 still TTFT 294 s / 20.3 tok/s.
-from_model+warmup still ~10 min at the 12 GB cap. Do not quote mean TTFT 26162 or peak_smi 698 (no poll).
-Not the ignore-EOS 64 plate (41 tok/s).
+Exclusive Decode V2 hard-12 internlm20b, same protocol as Ollama (12 items, 256 new, max_seq=2048, --interval 0).
+Packed NF4 embed rows (no dense vocab table). bind / drop HF / finish(reclaim) does gc.collect only — empty_cache at the 12 GB cap paged the working set to WDDM.
+Accuracy 9/12 (75%), same misses: money, machines, batball.
+Mean decode 39.0 tok/s (summary 38.96). Item 1 TTFT 434 ms / 39.3 tok/s. Items 2–12 38.2–39.7. Mean TTFT 552 ms. warmup_ms=585, graph=decodev2, peak_smi=11366.
+The previous docs plate (35.2 tok/s, item-1 TTFT 294 s) was dense embed + HF still live at the cap. Do not quote that as current decode. Not the ignore-EOS 64 plate (40 tok/s).

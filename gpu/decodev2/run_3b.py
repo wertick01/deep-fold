@@ -20,6 +20,7 @@ _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
+from gpu.decodev2.embed import PackedEmbed  # noqa: E402
 from gpu.decodev2.graph import capture_greedy  # noqa: E402
 from gpu.decodev2.linear import set_linear_backend  # noqa: E402
 from gpu.decodev2.load import load_chr  # noqa: E402
@@ -225,12 +226,14 @@ def main(argv: list[str] | None = None) -> int:
         trust_remote_code=lab.trust_remote_code,
     )
     print(f"loaded {loaded.report}", flush=True)
+    emb = loaded.weights.embed
+    embed_kind = "nf4-rows" if isinstance(emb, PackedEmbed) else "dense"
     print(
         f"spec family={loaded.spec.family} layers={loaded.spec.n_layers} "
         f"hidden={loaded.spec.hidden} q/kv/hd={loaded.spec.n_q}/"
         f"{loaded.spec.n_kv}/{loaded.spec.head_dim} vocab={loaded.spec.vocab} "
-        f"embed={tuple(loaded.weights.embed.shape)} "
-        f"{loaded.weights.embed.nbytes / (1024 ** 2):.0f} MiB "
+        f"embed={embed_kind} {tuple(emb.shape)} "
+        f"{emb.nbytes / (1024 ** 2):.0f} MiB "
         f"prefill_chunk={prefill_chunk_width(loaded.state)}",
         flush=True,
     )

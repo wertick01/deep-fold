@@ -1,0 +1,8 @@
+schema deepfold.ollama_hard.v1
+model qwen2.5:14b
+n_items 12
+n_correct 10
+n_scored 12
+accuracy 0.8333333333333334
+mean_decode_tok_s 66.2
+median_decode_tok_s 62.0
